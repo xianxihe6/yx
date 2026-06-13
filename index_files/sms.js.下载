@@ -1,0 +1,912 @@
+// ==========================================
+// 短信 APP (SMS) 专属逻辑 (sms.js) - 完整版
+// ==========================================
+
+let currentSmsTargetId = null;
+let currentSmsTargetName = '';
+let currentSmsTargetAvatar = '';
+
+// --- 面板开关逻辑 ---
+function openSmsApp() {
+    document.getElementById('smsAppPanel').style.display = 'flex';
+    document.getElementById('smsListPage').classList.remove('slide-out');
+    document.getElementById('smsChatPage').classList.add('hidden');
+    document.getElementById('smsSettingsPage').style.display = 'none';
+    
+    renderSmsSidebar();
+    renderSmsList();
+}
+
+function closeSmsApp() {
+    document.getElementById('smsAppPanel').style.display = 'none';
+}
+
+// --- QQ 侧边栏逻辑 ---
+function openSmsSidebar() { document.getElementById('smsSidebarOverlay').classList.add('show'); }
+function closeSmsSidebar() { document.getElementById('smsSidebarOverlay').classList.remove('show'); }
+
+function renderSmsSidebar() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    const accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const listEl = document.getElementById('smsSidebarAccountList');
+    
+    const currentAcc = accounts.find(a => a.id === currentLoginId);
+    if (currentAcc) {
+        document.getElementById('smsCurrentSidebarName').innerText = currentAcc.netName || '未命名';
+        document.getElementById('smsCurrentSidebarAvatar').style.backgroundImage = `url('${currentAcc.avatarUrl || ''}')`;
+        document.getElementById('smsMainAvatar').style.backgroundImage = `url('${currentAcc.avatarUrl || ''}')`;
+        document.getElementById('smsMainTitle').innerText = (currentAcc.netName || '未命名') + ' ▾';
+    } else {
+        document.getElementById('smsCurrentSidebarName').innerText = '未登录';
+        document.getElementById('smsMainTitle').innerText = '未登录 ▾';
+    }
+
+    listEl.innerHTML = '<div class="sms-account-title">切换账号</div>';
+    accounts.forEach(acc => {
+        const isActive = acc.id === currentLoginId;
+        const item = document.createElement('div');
+        item.className = `sms-account-item ${isActive ? 'active' : ''}`;
+        item.onclick = () => switchSmsAccount(acc.id);
+        item.innerHTML = `
+            <div class="sms-account-item-avatar" style="background-image: url('${acc.avatarUrl || ''}'); background-color: #ccc;"></div>
+            <div class="sms-account-item-name">${acc.netName || '未命名'}</div>
+            <div class="sms-account-item-check">✓</div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+function switchSmsAccount(accountId) {
+    ChatDB.setItem('current_login_account', accountId);
+    renderSmsSidebar();
+    renderSmsList();
+    setTimeout(closeSmsSidebar, 300);
+}
+
+// --- 提取纯文本用于短信显示 ---
+function extractSmsText(msg) {
+    let text = msg.content || '';
+    if (msg.type === 'image' || text.includes('<img')) return '[图片]';
+    if (msg.type === 'voice') return '[语音]';
+    if (msg.type === 'transfer') return '[转账]';
+    if (msg.type === 'family_card') return '[亲属卡]';
+    if (msg.type === 'forward_record') return '[聊天记录]';
+    if (msg.type === 'system' || msg.type === 'hidden_system') return '[系统消息]';
+    return text.replace(/<[^>]+>/g, '');
+}
+
+// --- 首页短信列表渲染 ---
+function renderSmsList() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    const listEl = document.getElementById('smsMessageList');
+    const keyword = document.getElementById('smsListSearchInput').value.trim().toLowerCase();
+    listEl.innerHTML = '';
+
+    if (!currentLoginId) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 13px; margin-top: 40px;">请先登录</div>';
+        return;
+    }
+
+    let sessions = JSON.parse(ChatDB.getItem(`sms_sessions_${currentLoginId}`) || '[]');
+    if (sessions.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 13px; margin-top: 40px;">暂无短信记录</div>';
+        return;
+    }
+
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+
+    sessions.forEach(targetId => {
+        let targetName = targetId;
+        let targetAvatar = '';
+        let avatarBg = '#ccc';
+        let avatarText = '';
+
+        if (targetId === '10086') { targetName = '10086'; avatarBg = '#007aff'; avatarText = '中'; }
+        else if (targetId === '顺丰速运') { targetName = '顺丰速运'; avatarBg = '#333'; avatarText = '顺'; }
+        else {
+            const entity = allEntities.find(e => e.id === targetId);
+            if (entity) {
+                targetName = entity.netName || entity.name;
+                targetAvatar = entity.avatarUrl || '';
+                avatarText = targetName.charAt(0);
+            }
+        }
+
+        if (keyword && !targetName.toLowerCase().includes(keyword)) return;
+
+        let history = JSON.parse(ChatDB.getItem(`sms_history_${currentLoginId}_${targetId}`) || '[]');
+        let lastMsgText = '';
+        let lastMsgTime = '';
+
+        if (history.length > 0) {
+            const lastMsg = history[history.length - 1];
+            lastMsgText = lastMsg.content || '';
+            
+            const date = new Date(lastMsg.timestamp);
+            const now = new Date();
+            lastMsgTime = date.toDateString() === now.toDateString() 
+                ? `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+                : `${date.getMonth() + 1}/${date.getDate()}`;
+        }
+
+        const item = document.createElement('div');
+        item.className = 'sms-msg-item';
+        item.onclick = () => openSmsChat(targetId, targetName, targetAvatar, avatarBg, avatarText);
+
+        let avatarHtml = targetAvatar 
+            ? `<div class="sms-msg-avatar" style="background-image: url('${targetAvatar}');"></div>`
+            : `<div class="sms-msg-avatar" style="background: ${avatarBg};">${avatarText}</div>`;
+
+        item.innerHTML = `
+            ${avatarHtml}
+            <div class="sms-msg-info">
+                <div class="sms-msg-name-row"><span class="sms-msg-name">${targetName}</span><span class="sms-msg-time">${lastMsgTime}</span></div>
+                <div class="sms-msg-preview-row">
+                    <span class="sms-msg-preview">${lastMsgText}</span>
+                </div>
+            </div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+// --- 新建会话弹窗 ---
+function openSmsNewChatModal() { 
+    document.getElementById('smsNewChatSearchInput').value = '';
+    renderSmsNewChatList();
+    document.getElementById('smsNewChatOverlay').classList.add('show'); 
+}
+
+function closeSmsNewChatModal() { 
+    document.getElementById('smsNewChatOverlay').classList.remove('show'); 
+}
+
+function renderSmsNewChatList() {
+    const listEl = document.getElementById('smsNewChatList');
+    const keyword = document.getElementById('smsNewChatSearchInput').value.trim().toLowerCase();
+    listEl.innerHTML = '';
+
+    const systemContacts = [
+        { id: '10086', name: '10086', bg: '#007aff', text: '中' },
+        { id: '顺丰速运', name: '顺丰速运', bg: '#333', text: '顺' }
+    ];
+
+    systemContacts.forEach(c => {
+        if (keyword && !c.name.toLowerCase().includes(keyword)) return;
+        const item = document.createElement('div');
+        item.className = 'sms-msg-item';
+        // 核心修改：传入 true 表示是新建会话，需要清空记录
+        item.onclick = () => openSmsChat(c.id, c.name, '', c.bg, c.text, true);
+        item.innerHTML = `
+            <div class="sms-msg-avatar" style="background: ${c.bg}; width: 40px; height: 40px; font-size: 16px;">${c.text}</div>
+            <div class="sms-msg-info" style="border: none; padding: 0;"><div class="sms-msg-name">${c.name}</div></div>
+        `;
+        listEl.appendChild(item);
+    });
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    chars.forEach(c => {
+        const name = c.netName || c.name;
+        if (keyword && !name.toLowerCase().includes(keyword)) return;
+        const item = document.createElement('div');
+        item.className = 'sms-msg-item';
+        // 核心修改：传入 true 表示是新建会话，需要清空记录
+        item.onclick = () => openSmsChat(c.id, name, c.avatarUrl, '#111', name.charAt(0), true);
+        
+        let avatarHtml = c.avatarUrl 
+            ? `<div class="sms-msg-avatar" style="background-image: url('${c.avatarUrl}'); width: 40px; height: 40px;"></div>`
+            : `<div class="sms-msg-avatar" style="background: #111; width: 40px; height: 40px; font-size: 16px;">${name.charAt(0)}</div>`;
+
+        item.innerHTML = `
+            ${avatarHtml}
+            <div class="sms-msg-info" style="border: none; padding: 0;"><div class="sms-msg-name">${name}</div></div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+// --- 聊天页逻辑 ---
+function openSmsChat(targetId, targetName, targetAvatar, avatarBg = '#111', avatarText = '', isNewChat = false) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    
+    // 核心修改：如果是新建会话，清空该角色的短信记录
+    if (isNewChat && currentLoginId) {
+        ChatDB.setItem(`sms_history_${currentLoginId}_${targetId}`, JSON.stringify([]));
+    }
+
+    currentSmsTargetId = targetId;
+    currentSmsTargetName = targetName;
+    currentSmsTargetAvatar = targetAvatar;
+
+    const chatTitle = document.getElementById('smsChatTitle');
+    const chatAvatar = document.getElementById('smsChatAvatar');
+    
+    chatTitle.innerText = targetName;
+    if (targetAvatar) {
+        chatAvatar.style.backgroundImage = `url('${targetAvatar}')`;
+        chatAvatar.style.backgroundColor = 'transparent';
+        chatAvatar.innerText = '';
+    } else {
+        chatAvatar.style.backgroundImage = 'none';
+        chatAvatar.style.backgroundColor = avatarBg;
+        chatAvatar.style.color = '#fff';
+        chatAvatar.style.display = 'flex';
+        chatAvatar.style.justifyContent = 'center';
+        chatAvatar.style.alignItems = 'center';
+        chatAvatar.innerText = avatarText || targetName.charAt(0);
+    }
+    
+    closeSmsNewChatModal(); 
+    document.getElementById('smsListPage').classList.add('slide-out');
+    document.getElementById('smsChatPage').classList.remove('hidden');
+    
+    renderSmsHistory();
+}
+
+function closeSmsChat() {
+    document.getElementById('smsListPage').classList.remove('slide-out');
+    document.getElementById('smsChatPage').classList.add('hidden');
+    closeSmsPlusMenu();
+    currentSmsTargetId = null;
+    renderSmsList(); 
+}
+
+// --- 长按气泡菜单逻辑 ---
+let smsBubblePressTimer;
+let currentSmsActionIndex = null;
+
+function handleSmsBubbleTouchStart(e, index) {
+    let clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    let clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+    smsBubblePressTimer = setTimeout(() => {
+        currentSmsActionIndex = index;
+        showSmsBubbleMenu(clientX, clientY);
+    }, 500);
+}
+
+function handleSmsBubbleTouchEnd() {
+    clearTimeout(smsBubblePressTimer);
+}
+
+function showSmsBubbleMenu(x, y) {
+    const overlay = document.getElementById('smsBubbleMenuOverlay');
+    const menu = document.getElementById('smsBubbleMenu');
+    
+    overlay.classList.add('show');
+    
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+    
+    setTimeout(() => {
+        const rect = menu.getBoundingClientRect();
+        let finalX = x;
+        let finalY = y;
+        if (x + rect.width > window.innerWidth - 20) finalX = window.innerWidth - rect.width - 20;
+        if (y + rect.height > window.innerHeight - 20) finalY = window.innerHeight - rect.height - 20;
+        menu.style.left = finalX + 'px';
+        menu.style.top = finalY + 'px';
+        menu.classList.add('show');
+    }, 10);
+}
+
+function closeSmsBubbleMenu() {
+    document.getElementById('smsBubbleMenu').classList.remove('show');
+    setTimeout(() => {
+        document.getElementById('smsBubbleMenuOverlay').classList.remove('show');
+    }, 150);
+}
+
+function actionSmsEditMessage() {
+    closeSmsBubbleMenu();
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let history = JSON.parse(ChatDB.getItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`) || '[]');
+    const msg = history[currentSmsActionIndex];
+    
+    if (msg) {
+        document.getElementById('smsEditTextarea').value = msg.content || '';
+        document.getElementById('smsEditModalOverlay').classList.add('show');
+    }
+}
+
+function closeSmsEditModal() {
+    document.getElementById('smsEditModalOverlay').classList.remove('show');
+}
+
+function saveSmsEditedMessage() {
+    const newText = document.getElementById('smsEditTextarea').value.trim();
+    if (newText !== '') {
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        let history = JSON.parse(ChatDB.getItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`) || '[]');
+        
+        if (history[currentSmsActionIndex]) {
+            history[currentSmsActionIndex].content = newText;
+            ChatDB.setItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`, JSON.stringify(history));
+            
+            // 双向同步
+            let targetHistory = JSON.parse(ChatDB.getItem(`sms_history_${currentSmsTargetId}_${currentLoginId}`) || '[]');
+            let targetMsgIndex = targetHistory.findIndex(m => m.timestamp === history[currentSmsActionIndex].timestamp);
+            if (targetMsgIndex !== -1) {
+                targetHistory[targetMsgIndex].content = newText;
+                ChatDB.setItem(`sms_history_${currentSmsTargetId}_${currentLoginId}`, JSON.stringify(targetHistory));
+            }
+            
+            renderSmsHistory();
+            closeSmsEditModal();
+        }
+    } else {
+        alert('消息内容不能为空！');
+    }
+}
+
+function actionSmsDeleteMessage() {
+    closeSmsBubbleMenu();
+    if (confirm('确定删除这条消息吗？')) {
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        let history = JSON.parse(ChatDB.getItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`) || '[]');
+        
+        const deletedMsg = history.splice(currentSmsActionIndex, 1)[0];
+        ChatDB.setItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`, JSON.stringify(history));
+        
+        // 双向同步删除
+        let targetHistory = JSON.parse(ChatDB.getItem(`sms_history_${currentSmsTargetId}_${currentLoginId}`) || '[]');
+        targetHistory = targetHistory.filter(m => m.timestamp !== deletedMsg.timestamp);
+        ChatDB.setItem(`sms_history_${currentSmsTargetId}_${currentLoginId}`, JSON.stringify(targetHistory));
+
+        renderSmsHistory();
+    }
+}
+
+function renderSmsHistory() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    const historyEl = document.getElementById('smsChatHistory');
+    historyEl.innerHTML = '';
+
+    if (!currentLoginId || !currentSmsTargetId) return;
+
+    let history = JSON.parse(ChatDB.getItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`) || '[]');
+
+    if (history.length === 0) {
+        historyEl.innerHTML = '<div style="text-align: center; font-size: 11px; color: #8e8e93; margin-top: 20px;">暂无短信记录</div>';
+        return;
+    }
+
+    history.forEach((msg, index) => {
+        if (msg.type === 'hidden_system') return;
+
+        const prevMsg = history[index - 1];
+        let showTime = false;
+        if (!prevMsg || msg.timestamp - prevMsg.timestamp > 5 * 60 * 1000) {
+            showTime = true;
+        }
+
+        if (showTime) {
+            const date = new Date(msg.timestamp);
+            const timeStr = `${date.getMonth()+1}月${date.getDate()}日 ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+            const timeEl = document.createElement('div');
+            timeEl.style.cssText = 'text-align: center; font-size: 11px; color: #8e8e93; margin-bottom: 10px; font-weight: 500;';
+            timeEl.innerText = timeStr;
+            historyEl.appendChild(timeEl);
+        }
+
+        const isMe = msg.role === 'user';
+        const msgRow = document.createElement('div');
+        msgRow.className = `sms-msg-row ${isMe ? 'me' : 'other'}`;
+
+        let html = '';
+        if (msg.senderName && msg.senderName !== currentSmsTargetName) {
+            html += `<div class="sms-msg-sender-name">${msg.senderName}</div>`;
+        }
+        
+        const smsText = extractSmsText(msg);
+        
+        // 绑定长按事件
+        html += `<div class="sms-bubble" 
+                     oncontextmenu="return false;" 
+                     ontouchstart="handleSmsBubbleTouchStart(event, ${index})" 
+                     ontouchend="handleSmsBubbleTouchEnd()" 
+                     ontouchmove="handleSmsBubbleTouchEnd()"
+                     onmousedown="handleSmsBubbleTouchStart(event, ${index})"
+                     onmouseup="handleSmsBubbleTouchEnd()"
+                     onmouseleave="handleSmsBubbleTouchEnd()">${smsText}</div>`;
+        
+        msgRow.innerHTML = html;
+        historyEl.appendChild(msgRow);
+    });
+
+    setTimeout(() => { historyEl.scrollTop = historyEl.scrollHeight; }, 50);
+}
+
+// --- 设置面板逻辑 ---
+function openSmsSettingsPanel() {
+    // 填充头像和名字
+    const avatarEl = document.getElementById('smsSettingsAvatar');
+    if (currentSmsTargetAvatar) {
+        avatarEl.style.backgroundImage = `url('${currentSmsTargetAvatar}')`;
+        avatarEl.innerText = '';
+    } else {
+        avatarEl.style.backgroundImage = 'none';
+        avatarEl.style.backgroundColor = '#111'; 
+        avatarEl.innerText = currentSmsTargetName.charAt(0);
+    }
+    document.getElementById('smsSettingsName').innerText = currentSmsTargetName;
+    
+    document.getElementById('smsSettingsPage').style.display = 'flex';
+}
+
+function closeSmsSettingsPanel() {
+    document.getElementById('smsSettingsPage').style.display = 'none';
+}
+
+function clearSmsHistory() {
+    if (confirm('确定要清空与该角色的所有短信记录吗？此操作不可恢复。')) {
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        ChatDB.setItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`, JSON.stringify([]));
+        alert('短信记录已清空！');
+        renderSmsHistory();
+        closeSmsSettingsPanel();
+    }
+}
+
+function deleteSmsSession() {
+    if (confirm('确定要删除此会话吗？')) {
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        let sessions = JSON.parse(ChatDB.getItem(`sms_sessions_${currentLoginId}`) || '[]');
+        sessions = sessions.filter(id => id !== currentSmsTargetId);
+        ChatDB.setItem(`sms_sessions_${currentLoginId}`, JSON.stringify(sessions));
+        
+        closeSmsSettingsPanel();
+        closeSmsChat();
+    }
+}
+
+// --- +号菜单逻辑 ---
+function toggleSmsPlusMenu(e) {
+    e.stopPropagation();
+    const plusMenu = document.getElementById('smsPlusMenu');
+    const plusBtn = document.getElementById('smsPlusBtn');
+    
+    if (plusMenu.classList.contains('show')) {
+        closeSmsPlusMenu();
+    } else {
+        plusMenu.classList.add('show');
+        plusBtn.classList.add('active');
+    }
+}
+
+function closeSmsPlusMenu() {
+    document.getElementById('smsPlusMenu').classList.remove('show');
+    document.getElementById('smsPlusBtn').classList.remove('active');
+}
+
+document.addEventListener('click', (e) => {
+    const plusMenu = document.getElementById('smsPlusMenu');
+    const plusBtn = document.getElementById('smsPlusBtn');
+    if (plusMenu && plusMenu.classList.contains('show') && !plusMenu.contains(e.target) && e.target !== plusBtn) {
+        closeSmsPlusMenu();
+    }
+});
+
+function smsRollBack() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId || !currentSmsTargetId) return;
+
+    let history = JSON.parse(ChatDB.getItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`) || '[]');
+    if (history.length > 0) {
+        history.pop();
+        ChatDB.setItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`, JSON.stringify(history));
+        renderSmsHistory();
+    }
+    closeSmsPlusMenu();
+}
+
+// --- 身份切换弹窗逻辑 ---
+let currentSmsIdentity = 'me';
+let customSmsIdentityName = '';
+let tempSmsIdentity = 'me';
+
+function openSmsIdentityModal() {
+    closeSmsPlusMenu();
+    tempSmsIdentity = currentSmsIdentity;
+    updateSmsIdentityModalUI();
+    document.getElementById('smsIdentityModalOverlay').classList.add('show');
+}
+
+function closeSmsIdentityModal() {
+    document.getElementById('smsIdentityModalOverlay').classList.remove('show');
+}
+
+function selectSmsIdentity(element) {
+    document.querySelectorAll('.sms-id-modal-item').forEach(el => el.classList.remove('selected'));
+    element.classList.add('selected');
+    tempSmsIdentity = element.getAttribute('data-id');
+    
+    if (tempSmsIdentity === 'custom') {
+        document.getElementById('smsIdCustomInputWrap').style.display = 'block';
+        document.getElementById('smsIdCustomInput').value = customSmsIdentityName;
+        document.getElementById('smsIdCustomInput').focus();
+    } else {
+        document.getElementById('smsIdCustomInputWrap').style.display = 'none';
+    }
+}
+
+function updateSmsIdentityModalUI() {
+    document.querySelectorAll('.sms-id-modal-item').forEach(el => {
+        if (el.getAttribute('data-id') === tempSmsIdentity) {
+            el.classList.add('selected');
+        } else {
+            el.classList.remove('selected');
+        }
+    });
+    if (tempSmsIdentity === 'custom') {
+        document.getElementById('smsIdCustomInputWrap').style.display = 'block';
+        document.getElementById('smsIdCustomInput').value = customSmsIdentityName;
+    } else {
+        document.getElementById('smsIdCustomInputWrap').style.display = 'none';
+    }
+}
+
+function confirmSmsIdentity() {
+    currentSmsIdentity = tempSmsIdentity;
+    if (currentSmsIdentity === 'custom') {
+        customSmsIdentityName = document.getElementById('smsIdCustomInput').value.trim();
+        if (!customSmsIdentityName) {
+            alert('请输入自定义名称');
+            return;
+        }
+    }
+    closeSmsIdentityModal();
+}
+
+// --- 发送逻辑 ---
+function checkSmsInput() {
+    const msgInput = document.getElementById('smsMsgInput');
+    const sendBtn = document.getElementById('smsSendBtn');
+    if (msgInput.innerText.trim().length > 0) {
+        sendBtn.classList.add('active');
+    } else {
+        sendBtn.classList.remove('active');
+    }
+}
+
+function sendSmsMessage() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId || !currentSmsTargetId) return;
+
+    let balance = parseFloat(ChatDB.getItem(`call_balance_${currentLoginId}`) || '0');
+    if (balance < 0.1) {
+        if (typeof send10086Reminder === 'function') send10086Reminder(currentLoginId);
+        alert('你的话费余额不足，无法发送短信！请前往营业厅充值。');
+        return;
+    }
+
+    const msgInput = document.getElementById('smsMsgInput');
+    const text = msgInput.innerText.trim();
+    if (!text) return;
+
+    // 扣除话费 (每条短信 0.1 元)
+    balance = Math.max(0, balance - 0.1);
+    ChatDB.setItem(`call_balance_${currentLoginId}`, balance.toFixed(2));
+    if (typeof renderCallServicePage === 'function') renderCallServicePage();
+
+    let senderName = '';
+    let role = 'user'; // 短信发出的永远在右边
+
+    if (currentSmsIdentity === '10086') {
+        senderName = '10086';
+    } else if (currentSmsIdentity === 'custom') {
+        senderName = customSmsIdentityName || '未知号码';
+    }
+
+    const newMsg = {
+        role: role,
+        type: 'text',
+        content: text,
+        senderName: senderName,
+        timestamp: Date.now()
+    };
+
+    let history = JSON.parse(ChatDB.getItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`) || '[]');
+    history.push(newMsg);
+    ChatDB.setItem(`sms_history_${currentLoginId}_${currentSmsTargetId}`, JSON.stringify(history));
+
+    let targetHistory = JSON.parse(ChatDB.getItem(`sms_history_${currentSmsTargetId}_${currentLoginId}`) || '[]');
+    let targetMsg = { ...newMsg, role: 'char' };
+    targetHistory.push(targetMsg);
+    ChatDB.setItem(`sms_history_${currentSmsTargetId}_${currentLoginId}`, JSON.stringify(targetHistory));
+
+    let smsSessions = JSON.parse(ChatDB.getItem(`sms_sessions_${currentLoginId}`) || '[]');
+    smsSessions = smsSessions.filter(id => id !== currentSmsTargetId);
+    smsSessions.unshift(currentSmsTargetId);
+    ChatDB.setItem(`sms_sessions_${currentLoginId}`, JSON.stringify(smsSessions));
+
+    let targetSmsSessions = JSON.parse(ChatDB.getItem(`sms_sessions_${currentSmsTargetId}`) || '[]');
+    targetSmsSessions = targetSmsSessions.filter(id => id !== currentLoginId);
+    targetSmsSessions.unshift(currentLoginId);
+    ChatDB.setItem(`sms_sessions_${currentSmsTargetId}`, JSON.stringify(targetSmsSessions));
+
+    msgInput.innerText = '';
+    checkSmsInput();
+    closeSmsPlusMenu();
+    renderSmsHistory();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const msgInput = document.getElementById('smsMsgInput');
+    if (msgInput) {
+        msgInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendSmsMessage();
+            }
+        });
+    }
+});
+
+// ==========================================
+// 短信 APP 专属 AI 回复逻辑 (记忆互通 & 身份感知 & 气泡限制)
+// ==========================================
+let isGeneratingSmsApiReply = false;
+
+async function triggerSmsAiReply() {
+    if (isGeneratingSmsApiReply) return; 
+    isGeneratingSmsApiReply = true;
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    const targetCharId = currentSmsTargetId; // 核心修复：捕获触发时的目标ID
+    if (!currentLoginId || !targetCharId) {
+        isGeneratingSmsApiReply = false;
+        return;
+    }
+
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        alert('请先在设置中配置 API 信息！');
+        isGeneratingSmsApiReply = false;
+        return;
+    }
+
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+    const char = allEntities.find(c => c.id === targetCharId);
+    if (!char || char.isAccount) {
+        isGeneratingSmsApiReply = false;
+        alert('对方是真实用户账号或系统号，无法使用 AI 自动回复。');
+        return;
+    }
+
+    const account = allEntities.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+
+    const charName = char.name || 'Char';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    const minReply = parseInt(ChatDB.getItem(`chat_min_reply_${targetCharId}`)) || 0;
+    const maxReply = parseInt(ChatDB.getItem(`chat_max_reply_${targetCharId}`)) || 0;
+
+    const currentPersonaId = persona ? persona.id : currentLoginId;
+    let memory = JSON.parse(ChatDB.getItem(`char_memory_${currentPersonaId}_${targetCharId}`) || '{}');
+
+    let chatHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${targetCharId}`) || '[]');
+    let smsHistory = JSON.parse(ChatDB.getItem(`sms_history_${currentLoginId}_${targetCharId}`) || '[]');
+    
+    chatHistory = chatHistory.map(m => ({...m, isWechat: true}));
+    let fullHistory = [...chatHistory, ...smsHistory];
+    fullHistory.sort((a, b) => a.timestamp - b.timestamp); 
+
+    let recentHistory = fullHistory.slice(-40);
+
+    let systemPrompt = `你正在扮演角色：${charName}。我的网名是：【${userName}】，真实名字是：【${userRealName}】。\n`;
+    systemPrompt += `你的设定：${char.description || "一个真实的聊天伙伴。"}\n`;
+    systemPrompt += `关于我的人设：${(persona && persona.persona) ? persona.persona : "普通用户"}\n\n`;
+    
+    // 1. 【常驻记忆】：核心记忆 (Core)
+    let coreMemories = memory.core || [];
+    if (coreMemories.length > 0) {
+        coreMemories.sort((a, b) => (a.weight || 5) - (b.weight || 5));
+        systemPrompt += `[核心记忆 (Core Memory - 绝对不可遗忘)]\n`;
+        coreMemories.forEach(mem => {
+            systemPrompt += `- ${mem.content}\n`;
+        });
+        systemPrompt += `\n`;
+    }
+
+    // 2. 【近期剧情】：读取自定义条数的最新总结
+    let recentCount = (memory.settings && memory.settings.recentSummaryCount !== undefined) ? memory.settings.recentSummaryCount : 3;
+    let allSummaries = memory.summary || [];
+    let recentSummaries = recentCount > 0 ? allSummaries.slice(-recentCount) : []; 
+    let olderSummaries = recentCount > 0 ? allSummaries.slice(0, -recentCount) : allSummaries;
+
+    if (recentSummaries.length > 0) {
+        systemPrompt += `[近期剧情总结 (Story Context)]\n`;
+        recentSummaries.forEach(mem => {
+            systemPrompt += `${mem.content}\n`;
+        });
+        systemPrompt += `\n`;
+    }
+
+    // 3. 【动态检索】：向量语义检索旧总结
+    let retrievedMemories = [];
+    let recentContextText = recentHistory.slice(-5).map(m => m.content.replace(/<[^>]+>/g, '')).join(' ');
+    let contextKeywords = typeof extractKeywordsForMemory === 'function' ? extractKeywordsForMemory(recentContextText) : [];
+
+    function calculateSemanticScore(memoryText, memoryTags, contextWords) {
+        if (typeof extractKeywordsForMemory !== 'function') return 0;
+        let memWords = extractKeywordsForMemory(memoryText);
+        if (memoryTags && memoryTags.length > 0) memWords = memWords.concat(memoryTags);
+        if (memWords.length === 0 || contextWords.length === 0) return 0;
+        let intersection = memWords.filter(w => contextWords.includes(w)).length;
+        let union = new Set([...memWords, ...contextWords]).size;
+        return intersection / union;
+    }
+
+    if (olderSummaries.length > 0 && contextKeywords.length > 0) {
+        olderSummaries.forEach(item => {
+            let score = calculateSemanticScore(item.content, item.tags, contextKeywords);
+            let weight = item.weight || 5;
+            let finalScore = score * (weight / 5); 
+            if (finalScore > 0.05) {
+                retrievedMemories.push({
+                    content: item.content,
+                    tags: item.tags || [],
+                    weight: weight,
+                    score: finalScore
+                });
+            }
+        });
+    }
+
+    if (retrievedMemories.length > 0) {
+        retrievedMemories.sort((a, b) => b.score - a.score);
+        let topMemories = retrievedMemories.slice(0, 3);
+        topMemories.sort((a, b) => a.weight - b.weight);
+        
+        systemPrompt += `[脑海中闪过的旧回忆 (Flashback)]\n`;
+        systemPrompt += `当聊到相关话题时，你突然回想起了以前的这些事：\n`;
+        topMemories.forEach(mem => {
+            let tagStr = mem.tags.length > 0 ? ` [标签: ${mem.tags.join(',')}]` : '';
+            systemPrompt += `- (权重:${mem.weight})${tagStr} ${mem.content}\n`;
+        });
+        systemPrompt += `(请自然地体现出你记得这些事，不要生硬地复述)\n\n`;
+    }
+
+    // 4. 【作者备注】
+    if (memory.note && memory.note.length > 0) {
+        systemPrompt += `[System Note: ${memory.note.map(m => m.content).join(' ')}]\n\n`;
+    }
+    systemPrompt += `【重要场景提示】：\n`;
+    systemPrompt += `我们现在正在通过【手机自带的短信 APP】进行聊天。\n`;
+    systemPrompt += `注意：短信中可能会有其他人（如 10086、快递员或其他伪装身份）发来的消息，请根据发件人名字（如 [短信] *10086*）来判断是谁在说话，并做出符合你人设的反应。\n`;
+    
+    let blacklist = JSON.parse(ChatDB.getItem(`blacklist_${currentLoginId}`) || '[]');
+    if (blacklist.includes(targetCharId)) {
+        systemPrompt += `⚠️ 注意：我已经在微信上把你【拉黑】了！你现在只能通过发短信来联系我。请在回复中体现出你知道自己被拉黑了的情绪（比如生气、委屈、质问等）。\n\n`;
+    } else {
+        systemPrompt += `虽然我们有微信，但现在我们正在发短信。\n\n`;
+    }
+
+    systemPrompt += `【输出格式严格要求】\n`;
+    systemPrompt += `你必须且只能输出一个合法的 JSON 对象，格式如下：\n`;
+    systemPrompt += `{\n  "messages": [\n    {"type":"text", "content":"完整的一句话。"}\n  ]\n}\n`;
+    systemPrompt += `- 必须使用双引号 " 包裹键名和字符串值。\n`;
+    systemPrompt += `- 严禁输出损坏的 JSON，严禁在 JSON 外部输出任何多余的字符。\n`;
+    systemPrompt += `- 模拟真人发短信的习惯，保持口语化。\n`;
+
+    if (minReply > 0 || maxReply > 0) {
+        systemPrompt += `- 你的回复必须拆分为 ${minReply || 1} 到 ${maxReply || 10} 个独立的气泡（即 messages 数组中的对象数量）。保持数量随机。\n`;
+    }
+
+    let messages = [{ role: 'system', content: systemPrompt }];
+    let mergedHistory = [];
+    
+    recentHistory.forEach(msg => {
+        let content = msg.content || "";
+        let isUser = msg.role === 'user';
+        let senderName = isUser ? userName : charName;
+
+        let source = '';
+        if (msg.isWechat) {
+            source = '[微信聊天记录] ';
+            if (msg.type === 'image' || content.includes('<img')) content = '[图片]';
+            else if (msg.type === 'voice') content = '[语音]';
+            else if (msg.type === 'transfer') content = '[转账]';
+            else if (msg.type === 'family_card') content = '[亲属卡]';
+            else content = content.replace(/<[^>]+>/g, '');
+        } else {
+            source = '[短信] ';
+            if (isUser && msg.senderName) {
+                senderName = msg.senderName;
+            }
+        }
+
+        content = `${source}*${senderName}*: ${content}`;
+        let role = isUser ? 'user' : 'assistant';
+        
+        if (mergedHistory.length > 0 && mergedHistory[mergedHistory.length - 1].role === role) {
+            mergedHistory[mergedHistory.length - 1].content += `\n${content}`;
+        } else {
+            mergedHistory.push({ role: role, content: content });
+        }
+    });
+
+    messages = messages.concat(mergedHistory);
+
+    if (!document.getElementById('chat-spin-keyframes')) {
+        const style = document.createElement('style');
+        style.id = 'chat-spin-keyframes';
+        style.innerHTML = `@keyframes chatAppSpin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`;
+        document.head.appendChild(style);
+    }
+
+    const aiBtn = document.querySelector('.sms-ios-ai-btn');
+    const originalBtnHtml = aiBtn.innerHTML;
+    // 使用纯 SVG 动画，彻底无视外部 CSS 干扰
+    aiBtn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" style="animation: chatAppSpin 1s linear infinite;"><circle cx="12" cy="12" r="10" fill="none" stroke="rgba(0,0,0,0.1)" stroke-width="3"></circle><path d="M12 2a10 10 0 0 1 10 10" fill="none" stroke="#007aff" stroke-width="3" stroke-linecap="round"></path></svg>`;
+    aiBtn.style.pointerEvents = 'none';
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: messages, temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+
+            let messagesArray = [];
+            try {
+                const jsonMatch = replyRaw.match(/\{[\s\S]*\}/s);
+                const jsonStr = jsonMatch ? jsonMatch[0] : replyRaw;
+                const parsedData = JSON.parse(jsonStr);
+                messagesArray = parsedData.messages || [];
+                if (!Array.isArray(messagesArray)) messagesArray = [messagesArray]; 
+            } catch (e) {
+                messagesArray = replyRaw.split('\n').filter(line => line.trim() !== "").map(line => ({ type: 'text', content: line.trim() }));
+            }
+
+            for (let i = 0; i < messagesArray.length; i++) {
+                let msgObj = messagesArray[i];
+                if (!msgObj.content) continue;
+
+                let newMsg = { role: 'char', type: 'text', content: msgObj.content, timestamp: Date.now() };
+
+                let history = JSON.parse(ChatDB.getItem(`sms_history_${currentLoginId}_${targetCharId}`) || '[]');
+                history.push(newMsg);
+                ChatDB.setItem(`sms_history_${currentLoginId}_${targetCharId}`, JSON.stringify(history));
+                
+                let targetHistory = JSON.parse(ChatDB.getItem(`sms_history_${targetCharId}_${currentLoginId}`) || '[]');
+                let targetMsg = { ...newMsg, role: 'user' }; 
+                targetHistory.push(targetMsg);
+                ChatDB.setItem(`sms_history_${targetCharId}_${currentLoginId}`, JSON.stringify(targetHistory));
+                
+                if (currentSmsTargetId === targetCharId) {
+                    renderSmsHistory();
+                }
+
+                const smsChatPage = document.getElementById('smsChatPage');
+                const isSmsChatVisible = smsChatPage && !smsChatPage.classList.contains('hidden') && currentSmsTargetId === targetCharId;
+                if (!isSmsChatVisible) {
+                    if (typeof showCustomNotification === 'function') {
+                        showCustomNotification('sms', targetCharId, charName, msgObj.content, char.avatarUrl);
+                    }
+                }
+
+                if (i < messagesArray.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
+        } else {
+            alert('API 请求失败，请检查配置。');
+        }
+    } catch (e) {
+        alert('网络请求失败: ' + e.message);
+    } finally {
+        isGeneratingSmsApiReply = false; 
+        aiBtn.innerHTML = originalBtnHtml;
+        aiBtn.style.pointerEvents = 'auto';
+    }
+}

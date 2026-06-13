@@ -1,0 +1,2962 @@
+// ==========================================
+// 酒馆模式 (Tavern Mode) 专属逻辑
+// ==========================================
+
+// 拦截 openTavernMode，改为打开 Lobby
+const originalOpenTavernMode = window.openTavernMode;
+window.openTavernMode = function() {
+    if (!currentChatRoomCharId) return alert('请先选择一个角色');
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return alert('请先登录');
+
+    // 隐藏微信面板
+    document.getElementById('wechatPanel').style.display = 'none';
+    // 显示 Lobby 面板
+    document.getElementById('tavernLobbyPanel').style.display = 'flex';
+
+    tavRenderLobby();
+};
+
+function closeTavernLobby() {
+    document.getElementById('tavernLobbyPanel').style.display = 'none';
+    document.getElementById('wechatPanel').style.display = 'flex';
+}
+
+function tavRenderLobby() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    
+    // 渲染当前聊天记录卡片
+    let history = JSON.parse(ChatDB.getItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    const previewEl = document.getElementById('tavCurrentChatPreview');
+    const timeEl = document.getElementById('tavCurrentChatTime');
+    if (history.length > 0) {
+        const lastMsg = history[history.length - 1];
+        previewEl.innerText = lastMsg.content.replace(/<[^>]+>/g, '');
+        const date = new Date(lastMsg.timestamp);
+        timeEl.innerText = `${date.getMonth()+1}/${date.getDate()} ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+    } else {
+        previewEl.innerText = '暂无内容，点击开始聊天...';
+        timeEl.innerText = '';
+    }
+
+    // 渲染线下记忆总结列表
+    const listEl = document.getElementById('tavOfflineMemoriesList');
+    listEl.innerHTML = '';
+    let memories = JSON.parse(ChatDB.getItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    
+    if (memories.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#aaa; font-size:12px; padding:20px;">暂无记忆总结</div>';
+        return;
+    }
+
+    memories.slice().reverse().forEach(mem => {
+        const card = document.createElement('div');
+        card.style.cssText = 'background: #fff; border-radius: 12px; border: 1px solid #eee; display: flex; flex-direction: column; overflow: hidden;';
+        
+        // 提取前15个字符作为折叠栏的标题预览
+        let previewText = mem.content.replace(/<[^>]+>/g, '').substring(0, 15);
+        if (mem.content.length > 15) previewText += '...';
+
+        card.innerHTML = `
+            <div style="padding: 15px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; background: #f9f9f9;" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display === 'none' ? 'flex' : 'none'; this.querySelector('svg').style.transform = this.nextElementSibling.style.display === 'none' ? 'rotate(0deg)' : 'rotate(180deg)';">
+                <span style="font-size: 13px; font-weight: bold; color: #333; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 10px;">${previewText}</span>
+                <svg viewBox="0 0 24 24" width="16" height="16" stroke="#888" stroke-width="2" fill="none" style="transition: transform 0.2s; transform: rotate(0deg); flex-shrink: 0;"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </div>
+            <div style="display: none; flex-direction: column; padding: 15px; border-top: 1px solid #eee; gap: 10px;">
+                <div style="font-size: 13px; color: #333; line-height: 1.5; word-break: break-all;">${mem.content}</div>
+                <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px dashed #eee; padding-top: 10px;">
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span style="font-size: 12px; font-weight: bold; color: #111;">同步至线上</span>
+                        <label class="ios-switch" style="transform: scale(0.7); margin: 0; transform-origin: left center;">
+                            <input type="checkbox" ${mem.syncOnline ? 'checked' : ''} onchange="tavToggleMemorySync('${mem.id}', this)">
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div style="display: flex; gap: 12px;">
+                        <span style="font-size: 12px; color: #007aff; cursor: pointer; font-weight: bold;" onclick="tavEditOfflineMemory('${mem.id}')">Edit</span>
+                        <span style="font-size: 12px; color: #ff3b30; cursor: pointer; font-weight: bold;" onclick="tavDeleteOfflineMemory('${mem.id}')">Delete</span>
+                    </div>
+                </div>
+            </div>
+        `;
+        listEl.appendChild(card);
+    });
+}
+
+function tavOpenSummaryModal() {
+    document.getElementById('tavSummaryModalOverlay').classList.add('show');
+}
+
+async function tavExecuteSummary(type) {
+    document.getElementById('tavSummaryModalOverlay').classList.remove('show');
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    
+    let summaryText = '';
+
+    if (type === 'vector') {
+        const memories = JSON.parse(ChatDB.getItem(`tav_memory_${currentChatRoomCharId}`) || '[]');
+        if (memories.length === 0) return alert('向量记忆库为空！');
+        summaryText = memories[memories.length - 1].text;
+    } else if (type === 'ai') {
+        const apiConfig = JSON.parse(ChatDB.getItem('tav_api_config') || '{}');
+        const url = apiConfig.url || localStorage.getItem('apiUrl');
+        const key = apiConfig.key || localStorage.getItem('apiKey');
+        const model = apiConfig.model || localStorage.getItem('apiModel') || 'gpt-4-turbo';
+
+        if (!url || !key) return alert('请先配置 API！');
+
+        let history = JSON.parse(ChatDB.getItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+        if (history.length === 0) return alert('暂无聊天记录可总结！');
+
+        const recentHistory = history.slice(-30).map(m => `${m.sender === 'me' ? 'User' : 'Char'}: ${m.content}`).join('\n');
+        const prompt = `请总结以下聊天记录的核心事件和重要信息，使用第三人称陈述句，尽量简短精炼：\n\n${recentHistory}`;
+
+        tavSetLoadingState(true);
+        try {
+            const cleanUrl = url.replace(/\/$/, '');
+            const response = await fetch(cleanUrl + '/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${key}` },
+                body: JSON.stringify({ model: model, messages: [{ role: 'user', content: prompt }], temperature: 0.5 })
+            });
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(JSON.stringify(err, null, 2));
+            }
+            const data = await response.json();
+            // 防止内容截断导致报错，返回多少提取多少
+            summaryText = data.choices?.[0]?.message?.content?.trim() || '';
+        } catch (e) {
+            tavSetLoadingState(false);
+            return alert('总结失败: ' + e.message);
+        }
+        tavSetLoadingState(false);
+    }
+
+    if (summaryText) {
+        let memories = JSON.parse(ChatDB.getItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+        memories.push({
+            id: Date.now().toString(),
+            content: summaryText,
+            syncOnline: false
+        });
+        ChatDB.setItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(memories));
+        alert('记忆总结已生成并保存至大厅！');
+    }
+}
+
+function tavToggleMemorySync(id, el) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let memories = JSON.parse(ChatDB.getItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    const mem = memories.find(m => m.id === id);
+    if (mem) {
+        mem.syncOnline = el.checked;
+        ChatDB.setItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(memories));
+        
+        // --- 新增：同步到角色记忆库 (Memory Bank) ---
+        // 获取当前用户的 personaId
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        const account = accounts.find(a => a.id === currentLoginId);
+        const personaId = account ? account.personaId : currentLoginId;
+        
+        let charMemory = JSON.parse(ChatDB.getItem(`char_memory_${personaId}_${currentChatRoomCharId}`) || 'null');
+        if (!charMemory) {
+            charMemory = { summary: [], core: [], note: [], settings: {} };
+        }
+        if (!charMemory.summary) charMemory.summary = [];
+// 修改后
+        if (el.checked) {
+            // 勾选同步：加入角色记忆库，并打上时间轴
+            // 核心修改：使用记忆原本的时间戳，而不是当前时间
+            const memTime = parseInt(mem.id);
+            const now = isNaN(memTime) ? new Date() : new Date(memTime);
+            const timeStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+            const finalText = `[${timeStr} 线下记忆]\n${mem.content}`;
+            
+            // 核心修改：提取简单的关键词作为标签，帮助向量检索更容易命中
+            let cleanText = mem.content.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, ' ');
+            let words = cleanText.split(/\s+/).filter(w => w.length >= 2);
+            const stopWords = ['什么','怎么','我们','你们','他们','这个','那个','就是','还是','可以','没有','知道','觉得','喜欢','为什么','时候','现在','今天','明天','昨天','真的','如果'];
+            let tags = words.filter(w => !stopWords.includes(w)).slice(0, 5);
+
+            charMemory.summary.push({
+                id: mem.id, // 核心修改：使用原本的时间戳作为 ID
+                sourceId: mem.id, 
+                content: finalText,
+                tags: tags, // 注入标签
+                weight: 5
+            });
+
+            // 核心修改：按照时间戳(ID)重新排序，确保记忆按真实发生的时间顺序排列
+            charMemory.summary.sort((a, b) => parseInt(a.id) - parseInt(b.id));
+
+            // --- 新增：注入到线上聊天记录作为隐藏消息 ---
+            let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+            history.push({
+                role: 'system',
+                type: 'hidden_system',
+                linkedOfflineMemId: mem.id,
+                content: `[系统提示：你们刚刚在线下见了一面，期间发生了以下事情：${mem.content}。请在接下来的线上聊天中自然地体现出这段记忆。]`,
+                timestamp: Date.now()
+            });
+            ChatDB.setItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(history));
+
+            let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentChatRoomCharId}_${currentLoginId}`) || '[]');
+            targetHistory.push({
+                role: 'system',
+                type: 'hidden_system',
+                linkedOfflineMemId: mem.id,
+                content: `[系统提示：你们刚刚在线下见了一面，期间发生了以下事情：${mem.content}。请在接下来的线上聊天中自然地体现出这段记忆。]`,
+                timestamp: Date.now()
+            });
+            ChatDB.setItem(`chat_history_${currentChatRoomCharId}_${currentLoginId}`, JSON.stringify(targetHistory));
+            // ---------------------------------------------
+        } else {
+            // 取消同步：从角色记忆库中移除对应的记录
+            charMemory.summary = charMemory.summary.filter(m => m.sourceId !== mem.id);
+
+            // --- 新增：从线上聊天记录中移除隐藏消息 ---
+            let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+            history = history.filter(m => m.linkedOfflineMemId !== mem.id);
+            ChatDB.setItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(history));
+
+            let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentChatRoomCharId}_${currentLoginId}`) || '[]');
+            targetHistory = targetHistory.filter(m => m.linkedOfflineMemId !== mem.id);
+            ChatDB.setItem(`chat_history_${currentChatRoomCharId}_${currentLoginId}`, JSON.stringify(targetHistory));
+            // ---------------------------------------------
+        }
+        
+        ChatDB.setItem(`char_memory_${personaId}_${currentChatRoomCharId}`, JSON.stringify(charMemory));
+        // ---------------------------------------------
+    }
+}
+
+function tavEditOfflineMemory(id) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let memories = JSON.parse(ChatDB.getItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    const mem = memories.find(m => m.id === id);
+    if (!mem) return;
+
+    const modal = document.getElementById('tavEditContentModalOverlay');
+    document.getElementById('tavEditContentTitle').innerText = '编辑记忆总结';
+    const textarea = document.getElementById('tavEditContentTextarea');
+    textarea.value = mem.content;
+
+    const saveBtn = document.getElementById('tavEditContentSaveBtn');
+    saveBtn.onclick = () => {
+        mem.content = textarea.value;
+        ChatDB.setItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(memories));
+        // 修改后
+        // --- 新增：同步修改角色记忆库中的内容 ---
+        if (mem.syncOnline) {
+            let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+            const account = accounts.find(a => a.id === currentLoginId);
+            const personaId = account ? account.personaId : currentLoginId;
+            let charMemory = JSON.parse(ChatDB.getItem(`char_memory_${personaId}_${currentChatRoomCharId}`) || '{}');
+            if (charMemory.summary) {
+                const targetMem = charMemory.summary.find(m => m.sourceId === mem.id);
+                if (targetMem) {
+                    // 保留时间戳前缀，只替换后面的内容
+                    const timePrefixMatch = targetMem.content.match(/^\[.*?\]\n/);
+                    const timePrefix = timePrefixMatch ? timePrefixMatch[0] : '';
+                    targetMem.content = timePrefix + mem.content;
+                    
+                    // 重新提取标签，确保编辑后的内容也能被向量检索命中
+                    let cleanText = mem.content.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, ' ');
+                    let words = cleanText.split(/\s+/).filter(w => w.length >= 2);
+                    const stopWords = ['什么','怎么','我们','你们','他们','这个','那个','就是','还是','可以','没有','知道','觉得','喜欢','为什么','时候','现在','今天','明天','昨天','真的','如果'];
+                    targetMem.tags = words.filter(w => !stopWords.includes(w)).slice(0, 5);
+
+                    ChatDB.setItem(`char_memory_${personaId}_${currentChatRoomCharId}`, JSON.stringify(charMemory));
+                }
+            }
+        }
+        // ---------------------------------------
+        
+        modal.classList.remove('show');
+        tavRenderLobby();
+    };
+    modal.classList.add('show');
+}
+
+function tavDeleteOfflineMemory(id) {
+    if (confirm('确定删除这条记忆总结吗？')) {
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        let memories = JSON.parse(ChatDB.getItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+        memories = memories.filter(m => m.id !== id);
+        ChatDB.setItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(memories));
+        
+        // --- 新增：同步从角色记忆库中删除 ---
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        const account = accounts.find(a => a.id === currentLoginId);
+        const personaId = account ? account.personaId : currentLoginId;
+        let charMemory = JSON.parse(ChatDB.getItem(`char_memory_${personaId}_${currentChatRoomCharId}`) || '{}');
+        if (charMemory.summary) {
+            charMemory.summary = charMemory.summary.filter(m => m.sourceId !== id);
+            ChatDB.setItem(`char_memory_${personaId}_${currentChatRoomCharId}`, JSON.stringify(charMemory));
+        }
+        // -----------------------------------
+        
+        // --- 新增：同步从线上聊天记录中删除隐藏消息 ---
+        let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+        history = history.filter(m => m.linkedOfflineMemId !== id);
+        ChatDB.setItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(history));
+
+        let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentChatRoomCharId}_${currentLoginId}`) || '[]');
+        targetHistory = targetHistory.filter(m => m.linkedOfflineMemId !== id);
+        ChatDB.setItem(`chat_history_${currentChatRoomCharId}_${currentLoginId}`, JSON.stringify(targetHistory));
+        // -----------------------------------
+
+        tavRenderLobby();
+    }
+}
+
+function tavEnterChat() {
+    document.getElementById('tavernLobbyPanel').style.display = 'none';
+    document.getElementById('tavernModePanel').style.display = 'flex';
+    
+    tavDisplayCount = 30; // 每次进入重置显示数量
+    
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    
+    // 同步当前聊天角色的头像和名字，并注入开场白和预设
+    if (typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId) {
+        let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+        const char = allEntities.find(c => c.id === currentChatRoomCharId);
+        if (char) {
+            document.getElementById('tavHeaderAvatar').style.backgroundImage = `url('${char.avatarUrl || ''}')`;
+            document.getElementById('tavHeaderName').innerText = char.name || char.netName || '未命名';
+            
+            // 注入开场白
+            let history = JSON.parse(ChatDB.getItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+            if (history.length === 0 && char.firstMessage) {
+                history.push({
+                    id: Date.now().toString(),
+                    sender: 'char',
+                    content: char.firstMessage,
+                    timestamp: new Date().toISOString()
+                });
+                ChatDB.setItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(history));
+            }
+            
+            // 注入角色自带的预设或用户修改过的预设
+            const savedSys = ChatDB.getItem(`tav_active_prompt_system_${currentChatRoomCharId}`);
+            const sysEl = document.getElementById('tavSystemPrompt');
+            if (sysEl) sysEl.value = savedSys !== null ? savedSys : (char.systemPrompt || '');
+
+            const savedJail = ChatDB.getItem(`tav_active_prompt_jailbreak_${currentChatRoomCharId}`);
+            const jailEl = document.getElementById('tavJailbreakPrompt');
+            if (jailEl) jailEl.value = savedJail !== null ? savedJail : (char.postHistoryInstructions || '');
+
+            const savedStyle = ChatDB.getItem(`tav_active_prompt_style_${currentChatRoomCharId}`);
+            const styleEl = document.getElementById('tavStylePrompt');
+            if (styleEl) styleEl.value = savedStyle !== null ? savedStyle : '';
+
+            const savedNote = ChatDB.getItem(`tav_active_prompt_note_${currentChatRoomCharId}`);
+            const noteEl = document.getElementById('tavNotePrompt');
+            if (noteEl) noteEl.value = savedNote !== null ? savedNote : (char.creatorNotes || '');
+        }
+    }
+
+    tavRenderChat();
+    renderTavRegexList();
+    
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+    const hasFloating = statusBars.some(sb => sb.active && sb.pos === 'floating');
+    document.getElementById('tav-floating-ball-container').style.display = hasFloating ? 'flex' : 'none';
+
+    // 读取并应用外观设置
+    const savedBg = ChatDB.getItem('tav_bg_image');
+    if (savedBg) {
+        tavChangeBackground(savedBg);
+        if (savedBg.length < 500) document.getElementById('tavBgUrlInput').value = savedBg;
+    }
+    
+    const savedBall = ChatDB.getItem('tav_ball_image');
+    if (savedBall) {
+        tavChangeBallImage(savedBall);
+        if (savedBall.length < 500) document.getElementById('tavBallUrlInput').value = savedBall;
+    }
+
+    const savedBrightness = ChatDB.getItem('tav_brightness') || '0';
+    const brightnessInput = document.getElementById('tavBrightnessInput');
+    if (brightnessInput) brightnessInput.value = savedBrightness;
+    tavChangeBrightness(savedBrightness);
+
+    const savedCardOpacity = ChatDB.getItem('tav_card_opacity') || '60';
+    const cardOpacityInput = document.getElementById('tavCardOpacityInput');
+    if (cardOpacityInput) cardOpacityInput.value = savedCardOpacity;
+    tavChangeCardOpacity(savedCardOpacity);
+
+    const savedFontSize = ChatDB.getItem('tav_font_size') || '15';
+    const fontSizeInput = document.getElementById('tavFontSizeInput');
+    if (fontSizeInput) fontSizeInput.value = savedFontSize;
+    tavChangeFontSize(savedFontSize);
+
+    const savedFontColor = ChatDB.getItem('tav_font_color');
+    const fontColorInput = document.getElementById('tavFontColorInput');
+    if (savedFontColor) {
+        if (fontColorInput) fontColorInput.value = savedFontColor;
+        tavChangeFontColor(savedFontColor);
+    } else {
+        if (fontColorInput) fontColorInput.value = '#111111';
+        tavResetFontColor();
+    }
+
+    // 读取回复选项插件开关状态
+    const isReplyOptionsEnabled = ChatDB.getItem('tav_plugin_reply_options') === 'true';
+    const replyOptionsToggle = document.getElementById('tavReplyOptionsToggle');
+    if (replyOptionsToggle) {
+        if (isReplyOptionsEnabled) replyOptionsToggle.classList.add('active');
+        else replyOptionsToggle.classList.remove('active');
+    }
+
+    // 新增：读取其他插件和预设开关状态
+    ['tavSysPromptToggle', 'tavJailbreakToggle', 'tavStyleToggle', 'tavNoteToggle', 'tavVectorToggle', 'tavTimeAwareToggle'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            const saved = ChatDB.getItem(`tav_plugin_${id}`);
+            if (String(saved) === 'false') el.classList.remove('active');
+            else if (String(saved) === 'true') el.classList.add('active');
+        }
+    });
+}
+
+function closeTavernMode() {
+    document.getElementById('tavernModePanel').style.display = 'none';
+    document.getElementById('tavernLobbyPanel').style.display = 'flex';
+    document.getElementById('tavSidebarRight').style.display = 'none';
+    document.getElementById('tavSidebarRight').classList.remove('show');
+    tavRenderLobby(); // 退出时刷新大厅
+}
+
+// 存档逻辑
+function tavOpenSaveMenu() {
+    document.getElementById('tavSaveMenuModalOverlay').classList.add('show');
+}
+
+function tavSaveAndNew() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let history = JSON.parse(ChatDB.getItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    
+    if (history.length === 0) {
+        alert('当前没有聊天记录，无需保存。');
+        return;
+    }
+
+    const title = prompt('请输入存档名称：', `存档 ${new Date().toLocaleString()}`);
+    if (title !== null) {
+        let saves = JSON.parse(ChatDB.getItem(`tav_chat_saves_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+        // 新增：读取当前的向量记忆库
+        let currentMemory = JSON.parse(ChatDB.getItem(`tav_memory_${currentChatRoomCharId}`) || '[]');
+        
+        saves.push({
+            id: Date.now().toString(),
+            title: title || '未命名存档',
+            timestamp: Date.now(),
+            history: history,
+            memory: currentMemory // 新增：将记忆库一起打包存入存档
+        });
+        ChatDB.setItem(`tav_chat_saves_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(saves));
+        
+        // 清空当前聊天记录、向量记忆库和线下记忆总结
+        ChatDB.setItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`, '[]');
+        ChatDB.setItem(`tav_memory_${currentChatRoomCharId}`, '[]');
+        ChatDB.setItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`, '[]');
+        
+        tavRenderChat();
+        document.getElementById('tavSaveMenuModalOverlay').classList.remove('show');
+        alert('保存成功，已开启新对话！');
+    }
+}
+
+function tavDirectNew() {
+    if (confirm('确定直接开启新对话吗？当前的聊天记录将会丢失！')) {
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        
+        // 清空当前聊天记录、向量记忆库和线下记忆总结
+        ChatDB.setItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`, '[]');
+        ChatDB.setItem(`tav_memory_${currentChatRoomCharId}`, '[]');
+        ChatDB.setItem(`tav_offline_memories_${currentLoginId}_${currentChatRoomCharId}`, '[]');
+        
+        tavRenderChat();
+        document.getElementById('tavSaveMenuModalOverlay').classList.remove('show');
+    }
+}
+
+function tavOpenSavesListPanel() {
+    document.getElementById('tavSaveMenuModalOverlay').classList.remove('show');
+    const listEl = document.getElementById('tavModalSavesList');
+    listEl.innerHTML = '';
+    
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let saves = JSON.parse(ChatDB.getItem(`tav_chat_saves_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    
+    if (saves.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#aaa; font-size:12px; padding:20px;">暂无历史存档</div>';
+    } else {
+        saves.slice().reverse().forEach(save => {
+            const date = new Date(save.timestamp);
+            const timeStr = `${date.getFullYear()}/${date.getMonth()+1}/${date.getDate()} ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+            
+            const card = document.createElement('div');
+            card.style.cssText = 'background: #fff; border-radius: 16px; padding: 20px; border: 1px solid #eee; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.03);';
+            card.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 16px; font-weight: bold; color: #111;">${save.title || '未命名存档'}</span>
+                    <span style="font-size: 12px; color: #888;">${timeStr}</span>
+                </div>
+                <div style="font-size: 13px; color: #666; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 5px;">
+                    ${save.history.length > 0 ? save.history[save.history.length-1].content.replace(/<[^>]+>/g, '') : '空'}
+                </div>
+                <div style="display: flex; justify-content: flex-end; gap: 15px; border-top: 1px dashed #eee; padding-top: 12px;">
+                    <span style="font-size: 14px; color: #007aff; cursor: pointer; font-weight: bold;" onclick="tavLoadSave('${save.id}')">读取</span>
+                    <span style="font-size: 14px; color: #ff3b30; cursor: pointer; font-weight: bold;" onclick="tavDeleteSave('${save.id}')">删除</span>
+                </div>
+            `;
+            listEl.appendChild(card);
+        });
+    }
+    document.getElementById('tavSavesListPanel').style.display = 'flex';
+}
+
+function closeTavSavesListPanel() {
+    document.getElementById('tavSavesListPanel').style.display = 'none';
+}
+
+function tavLoadSave(saveId) {
+    if (confirm('读取存档将覆盖当前的聊天记录，是否继续？')) {
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        let saves = JSON.parse(ChatDB.getItem(`tav_chat_saves_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+        const save = saves.find(s => s.id === saveId);
+        if (save) {
+            ChatDB.setItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(save.history));
+            
+            // 新增：恢复存档中的向量记忆库 (兼容老存档，如果没有则恢复为空数组)
+            ChatDB.setItem(`tav_memory_${currentChatRoomCharId}`, JSON.stringify(save.memory || []));
+            
+            // 如果在 Lobby 界面，直接进入聊天
+            if (document.getElementById('tavernLobbyPanel').style.display === 'flex') {
+                tavEnterChat();
+            } else {
+                tavRenderChat();
+            }
+            closeTavSavesListPanel();
+            alert('存档读取成功！');
+        }
+    }
+}
+
+function tavDeleteSave(saveId) {
+    if (confirm('确定删除此存档吗？')) {
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        let saves = JSON.parse(ChatDB.getItem(`tav_chat_saves_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+        saves = saves.filter(s => s.id !== saveId);
+        ChatDB.setItem(`tav_chat_saves_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(saves));
+        tavOpenSavesListPanel(); // 刷新列表
+        if (document.getElementById('tavernLobbyPanel').style.display === 'flex') {
+            tavRenderLobby(); // 刷新大厅
+        }
+    }
+}
+
+// 控制右侧设置抽屉的滑入滑出
+function tavToggleSettings() {
+    const sidebar = document.getElementById('tavSidebarRight');
+    if (sidebar.classList.contains('show')) {
+        sidebar.classList.remove('show');
+        sidebar.style.display = 'none';   // 彻底隐藏，防止意外聚焦
+    } else {
+        sidebar.classList.add('show');
+        sidebar.style.display = 'flex';   // 显示时恢复弹性布局
+        const historyLen = ChatDB.getItem('tav_chat_history_length') || '20';
+        const lenInput = document.getElementById('tavChatHistoryLength');
+        if (lenInput) lenInput.value = historyLen;
+
+        const onlineLen = ChatDB.getItem('tav_online_chat_history_length') || '10';
+        const onlineLenInput = document.getElementById('tavOnlineChatHistoryLength');
+        if (onlineLenInput) onlineLenInput.value = onlineLen;
+
+        // 读取回复选项插件开关状态
+        const isReplyOptionsEnabled = ChatDB.getItem('tav_plugin_reply_options') === 'true';
+        const replyOptionsToggle = document.getElementById('tavReplyOptionsToggle');
+        if (replyOptionsToggle) {
+            if (isReplyOptionsEnabled) replyOptionsToggle.classList.add('active');
+            else replyOptionsToggle.classList.remove('active');
+        }
+
+        // 读取其他插件和预设开关状态
+        ['tavSysPromptToggle', 'tavJailbreakToggle', 'tavStyleToggle', 'tavNoteToggle', 'tavVectorToggle', 'tavTimeAwareToggle'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                const saved = ChatDB.getItem(`tav_plugin_${id}`);
+                if (String(saved) === 'false') el.classList.remove('active');
+                else if (String(saved) === 'true') el.classList.add('active');
+            }
+        });
+
+        tavUpdateContextTokens();
+    }
+}
+
+function tavSaveChatHistoryLength() {
+    const val = document.getElementById('tavChatHistoryLength').value;
+    ChatDB.setItem('tav_chat_history_length', val);
+    tavUpdateContextTokens();
+}
+
+function tavSaveOnlineChatHistoryLength() {
+    const val = document.getElementById('tavOnlineChatHistoryLength').value;
+    ChatDB.setItem('tav_online_chat_history_length', val);
+    tavUpdateContextTokens();
+}
+
+function tavUpdateContextTokens() {
+    let totalLength = 0;
+    
+    // 1. 计算提示词长度 (检查开关是否开启)
+    const sysToggle = document.getElementById('tavSystemPrompt')?.closest('.tav-status-item-card')?.querySelector('.tav-toggle-switch');
+    if (sysToggle && sysToggle.classList.contains('active')) {
+        totalLength += (document.getElementById('tavSystemPrompt')?.value || '').length;
+    }
+    
+    const jailToggle = document.getElementById('tavJailbreakPrompt')?.closest('.tav-status-item-card')?.querySelector('.tav-toggle-switch');
+    if (jailToggle && jailToggle.classList.contains('active')) {
+        totalLength += (document.getElementById('tavJailbreakPrompt')?.value || '').length;
+    }
+    
+    const styleToggle = document.getElementById('tavStylePrompt')?.closest('.tav-status-item-card')?.querySelector('.tav-toggle-switch');
+    if (styleToggle && styleToggle.classList.contains('active')) {
+        totalLength += (document.getElementById('tavStylePrompt')?.value || '').length;
+    }
+    
+    const noteToggle = document.getElementById('tavNotePrompt')?.closest('.tav-status-item-card')?.querySelector('.tav-toggle-switch');
+    if (noteToggle && noteToggle.classList.contains('active')) {
+        totalLength += (document.getElementById('tavNotePrompt')?.value || '').length;
+    }
+
+    // 2. 计算世界书长度
+    const savedWb = JSON.parse(ChatDB.getItem('tav_worldbook_bind') || '[]');
+    const wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    savedWb.forEach(id => {
+        const entry = wbData.entries.find(e => e.id === id);
+        if (entry && entry.content) totalLength += entry.content.length;
+    });
+
+    // 3. 计算聊天记录与记忆库长度
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId && currentLoginId) {
+        // 酒馆线下聊天记录
+        const historyLen = parseInt(ChatDB.getItem('tav_chat_history_length') || '20');
+        const msgCount = historyLen * 2;
+        let history = JSON.parse(ChatDB.getItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+        const recentHistory = msgCount > 0 ? history.slice(-msgCount) : [];
+        recentHistory.forEach(msg => {
+            if (msg.content) totalLength += msg.content.length;
+        });
+
+        // 线上微信聊天记录
+        const onlineHistoryLen = parseInt(ChatDB.getItem('tav_online_chat_history_length') || '10');
+        let onlineHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+        const recentOnlineHistory = onlineHistoryLen > 0 ? onlineHistory.slice(-onlineHistoryLen) : [];
+        recentOnlineHistory.forEach(msg => {
+            if (msg.content) totalLength += msg.content.length;
+        });
+
+        // 微信角色记忆库
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        const account = accounts.find(a => a.id === currentLoginId);
+        const personaId = account ? account.personaId : currentLoginId;
+        let chatAppMemory = JSON.parse(ChatDB.getItem(`char_memory_${personaId}_${currentChatRoomCharId}`) || '{}');
+        if (chatAppMemory.summary && chatAppMemory.summary.length > 0) totalLength += chatAppMemory.summary[0].content.length;
+        if (chatAppMemory.core && chatAppMemory.core.length > 0) chatAppMemory.core.forEach(m => totalLength += m.content.length);
+        if (chatAppMemory.note && chatAppMemory.note.length > 0) chatAppMemory.note.forEach(m => totalLength += m.content.length);
+    }
+
+    // 粗略估算 Token (中文约 1个字=1~1.5 token，英文 1个词=1.3 token，这里统一按 1.2 估算)
+    const estimatedTokens = Math.round(totalLength * 1.2);
+    const tokenEl = document.getElementById('tavContextTokenSize');
+    if (tokenEl) {
+        tokenEl.innerText = estimatedTokens + ' Tokens';
+    }
+}
+
+// Tab 切换逻辑
+function tavSwitchTab(tabName) {
+    document.querySelectorAll('.tav-right-tab').forEach(tab => tab.classList.remove('active'));
+    document.querySelectorAll('.tav-tab-content-container').forEach(content => content.classList.remove('active'));
+    
+    event.target.classList.add('active');
+    document.getElementById('tav-tab-' + tabName).classList.add('active');
+}
+
+// 外观设置：背景
+function tavChangeBackground(url) {
+    const panel = document.getElementById('tavernModePanel');
+    if(url) {
+        panel.style.backgroundImage = `url('${url}')`;
+        panel.style.backgroundSize = 'cover';
+        panel.style.backgroundPosition = 'center';
+    } else {
+        panel.style.backgroundImage = 'none';
+    }
+    ChatDB.setItem('tav_bg_image', url || '');
+}
+
+function tavHandleBgUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const base64 = e.target.result;
+        document.getElementById('tavBgUrlInput').value = ''; // 清空URL输入框
+        tavChangeBackground(base64);
+    };
+    reader.readAsDataURL(file);
+}
+
+// 外观设置：悬浮小球图片
+function tavChangeBallImage(url) {
+    const ball = document.getElementById('tav-floating-ball');
+    if(url) {
+        ball.style.backgroundImage = `url('${url}')`;
+    } else {
+        ball.style.backgroundImage = `url('https://api.dicebear.com/7.x/bottts/svg?seed=Status')`;
+    }
+    ChatDB.setItem('tav_ball_image', url || '');
+}
+
+function tavHandleBallUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const base64 = e.target.result;
+        document.getElementById('tavBallUrlInput').value = '';
+        tavChangeBallImage(base64);
+    };
+    reader.readAsDataURL(file);
+}
+
+// 外观设置：深色模式 (动态计算并修改 CSS 变量)
+function tavChangeBrightness(val) {
+    const ratio = val / 100;
+    const interpolate = (start, end) => Math.round(start + (end - start) * ratio);
+
+    // 背景色: #f9f9f9 (249) -> #111111 (17)
+    const bg = interpolate(249, 17);
+    // 卡片/表面色: #ffffff (255) -> #1e1e1e (30)
+    const surface = interpolate(255, 30);
+    // 边框色: #eeeeee (238) -> #333333 (51)
+    const border = interpolate(238, 51);
+    // 主文本色: #111111 (17) -> #eeeeee (238)
+    const textMain = interpolate(17, 238);
+    // 副文本色: #888888 (136) -> #aaaaaa (170)
+    const textSub = interpolate(136, 170);
+
+    const setVars = (elId) => {
+        const el = document.getElementById(elId);
+        if (!el) return;
+        el.style.setProperty('--tav-bg-color', `rgb(${bg}, ${bg}, ${bg})`);
+        el.style.setProperty('--tav-surface-color', `rgb(${surface}, ${surface}, ${surface})`);
+        el.style.setProperty('--tav-surface-rgb', `${surface}, ${surface}, ${surface}`); // 用于支持透明度
+        el.style.setProperty('--tav-border-color', `rgb(${border}, ${border}, ${border})`);
+        
+        // 核心修改：恢复深色模式对 UI 全局文字颜色的控制，不再受自定义颜色干扰
+        el.style.setProperty('--tav-text-main', `rgb(${textMain}, ${textMain}, ${textMain})`);
+        el.style.setProperty('--tav-text-sub', `rgb(${textSub}, ${textSub}, ${textSub})`);
+    };
+
+    setVars('tavernModePanel');
+    setVars('tavSidebarRight');
+
+    ChatDB.setItem('tav_brightness', val);
+}
+
+// 外观设置：卡片透明度
+function tavChangeCardOpacity(val) {
+    const opacity = val / 100;
+    document.getElementById('tavernModePanel').style.setProperty('--tav-card-opacity', opacity);
+    ChatDB.setItem('tav_card_opacity', val);
+}
+
+// 外观设置：字体大小
+function tavChangeFontSize(val) {
+    document.getElementById('tavernModePanel').style.setProperty('--tav-base-font-size', val + 'px');
+    ChatDB.setItem('tav_font_size', val);
+}
+
+// 外观设置：字体颜色
+function tavChangeFontColor(color) {
+    // 核心修改：只修改聊天内容的专属变量，不影响设置面板的 UI
+    document.getElementById('tavernModePanel').style.setProperty('--tav-custom-font-color', color);
+    ChatDB.setItem('tav_font_color', color);
+}
+
+// 外观设置：重置字体颜色 (跟随深色模式)
+function tavResetFontColor() {
+    ChatDB.removeItem('tav_font_color');
+    document.getElementById('tavernModePanel').style.removeProperty('--tav-custom-font-color');
+}
+
+// 外观设置：自定义字体
+function tavChangeFont(url) {
+    let style = document.getElementById('tav-custom-font-style');
+    if (!style) {
+        style = document.createElement('style');
+        style.id = 'tav-custom-font-style';
+        document.head.appendChild(style);
+    }
+    if (url) {
+        style.innerHTML = `
+            @font-face { font-family: 'TavCustomFont'; src: url('${url}'); }
+            #tavernModePanel *, #tavSidebarRight * { font-family: 'TavCustomFont', var(--tav-font-apple) !important; }
+        `;
+    } else {
+        style.innerHTML = '';
+    }
+}
+
+// 外观设置：自定义 CSS
+function tavApplyCustomCss(css) {
+    let style = document.getElementById('tav-custom-css-style');
+    if (!style) {
+        style = document.createElement('style');
+        style.id = 'tav-custom-css-style';
+        document.head.appendChild(style);
+    }
+    style.innerHTML = `#tavernModePanel, #tavSidebarRight { ${css} }`;
+}
+
+// 状态栏：实时预览
+function tavUpdateStatusPreview(textarea) {
+    const previewBox = textarea.parentElement.nextElementSibling.querySelector('.tav-status-preview-box');
+    if (previewBox) {
+        previewBox.innerHTML = textarea.value;
+    }
+}
+
+// 预设库弹窗逻辑
+function tavOpenPresetModal(title) {
+    document.getElementById('tavPresetModalTitle').innerText = title + ' 预设库';
+    document.getElementById('tavPresetModalOverlay').classList.add('show');
+}
+function tavClosePresetModal() {
+    document.getElementById('tavPresetModalOverlay').classList.remove('show');
+}
+
+// ================= 悬浮球拖拽逻辑 =================
+const tavBallContainer = document.getElementById('tav-floating-ball-container');
+let tavIsDragging = false;
+let tavStartX, tavStartY, tavInitialX, tavInitialY;
+
+if (tavBallContainer) {
+    tavBallContainer.addEventListener('mousedown', tavDragStart);
+    tavBallContainer.addEventListener('touchstart', tavDragStart, {passive: false});
+}
+
+function tavDragStart(e) {
+    if (e.target.closest('.tav-floating-panel')) return; // 点击面板内部不触发拖拽
+    tavIsDragging = false;
+    const touch = e.type === 'touchstart' ? e.touches[0] : e;
+    tavStartX = touch.clientX;
+    tavStartY = touch.clientY;
+    tavInitialX = tavBallContainer.offsetLeft;
+    tavInitialY = tavBallContainer.offsetTop;
+
+    document.addEventListener('mousemove', tavDrag);
+    document.addEventListener('touchmove', tavDrag, {passive: false});
+    document.addEventListener('mouseup', tavDragEnd);
+    document.addEventListener('touchend', tavDragEnd);
+}
+
+function tavDrag(e) {
+    const touch = e.type === 'touchmove' ? e.touches[0] : e;
+    const dx = touch.clientX - tavStartX;
+    const dy = touch.clientY - tavStartY;
+    
+    // 移动超过 5px 才算拖拽，防止误触
+    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+        tavIsDragging = true;
+    }
+
+    if (tavIsDragging) {
+        e.preventDefault();
+        tavBallContainer.style.left = `${tavInitialX + dx}px`;
+        tavBallContainer.style.top = `${tavInitialY + dy}px`;
+        tavBallContainer.style.right = 'auto';
+        tavBallContainer.style.bottom = 'auto';
+    }
+}
+
+function tavDragEnd(e) {
+    document.removeEventListener('mousemove', tavDrag);
+    document.removeEventListener('touchmove', tavDrag);
+    document.removeEventListener('mouseup', tavDragEnd);
+    document.removeEventListener('touchend', tavDragEnd);
+}
+
+function tavToggleFloatingPanel() {
+    if (!tavIsDragging) {
+        tavBallContainer.classList.toggle('expanded');
+    }
+}
+
+// ==========================================
+// 预设库逻辑 (Presets)
+// ==========================================
+let currentTavPresetType = '';
+
+function tavSavePreset(type) {
+    let inputId = '';
+    let typeName = '';
+    if (type === 'system') { inputId = 'tavSystemPrompt'; typeName = '系统提示词'; }
+    else if (type === 'jailbreak') { inputId = 'tavJailbreakPrompt'; typeName = '越狱提示词'; }
+    else if (type === 'style') { inputId = 'tavStylePrompt'; typeName = '自定义文风'; }
+    else if (type === 'note') { inputId = 'tavNotePrompt'; typeName = '作者备注'; }
+    else if (type === 'css') { inputId = 'tavCustomCssInput'; typeName = '自定义 CSS'; }
+
+    const content = document.getElementById(inputId).value.trim();
+    if (!content) return alert('内容不能为空！');
+
+    // 使用全局通用输入弹窗代替 prompt
+    const modal = document.getElementById('globalPromptModalOverlay');
+    const titleEl = document.getElementById('globalPromptTitle');
+    const descEl = document.getElementById('globalPromptDesc');
+    const inputEl = document.getElementById('globalPromptInput');
+    const confirmBtn = document.getElementById('globalPromptConfirmBtn');
+
+    titleEl.innerText = '保存预设';
+    descEl.innerText = `请输入【${typeName}】预设名称`;
+    inputEl.value = '';
+    inputEl.placeholder = '预设名称...';
+
+    // 克隆按钮以移除旧事件
+    const newConfirmBtn = confirmBtn.cloneNode(true);
+    confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
+
+    newConfirmBtn.onclick = () => {
+        const name = inputEl.value.trim();
+        if (!name) {
+            alert('预设名称不能为空！');
+            return;
+        }
+        let presets = JSON.parse(ChatDB.getItem(`tav_presets_${type}`) || '[]');
+        presets.push({ id: Date.now().toString(), name: name, content: content });
+        ChatDB.setItem(`tav_presets_${type}`, JSON.stringify(presets));
+        alert('保存成功！');
+        if (typeof closeGlobalPrompt === 'function') closeGlobalPrompt();
+    };
+
+    inputEl.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            newConfirmBtn.click();
+        }
+    };
+
+    modal.classList.add('show');
+    setTimeout(() => inputEl.focus(), 100);
+}
+
+function tavOpenPresetModal(type, title) {
+    currentTavPresetType = type;
+    document.getElementById('tavPresetModalTitle').innerText = title + ' 预设库';
+    
+    const listEl = document.getElementById('tavPresetModalList');
+    listEl.innerHTML = '';
+    
+    let presets = JSON.parse(ChatDB.getItem(`tav_presets_${type}`) || '[]');
+    if (presets.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; font-size:12px; padding:20px;">暂无预设</div>';
+    } else {
+        presets.forEach(p => {
+            const item = document.createElement('div');
+            item.className = 'preset-item'; // 使用全局 preset-item 样式
+            item.innerHTML = `
+                <span class="preset-item-name" onclick="tavLoadPreset('${p.id}')">${p.name}</span>
+                <span style="color: #ff3b30; font-size: 18px; padding: 0 5px; cursor: pointer;" onclick="tavDeletePreset('${p.id}', event)">×</span>
+            `;
+            listEl.appendChild(item);
+        });
+    }
+    
+    document.getElementById('tavPresetModalOverlay').classList.add('show');
+}
+
+// ==========================================
+// 关联世界书逻辑 (复用角色库世界书弹窗逻辑)
+// ==========================================
+let selectedTavWbEntries = [];
+
+function openTavWbSelectModal() {
+    const listEl = document.getElementById('tavWbSelectList');
+    listEl.innerHTML = '';
+    
+    // 读取全局世界书数据
+    const wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { groups: [], entries: [] };
+    
+    // 读取当前已绑定的世界书
+    const savedWb = JSON.parse(ChatDB.getItem('tav_worldbook_bind') || '[]');
+    selectedTavWbEntries = [...savedWb];
+
+    if (wbData.groups.length === 0 || wbData.entries.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#aaa; font-size:12px; padding:20px;">暂无世界书数据，请先在 Worldbook 中创建</div>';
+    } else {
+        wbData.groups.forEach(group => {
+            const groupEntries = wbData.entries.filter(e => e.group === group);
+            if (groupEntries.length === 0) return;
+
+            const groupContainer = document.createElement('div');
+            groupContainer.style.borderBottom = '1px solid #f5f5f5';
+
+            const groupHeader = document.createElement('div');
+            groupHeader.style.display = 'flex';
+            groupHeader.style.alignItems = 'center';
+            groupHeader.style.justifyContent = 'space-between';
+            groupHeader.style.padding = '15px 5px';
+            groupHeader.style.cursor = 'pointer';
+
+            const leftDiv = document.createElement('div');
+            leftDiv.style.display = 'flex';
+            leftDiv.style.alignItems = 'center';
+            leftDiv.style.gap = '12px';
+
+            const groupCb = document.createElement('input');
+            groupCb.type = 'checkbox';
+            groupCb.setAttribute('data-group-target', group);
+            groupCb.style.width = '18px';
+            groupCb.style.height = '18px';
+            groupCb.style.cursor = 'pointer';
+            groupCb.style.accentColor = '#333';
+
+            const allSelected = groupEntries.every(e => selectedTavWbEntries.includes(e.id));
+            groupCb.checked = allSelected;
+
+            groupCb.onclick = (e) => e.stopPropagation();
+
+            groupCb.onchange = (e) => {
+                const isChecked = e.target.checked;
+                document.querySelectorAll(`.tav-wb-entry-checkbox[data-group-name="${group}"]`).forEach(cb => {
+                    cb.checked = isChecked;
+                    if (isChecked && !selectedTavWbEntries.includes(cb.value)) {
+                        selectedTavWbEntries.push(cb.value);
+                    } else if (!isChecked) {
+                        selectedTavWbEntries = selectedTavWbEntries.filter(id => id !== cb.value);
+                    }
+                });
+            };
+
+            const titleSpan = document.createElement('span');
+            titleSpan.innerText = group;
+            titleSpan.style.fontSize = '15px';
+            titleSpan.style.color = '#333';
+            titleSpan.style.fontWeight = '500';
+
+            leftDiv.appendChild(groupCb);
+            leftDiv.appendChild(titleSpan);
+
+            const arrowSvg = document.createElement('div');
+            arrowSvg.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="#aaa" style="transition: transform 0.2s;"><path d="M7 10l5 5 5-5z"/></svg>`;
+            const arrowIcon = arrowSvg.firstChild;
+
+            groupHeader.appendChild(leftDiv);
+            groupHeader.appendChild(arrowSvg);
+
+            const entriesContainer = document.createElement('div');
+            entriesContainer.style.display = 'none';
+            entriesContainer.style.paddingBottom = '10px';
+
+            groupHeader.onclick = () => {
+                const isHidden = entriesContainer.style.display === 'none';
+                entriesContainer.style.display = isHidden ? 'block' : 'none';
+                arrowIcon.style.transform = isHidden ? 'rotate(180deg)' : 'rotate(0deg)';
+            };
+
+            groupEntries.forEach(entry => {
+                const entryDiv = document.createElement('div');
+                entryDiv.style.display = 'flex';
+                entryDiv.style.alignItems = 'center';
+                entryDiv.style.gap = '12px';
+                entryDiv.style.padding = '12px 5px 12px 35px';
+
+                const entryCb = document.createElement('input');
+                entryCb.type = 'checkbox';
+                entryCb.className = `tav-wb-entry-checkbox`;
+                entryCb.setAttribute('data-group-name', group);
+                entryCb.value = entry.id;
+                entryCb.checked = selectedTavWbEntries.includes(entry.id);
+                entryCb.style.width = '16px';
+                entryCb.style.height = '16px';
+                entryCb.style.cursor = 'pointer';
+                entryCb.style.accentColor = '#666';
+
+                entryCb.onchange = (e) => {
+                    if (e.target.checked) {
+                        if (!selectedTavWbEntries.includes(entry.id)) selectedTavWbEntries.push(entry.id);
+                    } else {
+                        selectedTavWbEntries = selectedTavWbEntries.filter(id => id !== entry.id);
+                    }
+                    const allCbs = Array.from(document.querySelectorAll(`.tav-wb-entry-checkbox[data-group-name="${group}"]`));
+                    const allChecked = allCbs.every(cb => cb.checked);
+                    document.querySelector(`input[data-group-target="${group}"]`).checked = allChecked;
+                };
+
+                const entryTitle = document.createElement('div');
+                entryTitle.style.display = 'flex';
+                entryTitle.style.flexDirection = 'column';
+                entryTitle.style.gap = '2px';
+                entryTitle.style.overflow = 'hidden';
+                entryTitle.innerHTML = `
+                    <span style="font-size: 14px; color: #333; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${entry.title || '未命名'}</span>
+                    <span style="font-size: 11px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${entry.keywords || ''}</span>
+                `;
+
+                entryDiv.appendChild(entryCb);
+                entryDiv.appendChild(entryTitle);
+                entriesContainer.appendChild(entryDiv);
+            });
+
+            groupContainer.appendChild(groupHeader);
+            groupContainer.appendChild(entriesContainer);
+            listEl.appendChild(groupContainer);
+        });
+    }
+    
+    document.getElementById('tavWbSelectModalOverlay').classList.add('show');
+}
+
+function toggleTavWbEntry(id, isChecked) {
+    if (isChecked) {
+        if (!selectedTavWbEntries.includes(id)) selectedTavWbEntries.push(id);
+    } else {
+        selectedTavWbEntries = selectedTavWbEntries.filter(e => e !== id);
+    }
+}
+
+function confirmTavWbSelect() {
+    ChatDB.setItem('tav_worldbook_bind', JSON.stringify(selectedTavWbEntries));
+    updateTavWbSelectText();
+    document.getElementById('tavWbSelectModalOverlay').classList.remove('show');
+}
+
+function updateTavWbSelectText() {
+    const savedWb = JSON.parse(ChatDB.getItem('tav_worldbook_bind') || '[]');
+    const textEl = document.getElementById('tavWbSelectText');
+    if (savedWb.length > 0) {
+        textEl.innerHTML = `已选择 ${savedWb.length} 项 <svg viewBox="0 0 24 24" width="14" height="14" stroke="#ccc" stroke-width="2" fill="none"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
+        textEl.style.color = '#111';
+        textEl.style.fontWeight = 'bold';
+    } else {
+        textEl.innerHTML = `未选择 <svg viewBox="0 0 24 24" width="14" height="14" stroke="#ccc" stroke-width="2" fill="none"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
+        textEl.style.color = '#888';
+        textEl.style.fontWeight = 'normal';
+    }
+}
+
+// 页面加载时更新世界书文本
+window.addEventListener('ChatDBReady', () => {
+    if (document.getElementById('tavWbSelectText')) {
+        updateTavWbSelectText();
+    }
+});
+
+function tavLoadPreset(id) {
+    let presets = JSON.parse(ChatDB.getItem(`tav_presets_${currentTavPresetType}`) || '[]');
+    const preset = presets.find(p => p.id === id);
+    if (preset) {
+        let inputId = '';
+        if (currentTavPresetType === 'system') inputId = 'tavSystemPrompt';
+        else if (currentTavPresetType === 'jailbreak') inputId = 'tavJailbreakPrompt';
+        else if (currentTavPresetType === 'style') inputId = 'tavStylePrompt';
+        else if (currentTavPresetType === 'note') inputId = 'tavNotePrompt';
+        else if (currentTavPresetType === 'css') inputId = 'tavCustomCssInput';
+        
+                document.getElementById(inputId).value = preset.content;
+                if (currentTavPresetType === 'css') {
+                    tavApplyCustomCss(preset.content);
+                } else {
+                    tavSaveActivePrompt(currentTavPresetType, preset.content);
+                }
+                tavClosePresetModal();
+
+    }
+}
+
+function tavDeletePreset(id, e) {
+    e.stopPropagation();
+    if (confirm('确定删除此预设吗？')) {
+        let presets = JSON.parse(ChatDB.getItem(`tav_presets_${currentTavPresetType}`) || '[]');
+        presets = presets.filter(p => p.id !== id);
+        ChatDB.setItem(`tav_presets_${currentTavPresetType}`, JSON.stringify(presets));
+        // 重新渲染列表
+        let title = document.getElementById('tavPresetModalTitle').innerText.replace(' 预设库', '');
+        tavOpenPresetModal(currentTavPresetType, title);
+    }
+}
+
+// ==========================================
+// 状态栏管理逻辑 (Status Bar)
+// ==========================================
+function openTavAddStatusBarPanel() {
+    document.getElementById('tavNewStatusName').value = '';
+    document.getElementById('tavNewStatusPos').value = 'floating';
+    document.getElementById('tavNewStatusRegex').value = '';
+    document.getElementById('tavNewStatusPrompt').value = '';
+    document.getElementById('tavNewStatusHtml').value = '';
+    
+    // 动态渲染分组选项
+    const groupSelect = document.getElementById('tavNewStatusGroup');
+    if (groupSelect) {
+        let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+        let groups = new Set(['默认分组', '未分类分组']);
+        statusBars.forEach(sb => {
+            if (sb.group) groups.add(sb.group);
+        });
+        
+        groupSelect.innerHTML = '';
+        groups.forEach(g => {
+            let opt = document.createElement('option');
+            opt.value = g;
+            opt.text = g;
+            groupSelect.appendChild(opt);
+        });
+        
+        // 默认选中当前所在分组，如果在大厅则默认未分类
+        groupSelect.value = window.currentTavStatusGroup || '未分类分组';
+    }
+
+    document.getElementById('tavAddStatusBarPanel').style.display = 'flex';
+}
+
+function closeTavAddStatusBarPanel() {
+    document.getElementById('tavAddStatusBarPanel').style.display = 'none';
+}
+
+// 全局变量记录当前所在的状态栏分组
+window.currentTavStatusGroup = null;
+
+function saveTavStatusBar() {
+    const name = document.getElementById('tavNewStatusName').value.trim();
+    const pos = document.getElementById('tavNewStatusPos').value;
+    const regex = document.getElementById('tavNewStatusRegex').value.trim();
+    const promptText = document.getElementById('tavNewStatusPrompt').value.trim();
+    const html = document.getElementById('tavNewStatusHtml').value.trim();
+    const groupSelect = document.getElementById('tavNewStatusGroup');
+    const group = groupSelect ? groupSelect.value : (window.currentTavStatusGroup || '未分类分组');
+
+    if (!name || !regex || !html) return alert('请填写完整信息！');
+
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+    statusBars.push({
+        id: Date.now().toString(),
+        name, pos, regex, prompt: promptText, html, active: true,
+        group: group
+    });
+    ChatDB.setItem('tav_status_bars', JSON.stringify(statusBars));
+    
+    closeTavAddStatusBarPanel();
+    
+    if (window.currentTavStatusGroup) {
+        openTavGroupDetail(window.currentTavStatusGroup);
+    } else {
+        renderTavStatusBars();
+    }
+}
+
+function renderTavStatusBars() {
+    const listEl = document.getElementById('tavStatusBarList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    // 核心修改：升级到 v19，注入美乐蒂状态栏 (5号)
+    let isInit = ChatDB.getItem('tav_statusbar_initialized_v19');
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+    if (!Array.isArray(statusBars)) statusBars = []; // 容错：确保一定是数组
+    
+    if (!isInit) {
+        // 过滤掉旧的内置状态栏，保留用户自定义的 (增加 sb 和 sb.id 的安全校验，并强制转为字符串)
+        statusBars = statusBars.filter(sb => sb && sb.id && !String(sb.id).startsWith('builtin_status_'));
+        
+        // 注入新版内置状态栏 (保留 1, 2, 3, 4，新增 5)
+        statusBars.unshift(
+            {
+                id: 'builtin_status_1',
+                name: '透明折叠栏 - 状态by卷卷狗',
+                pos: 'card_bottom',
+                regex: '状态栏1:\\s*([\\s\\S]*?)(?=状态栏[2-9]:|$)',
+                prompt: '【状态栏1输出指令】\n请在回复末尾严格按以下格式输出状态栏数据（用竖线 | 分隔，共11项，中间不要换行）：\n状态栏1:角色名|状态|角色的衣着细节描写|角色当前的具体动作描写|此时此刻对User的内心印象|好感度(如80%)|当前时间|角色的内心吐槽或隐秘情绪|User名称|User的衣着细节描写|User当前的具体动作描写',
+                html: `<div class="hanxi-container">\n    <details class="hanxi-panel">\n        <summary><div class="panel-summary-title">₊˚.𓏴ᦒ 𝐂𝐡𝐚𝐫 & 𝐔𝐬𝐞𝐫 𝐒𝐭𝐚𝐭𝐮𝐬 ᦒ𓏴 ₊˚</div></summary>\n        <div class="panel-content">\n          <!-- Char 区 -->\n          <div style="border-bottom: 1px dashed rgba(255,255,255,0.1); padding-bottom: 12px; margin-bottom: 12px;">\n          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">\n          <span style="font-size: 12px; font-weight: bold; color: inherit;">@{{1}}</span>\n          <span style="font-size: 9px; opacity: 0.6;">{{2}}</span>\n          </div>\n          <div style="font-size: 10px; line-height: 1.6; opacity: 0.8;">\n          [衣着]：{{3}}<br>\n          [动作]：{{4}}<br>\n          [印象]：{{5}}\n          </div>\n          <!-- 好感度条 -->\n          <div style="margin-top: 8px; display: flex; align-items: center; gap: 6px;">\n          <span style="font-size: 9px; opacity: 0.6;">好感</span>\n          <div style="flex: 1; height: 2px; background: rgba(128,128,128,0.2); border-radius: 2px;">\n          <div style="width: {{6}}; height: 100%; background: currentColor; opacity: 0.8; border-radius: 2px;"></div>\n          </div>\n          </div>\n          <!-- 语音备忘录样式 OS -->\n          <div style="margin-top: 10px; background: rgba(128,128,128,0.15); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px;">\n          <div style="display: flex; align-items: center; gap: 8px;">\n          <div style="width: 20px; height: 20px; border-radius: 50%; background: currentColor; display: flex; justify-content: center; align-items: center;">\n          <svg width="8" height="8" viewBox="0 0 24 24" fill="#fff" style="mix-blend-mode: difference;"><path d="M8 5v14l11-7z"/></svg>\n          </div>\n          <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='20' viewBox='0 0 100 20'%3E%3Cpath d='M0 10 Q 5 0, 10 10 T 20 10 Q 25 20, 30 10 T 40 10 Q 45 0, 50 10 T 60 10 Q 65 20, 70 10 T 80 10 Q 85 0, 90 10 T 100 10' fill='none' stroke='rgba(128,128,128,0.5)' stroke-width='1.5'/%3E%3C/svg%3E" style="height: 14px; opacity: 0.7;">\n          <span style="font-size: 9px; opacity: 0.6;">{{7}}</span>\n          </div>\n          <div style="font-size: 10px; opacity: 0.7; padding-left: 2px;">(OS：{{8}})</div>\n          </div>\n          </div>\n\n          <!-- User 区 -->\n          <div>\n          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">\n          <span style="font-size: 12px; font-weight: bold; color: inherit;">@{{9}}</span>\n          </div>\n          <div style="font-size: 10px; line-height: 1.6; opacity: 0.8; margin-bottom: 12px;">\n          [衣着]：{{10}}<br>\n          [动作]：{{11}}\n          </div>\n          </div>\n        </div>\n    </details>\n</div>`,
+                active: true,
+                theme: '',
+                group: '默认分组'
+            },
+            {
+                id: 'builtin_status_2',
+                name: '透明折叠栏 - 手机记录by卷卷狗',
+                pos: 'card_bottom',
+                regex: '状态栏2:\\s*([\\s\\S]*?)(?=状态栏[1-9]:|$)',
+                prompt: '【状态栏2输出指令】\n请在回复末尾严格按以下格式输出手机记录数据（用竖线 | 分隔，共15项，中间不要换行）：\n状态栏2:搜索提示词|搜索历史1|搜索原因吐槽1|搜索历史2|搜索原因吐槽2|搜索历史3|搜索原因吐槽3|群聊或私聊对象|对方昵称|对方发送的具体消息内容|Char回复的具体消息内容|社交平台名|推送账号名|具体的推送图文或八卦内容|Char看到这条推送后的行为或情绪反应',
+                html: `<div class="hanxi-container">\n    <details class="hanxi-panel">\n        <summary><div class="panel-summary-title">₊˚.𓏴ᦒ 𝐏𝐡𝐨𝐧𝐞 𝐑𝐞𝐜𝐨𝐫𝐝𝐬 ᦒ𓏴 ₊˚</div></summary>\n        <div class="panel-content scroll-area" style="max-height: 250px; overflow-y: auto;">\n          \n          <!-- 搜索框 -->\n          <div style="background: rgba(128,128,128,0.1); border-radius: 16px; padding: 6px 12px; display: flex; align-items: center; gap: 8px; margin-bottom: 14px;">\n          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.5;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>\n          <span style="font-size: 10px; opacity: 0.5;">{{1}}</span>\n          </div>\n\n          <!-- 搜索历史 -->\n          <div style="margin-bottom: 16px;">\n          <div style="font-size: 9px; opacity: 0.6; margin-bottom: 8px; border-bottom: 1px solid rgba(128,128,128,0.1); padding-bottom: 4px;">搜索历史</div>\n          <div style="display: flex; flex-direction: column; gap: 8px;">\n          \n          <div>\n          <div style="font-size: 11px; color: inherit; display: flex; align-items: center;">\n          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px; opacity:0.6;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>\n          {{2}}\n          </div>\n          <div style="font-size: 9px; opacity: 0.6; padding-left: 16px; margin-top: 2px;">({{3}})</div>\n          </div>\n          \n          <div>\n          <div style="font-size: 11px; color: inherit; display: flex; align-items: center;">\n          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px; opacity:0.6;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>\n          {{4}}\n          </div>\n          <div style="font-size: 9px; opacity: 0.6; padding-left: 16px; margin-top: 2px;">({{5}})</div>\n          </div>\n          \n          <div>\n          <div style="font-size: 11px; color: inherit; display: flex; align-items: center;">\n          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px; opacity:0.6;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>\n          {{6}}\n          </div>\n          <div style="font-size: 9px; opacity: 0.6; padding-left: 16px; margin-top: 2px;">({{7}})</div>\n          </div>\n\n          </div>\n          </div>\n\n          <!-- 聊天记录 -->\n          <div style="margin-bottom: 16px;">\n          <div style="font-size: 9px; opacity: 0.6; margin-bottom: 8px; border-bottom: 1px solid rgba(128,128,128,0.1); padding-bottom: 4px;">近期消息 ({{8}})</div>\n          <div style="display: flex; flex-direction: column; gap: 10px;">\n          <!-- 左侧 -->\n          <div style="display: flex; align-items: flex-start; gap: 6px;">\n          <div style="width: 22px; height: 22px; border-radius: 50%; background: rgba(128,128,128,0.3); flex-shrink: 0; display:flex; align-items:center; justify-content:center; font-size:8px; color:inherit;">[字]</div>\n          <div>\n          <div style="font-size: 8px; opacity: 0.6; margin-bottom: 2px;">{{9}}</div>\n          <div style="background: rgba(128,128,128,0.15); padding: 6px 10px; border-radius: 2px 10px 10px 10px; font-size: 10px; color: inherit;">{{10}}</div>\n          </div>\n          </div>\n          <!-- 右侧 -->\n          <div style="display: flex; align-items: flex-start; gap: 6px; justify-content: flex-end;">\n          <div>\n          <div style="background: currentColor; padding: 6px 10px; border-radius: 10px 2px 10px 10px; font-size: 10px; color: #fff; mix-blend-mode: normal;">{{11}}</div>\n          </div>\n          </div>\n          </div>\n          </div>\n\n          <!-- 社交平台推送 -->\n          <div>\n          <div style="font-size: 9px; opacity: 0.6; margin-bottom: 8px; border-bottom: 1px solid rgba(128,128,128,0.1); padding-bottom: 4px;">{{12}} 推送</div>\n          <div style="background: rgba(128,128,128,0.1); border-radius: 8px; padding: 10px; border: 1px solid rgba(128,128,128,0.05);">\n          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">\n          <span style="font-size: 9px; opacity: 0.7;">{{12}}</span>\n          <span style="font-size: 8px; opacity: 0.5;">刚刚</span>\n          </div>\n          <div style="font-size: 11px; font-weight: bold; margin-bottom: 4px; color: inherit;">@{{13}}</div>\n          <div style="font-size: 10px; opacity: 0.8; line-height: 1.4;">"{{14}}"</div>\n          <div style="margin-top: 8px; font-size: 9px; opacity: 0.6; border-top: 1px dashed rgba(128,128,128,0.2); padding-top: 6px;">\n          [反应]：{{15}}\n          </div>\n          </div>\n          </div>\n\n        </div>\n    </details>\n</div>`,
+                active: true,
+                theme: '',
+                group: '默认分组'
+            },
+            {
+                id: 'builtin_status_3',
+                name: '透明折叠栏 - 文字小剧场by卷卷狗',
+                pos: 'card_bottom',
+                regex: '状态栏3:\\s*([\\s\\S]*?)(?=状态栏[1-9]:|$)',
+                prompt: '【状态栏3输出指令】\n请在回复末尾严格按以下格式输出小剧场数据（用竖线 | 分隔，共8项，中间不要换行）：\n状态栏3:剧场大标题|分类|风格|属性|小剧场小说正文第一段。要求不少于五百字，分段描写，风格细腻平淡，注意展现人物关系|小剧场小说正文第二段。描写具体动作和环境细节|小剧场小说正文第四段。保持文字质感，不截断|小剧场小说正文结尾段',
+                html: `<div class="hanxi-container">\n    <details class="hanxi-panel">\n        <summary><div class="panel-summary-title">₊˚.𓏴ᦒ 𝐒𝐞𝐜𝐫𝐞𝐭 𝐓𝐡𝐞𝐚𝐭𝐞𝐫 ᦒ𓏴 ₊˚</div></summary>\n        <div class="panel-content scroll-area" style="max-height: 300px; overflow-y: auto; text-align: justify;">\n          \n          <div style="text-align: center; margin-bottom: 16px;">\n          <div style="font-size: 14px; font-weight: bold; color: inherit; letter-spacing: 2px; margin-bottom: 6px;">《{{1}}》</div>\n          <div>\n          <span class="rounded-tag">{{2}}</span>\n          <span class="rounded-tag">{{3}}</span>\n          <span class="rounded-tag">{{4}}</span>\n          </div>\n          </div>\n\n          <div style="font-size: 11px; opacity: 0.9; line-height: 1.8; padding: 0 4px;">\n          <p style="margin-bottom: 12px; text-indent: 2em;">{{5}}</p>\n          \n          <p style="margin-bottom: 12px; text-indent: 2em;">{{6}}</p>\n          \n          <p style="margin-bottom: 12px; text-indent: 2em;">{{7}}</p>\n          \n          <p style="margin-bottom: 12px; text-indent: 2em;">{{8}}</p>\n          </div>\n\n        </div>\n    </details>\n</div>`,
+                active: true,
+                theme: '',
+                group: '默认分组'
+            },
+            {
+                id: 'builtin_status_4',
+                name: '薄巧文件夹状态栏by卷卷狗',
+                pos: 'card_bottom',
+                regex: '状态栏4:\\s*([\\s\\S]*?)(?=状态栏[1-9]:|$)',
+                prompt: '【状态栏4输出指令】\n请在回复末尾严格按以下格式输出薄巧文件夹状态栏数据（用竖线 | 分隔，共37项，中间不要换行）：\n状态栏4:char的ID或昵称|char当前心情颜文字|当前衣着细节|正在做什么动作|动物塑心理|好感度数值(仅数字)|正在播放的歌曲名|歌手名|一段char关于user的内心os|日期|刚刚点赞了谁的什么帖子内容|原贴主发布的图文内容缩影|char在下面的评论内容|精简的心里小剧场段落1|精简的心里小剧场段落2|最后停留的APP|屏幕上的具体界面详情|char看着屏幕的反应|消息1的详细剧情及反应|消息1时间|发件人1|消息1预览|消息2的详细剧情及反应|消息2时间|发件人2|消息2预览|热搜1详细始末及反应|热搜词条1|热搜2详细始末及反应|热搜词条2|行程1时间|安排1|行程2时间|安排2|未完成原因|行程3时间|安排3',
+                html: `<div class="mufy-folder">\n    <img src="https://s3.uuu.ovh/2026/05/21/815cVPPS.png" class="floating-sticker" alt="sticker">\n    <div class="folder-tabs">\n        <div class="tab-btn active" onclick="let tabs=this.parentElement.children; for(let t of tabs) t.classList.remove('active'); this.classList.add('active'); let panes=this.parentElement.nextElementSibling.children; for(let p of panes) p.classList.remove('active'); panes[0].classList.add('active');">Profile</div>\n        <div class="tab-btn" onclick="let tabs=this.parentElement.children; for(let t of tabs) t.classList.remove('active'); this.classList.add('active'); let panes=this.parentElement.nextElementSibling.children; for(let p of panes) p.classList.remove('active'); panes[1].classList.add('active');">Social</div>\n        <div class="tab-btn" onclick="let tabs=this.parentElement.children; for(let t of tabs) t.classList.remove('active'); this.classList.add('active'); let panes=this.parentElement.nextElementSibling.children; for(let p of panes) p.classList.remove('active'); panes[2].classList.add('active');">Notice</div>\n        <div class="tab-btn" onclick="let tabs=this.parentElement.children; for(let t of tabs) t.classList.remove('active'); this.classList.add('active'); let panes=this.parentElement.nextElementSibling.children; for(let p of panes) p.classList.remove('active'); panes[3].classList.add('active');">Schedule</div>\n    </div>\n    <div class="folder-body">\n        <div class="tab-pane active">\n            <div class="card-box">\n                <div class="box-title">ID Card</div>\n                <div class="profile-wrap">\n                    <div class="avatar-ring"><div class="profile-avatar"></div></div>\n                    <div class="info-wrap">\n                        <div class="name-line"><span class="char-name">{{1}}</span><span class="char-mood">{{2}}</span></div>\n                        <div class="status-list">\n                            <span class="status-item">OUTFIT: {{3}}</span>\n                            <span class="status-item">ACTION: {{4}}</span>\n                            <span class="status-item">INNER: {{5}}</span>\n                        </div>\n                    </div>\n                </div>\n                <div style="font-family: Arial, sans-serif; font-size: 9px; color: var(--choco-light); margin-bottom: 4px;">Affection Level {{6}}%</div>\n                <div style="width: 100%; height: 3px; background: var(--mint-bg); border-radius: 2px;">\n                    <div style="width: {{6}}%; height: 100%; background: var(--choco-light); border-radius: 2px;"></div>\n                </div>\n                <div class="music-player">\n                    <div class="music-icon">♪</div>\n                    <div class="music-info">\n                        <div class="music-title">{{7}}</div>\n                        <div class="music-artist">{{8}}</div>\n                    </div>\n                </div>\n            </div>\n            <div class="card-box">\n                <div class="box-title">OS</div>\n                <div class="dm-content">{{9}}</div>\n                <div style="text-align: right; font-family: Arial, sans-serif; font-size: 8px; color: var(--choco-light); margin-top: 8px;">Since. {{10}}</div>\n            </div>\n        </div>\n        <div class="tab-pane">\n            <div class="card-box">\n                <div class="box-title">Social Trace</div>\n                <div class="social-item">\n                    <div class="social-type">♡ LIKED POST</div>\n                    <div class="social-text">{{11}}</div>\n                </div>\n                <div class="social-item">\n                    <div class="social-type">✎ COMMENTED ON</div>\n                    <div class="social-quote">{{12}}</div>\n                    <div class="social-text" style="margin-top: 4px;">{{13}}</div>\n                </div>\n                <div class="social-item">\n                    <div class="social-type">💭 THEATER</div>\n                    <div class="social-text"><p>{{14}}</p><p>{{15}}</p></div>\n                </div>\n            </div>\n            <div class="card-box" style="background: transparent; border: none; box-shadow: none; padding: 0;">\n                <div class="screen-stay">\n                    <div class="screen-app">Current Screen: {{16}}</div>\n                    <div class="screen-desc">{{17}}</div>\n                    <div class="screen-reaction">{{18}}</div>\n                </div>\n            </div>\n        </div>\n        <div class="tab-pane">\n            <div class="card-box" style="background: transparent; border: none; box-shadow: none; padding: 0;">\n                <div class="noti-box" onclick="this.parentElement.style.display='none'; this.parentElement.nextElementSibling.style.display='block'; this.parentElement.nextElementSibling.querySelector('.detail-text').innerText='{{19}}';">\n                    <div class="noti-top"><span class="noti-app">Message</span><span class="noti-time">{{20}}</span></div>\n                    <div class="noti-title">{{21}}</div>\n                    <div class="noti-preview">{{22}}</div>\n                </div>\n                <div class="noti-box" onclick="this.parentElement.style.display='none'; this.parentElement.nextElementSibling.style.display='block'; this.parentElement.nextElementSibling.querySelector('.detail-text').innerText='{{23}}';">\n                    <div class="noti-top"><span class="noti-app">WeChat</span><span class="noti-time">{{24}}</span></div>\n                    <div class="noti-title">{{25}}</div>\n                    <div class="noti-preview">{{26}}</div>\n                </div>\n                <div class="noti-box" onclick="this.parentElement.style.display='none'; this.parentElement.nextElementSibling.style.display='block'; this.parentElement.nextElementSibling.querySelector('.detail-text').innerText='{{27}}';">\n                    <div class="noti-top"><span class="noti-app">Hot Search</span><span class="noti-time">Just now</span></div>\n                    <div class="noti-title">{{28}}</div>\n                    <div class="noti-preview">Tap to read more details...</div>\n                </div>\n                <div class="noti-box" onclick="this.parentElement.style.display='none'; this.parentElement.nextElementSibling.style.display='block'; this.parentElement.nextElementSibling.querySelector('.detail-text').innerText='{{29}}';">\n                    <div class="noti-top"><span class="noti-app">Hot Search</span><span class="noti-time">1h ago</span></div>\n                    <div class="noti-title">{{30}}</div>\n                    <div class="noti-preview">Tap to read more details...</div>\n                </div>\n            </div>\n            <div class="card-box detail-view">\n                <div class="back-btn" onclick="this.parentElement.style.display='none'; this.parentElement.previousElementSibling.style.display='block';">◂ Back</div>\n                <div class="detail-text"></div>\n            </div>\n        </div>\n        <div class="tab-pane">\n            <div class="card-box">\n                <div class="box-title">Timeline</div>\n                <div class="tl-container">\n                    <div class="tl-item">\n                        <div class="tl-marker"></div>\n                        <div class="tl-time">{{31}}</div>\n                        <div class="tl-card">\n                            <div class="tl-task">{{32}}</div>\n                            <div class="tl-status status-done">√ Completed</div>\n                        </div>\n                    </div>\n                    <div class="tl-item">\n                        <div class="tl-marker"></div>\n                        <div class="tl-time">{{33}}</div>\n                        <div class="tl-card">\n                            <div class="tl-task">{{34}}</div>\n                            <div class="tl-status status-fail">× Skipped</div>\n                            <div class="tl-note">Reason: {{35}}</div>\n                        </div>\n                    </div>\n                    <div class="tl-item">\n                        <div class="tl-marker"></div>\n                        <div class="tl-time">{{36}}</div>\n                        <div class="tl-card">\n                            <div class="tl-task">{{37}}</div>\n                            <div class="tl-status status-done">√ Completed</div>\n                        </div>\n                    </div>\n                </div>\n            </div>\n        </div>\n    </div>\n</div>`,
+                active: true,
+                theme: '',
+                group: '默认分组'
+            },
+            {
+                id: 'builtin_status_5',
+                name: '美乐蒂状态栏bycensy小助手/晴转猫猫雨',
+                pos: 'card_bottom',
+                regex: '状态栏5:\\s*([\\s\\S]*?)(?=状态栏[1-9]:|$)',
+                prompt: '【状态栏5输出指令】\n请在回复末尾严格按以下格式输出美乐蒂状态栏数据（用竖线 | 分隔，共55项，中间不要换行）：\n状态栏5:char的心情 简短中文加纯文本颜文字|好感度数值(仅数字)|char当前所在地点|char当前的服装打扮，简短描述|char当前正在进行的当前动作|简短描述当前的内心OS，符合人物性格，用引号包裹|日期|天气|第一人称的日记内容，记录今天发生的趣事或对user的吐槽，符合角色性格|符合背景设定的社交软件通知|符合背景设定的通讯软件提醒|符合背景设定的日历行程安排|备忘录事项1|备忘录事项2|备忘录事项3|搜索历史1|搜索历史2|搜索历史3|私聊发送方1|私聊内容1|char名字|char私聊回复|私聊发送方2|私聊内容2|群聊名称|群成员A|群成员A发言|char名字|char群聊发言1|群成员B|群成员B发言|群成员C|群成员C发言|char名字|char群聊发言2|符合当前情境的弹幕1|符合当前情境的弹幕2|符合当前情境的弹幕3|符合当前情境的弹幕4|符合当前情境的弹幕5|符合当前情境的弹幕6|符合当前情境的弹幕7|符合当前情境的弹幕8|符合当前情境的弹幕9|符合当前情境的弹幕10|一个吸引人的论坛帖子标题|论坛回复1|论坛回复2|论坛回复3|论坛回复4|论坛回复5|论坛回复6|论坛回复7|论坛回复8|一段独立视角的番外小剧场，描写char在无人时的私密状态或与user的特殊if线互动或者不同世界观番外，字数不少于两百字，情感细腻符合人设生动有趣',
+                html: `<div class="mufy-melody cold_tank_status_wrapper">\n    <div class="Z_CONFIG_header_trigger" onclick="this.parentElement.classList.toggle('is-open')">\n        <span>My Melody</span>\n    </div>\n    <div class="Tuan_init_expand_area">\n        <div class="Cmtt_content_box">\n          <div class="Ks_tabs_nav">\n          <div class="Ks_tab_btn active" onclick="let tabs=this.parentElement.children; for(let t of tabs) t.classList.remove('active'); this.classList.add('active'); let panes=this.parentElement.nextElementSibling.children; for(let p of panes) p.classList.remove('active'); panes[0].classList.add('active');">✧ Diary </div>\n          <div class="Ks_tab_btn" onclick="let tabs=this.parentElement.children; for(let t of tabs) t.classList.remove('active'); this.classList.add('active'); let panes=this.parentElement.nextElementSibling.children; for(let p of panes) p.classList.remove('active'); panes[1].classList.add('active');">✧ Phone </div>\n          <div class="Ks_tab_btn" onclick="let tabs=this.parentElement.children; for(let t of tabs) t.classList.remove('active'); this.classList.add('active'); let panes=this.parentElement.nextElementSibling.children; for(let p of panes) p.classList.remove('active'); panes[2].classList.add('active');">✧ Social </div>\n          </div>\n          <div class="Z_CONFIG_panels_container">\n          <div class="Cmtt_panel active">\n          <div class="Tuan_mod1_top">\n          <div class="Tuan_avatar">\n          <img src="https://pic3.fukit.cn/autoupload/T70ozUwEDsWhPv42088yw9iO_OyvX7mIgxFBfDMDErs/20260410/KvsM/220X220/image_1775532348063.gif" alt="Avatar">\n          </div>\n          <div class="Tuan_status_info">\n          <div class="Tuan_info_row"><span>Mood</span><span>{{1}}</span></div>\n          <div class="Tuan_info_row">\n          <span>Affection</span>\n          <div class="Z_CONFIG_progress_wrap">\n          <div class="Z_CONFIG_progress_track">\n          <div class="Z_CONFIG_progress_fill" style="width: {{2}}%;"></div>\n          </div>\n          <span>{{2}}%</span>\n          </div>\n          </div>\n          <div class="Tuan_info_row"><span>Location</span><span>{{3}}</span></div>\n          </div>\n          </div>         \n          <div class="Tuan_mod1_mid">\n          <div class="Tuan_mid_box"><b>OUTFIT</b>{{4}}</div>\n          <div class="Tuan_mid_box"><b>ACTION</b>{{5}}</div>\n          </div>\n          <div class="Tuan_thoughts">\n          "{{6}}"\n          </div>\n          <div class="Tuan_diary">\n          <div class="Tuan_diary_head"><span>DATE: {{7}}</span><span>WEATHER: {{8}}</span></div>\n          <p style="margin:0;">\n          {{9}}\n          </p>\n          </div>\n          </div>\n          <div class="Cmtt_panel">\n          <div class="cold_tank_apps">\n          <div class="cold_tank_notice"><span class="cold_tank_notice_icon">[INS]</span> {{10}}</div>\n          <div class="cold_tank_notice"><span class="cold_tank_notice_icon">[MSG]</span> {{11}}</div>\n          <div class="cold_tank_notice"><span class="cold_tank_notice_icon">[CAL]</span> {{12}}</div>\n          </div>\n          <div class="cold_tank_split">\n          <div class="cold_tank_box">\n          <b>MEMO</b>\n          <ul>\n          <li>{{13}}</li>\n          <li>{{14}}</li>\n          <li>{{15}}</li>\n          </ul>\n          </div>\n          <div class="cold_tank_box">\n          <b>SEARCH</b>\n          <ul>\n          <li>{{16}}</li>\n          <li>{{17}}</li>\n          <li>{{18}}</li>\n          </ul>\n          </div>\n          </div>\n          <div class="cold_tank_pvt_chat">\n          <div class="cold_tank_chat_row">\n          <div class="cold_tank_chat_name">{{19}}</div>\n          <div class="cold_tank_bubble">{{20}}</div>\n          </div>\n          <div class="cold_tank_chat_row me">\n          <div class="cold_tank_chat_name">{{21}}</div>\n          <div class="cold_tank_bubble me">{{22}}</div>\n          </div>\n          <div class="cold_tank_chat_row">\n          <div class="cold_tank_chat_name">{{23}}</div>\n          <div class="cold_tank_bubble">{{24}}</div>\n          </div>\n          </div>\n          <div class="cold_tank_grp_chat">\n          <div class="cold_tank_grp_title">✧ {{25}} ✧</div>     \n          <div class="cold_tank_chat_row">\n          <div class="cold_tank_chat_name">{{26}}</div>\n          <div class="cold_tank_bubble">{{27}}</div>\n          </div>\n          <div class="cold_tank_chat_row me">\n          <div class="cold_tank_chat_name">{{28}}</div>\n          <div class="cold_tank_bubble me">{{29}}</div>\n          </div>\n          <div class="cold_tank_chat_row">\n          <div class="cold_tank_chat_name">{{30}}</div>\n          <div class="cold_tank_bubble">{{31}}</div>\n          </div>\n          <div class="cold_tank_chat_row">\n          <div class="cold_tank_chat_name">{{32}}</div>\n          <div class="cold_tank_bubble">{{33}}</div>\n          </div>\n          <div class="cold_tank_chat_row me">\n          <div class="cold_tank_chat_name">{{34}}</div>\n          <div class="cold_tank_bubble me">{{35}}</div>\n          </div>\n          </div>\n          </div>\n          <div class="Cmtt_panel">\n          <div class="Z_CONFIG_danmaku_area">\n          <div class="Z_CONFIG_danmaku_track row1">\n          <div class="Z_CONFIG_danmaku_group">\n          <span class="Z_CONFIG_danmaku_item">{{36}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{37}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{38}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{39}}</span>\n          </div>\n          <div class="Z_CONFIG_danmaku_group">\n          <span class="Z_CONFIG_danmaku_item">{{36}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{37}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{38}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{39}}</span>\n          </div>\n          </div>\n          <div class="Z_CONFIG_danmaku_track row2">\n          <div class="Z_CONFIG_danmaku_group">\n          <span class="Z_CONFIG_danmaku_item">{{40}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{41}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{42}}</span>\n          </div>\n          <div class="Z_CONFIG_danmaku_group">\n          <span class="Z_CONFIG_danmaku_item">{{40}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{41}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{42}}</span>\n          </div>\n          </div>\n          <div class="Z_CONFIG_danmaku_track row3">\n          <div class="Z_CONFIG_danmaku_group">\n          <span class="Z_CONFIG_danmaku_item">{{43}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{44}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{45}}</span>\n          </div>\n          <div class="Z_CONFIG_danmaku_group">\n          <span class="Z_CONFIG_danmaku_item">{{43}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{44}}</span>\n          <span class="Z_CONFIG_danmaku_item">{{45}}</span>\n          </div>\n          </div>\n          </div>\n          <div class="Z_CONFIG_forum">\n          <div class="Z_CONFIG_f_title">【闲聊】{{46}}</div>\n          <div class="Z_CONFIG_f_list">\n          <div class="Z_CONFIG_f_comment">1L: {{47}}</div>\n          <div class="Z_CONFIG_f_comment">2L: {{48}}</div>\n          <div class="Z_CONFIG_f_comment">3L: {{49}}</div>\n          <div class="Z_CONFIG_f_comment">4L: {{50}}</div>\n          <div class="Z_CONFIG_f_comment">5L: {{51}}</div>\n          <div class="Z_CONFIG_f_comment">6L: {{52}}</div>\n          <div class="Z_CONFIG_f_comment">7L: {{53}}</div>\n          <div class="Z_CONFIG_f_comment">8L: {{54}}</div>\n          </div>\n          </div>\n          <div class="Z_CONFIG_story">\n          <div class="Z_CONFIG_story_tag">EXTRA STORY</div>\n          {{55}}\n          </div>\n          </div>         \n          </div>        \n        </div>\n    </div>\n</div>`,
+                active: true,
+                theme: '',
+                group: '默认分组'
+            }
+        );
+        ChatDB.setItem('tav_status_bars', JSON.stringify(statusBars));
+        ChatDB.setItem('tav_statusbar_initialized_v19', 'true');
+    }
+
+    // ================= 分组渲染逻辑 =================
+    // 渲染分组列表 (文件夹视图)
+    let groups = {};
+    statusBars.forEach(sb => {
+        if (!sb) return; // 容错：跳过损坏的空数据
+        // 强制内置状态栏属于默认分组，防止旧数据没有 group 属性导致被分到未分类 (增加安全校验)
+        let gName = (sb.id && String(sb.id).startsWith('builtin_status_')) ? '默认分组' : (sb.group || '未分类分组');
+        if (!groups[gName]) groups[gName] = [];
+        groups[gName].push(sb);
+    });
+
+    // 确保基础分组存在
+    if (!groups['默认分组']) groups['默认分组'] = [];
+    if (!groups['未分类分组']) groups['未分类分组'] = [];
+
+    let totalItems = statusBars.length;
+    
+    // 渲染统计头部
+    listEl.innerHTML = `
+        <div class="tav-folder-list-header">
+            <div>共 ${totalItems} 项</div>
+            <div style="display: flex; gap: 15px; align-items: center;">
+                <div class="tav-folder-filter" onclick="importTavStatusBars()" title="导入状态栏">
+                    <svg viewBox="0 0 24 24" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                </div>
+                <div class="tav-folder-filter" onclick="openTavAddStatusBarPanel()" title="创建状态栏">
+                    <svg viewBox="0 0 24 24" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>
+                </div>
+                <div class="tav-folder-filter" onclick="openTavGroupEditModal('create')" title="创建分组">
+                    <svg viewBox="0 0 24 24" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path><line x1="12" y1="11" x2="12" y2="17"></line><line x1="9" y1="14" x2="15" y2="14"></line></svg>
+                </div>
+            </div>
+        </div>
+        <div class="tav-folder-list" id="tavFolderListContainer"></div>
+    `;
+
+    
+    const folderContainer = document.getElementById('tavFolderListContainer');
+    
+    for (let gName in groups) {
+        let items = groups[gName];
+        // 只有默认和未分类，或者有内容的分组才显示
+        if (gName !== '默认分组' && gName !== '未分类分组' && items.length === 0) continue;
+        
+        // 核心修改：默认分组显示所有状态栏的数量
+        let displayCount = gName === '默认分组' ? totalItems : items.length;
+        
+        let folderItem = document.createElement('div');
+        folderItem.className = 'tav-folder-item';
+        folderItem.onclick = () => {
+            openTavGroupDetail(gName);
+        };
+        
+        // 核心修改：如果是默认分组或未分类分组，则隐藏三个点的操作按钮
+        let moreBtnHtml = '';
+        if (gName !== '默认分组' && gName !== '未分类分组') {
+            moreBtnHtml = `
+            <div class="tav-folder-more" onclick="event.stopPropagation(); openTavGroupActionMenu('${gName}')">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+            </div>`;
+        } else {
+            // 使用 visibility: hidden 占位，保证右侧间距排版不乱
+            moreBtnHtml = `<div class="tav-folder-more" style="visibility: hidden;"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/></svg></div>`;
+        }
+
+        folderItem.innerHTML = `
+            <div class="tav-folder-icon">
+                <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M4 12C4 9.79086 5.79086 8 8 8H17.1716C18.2324 8 19.2497 8.42143 20 9.17157L22.8284 12H40C42.2091 12 44 13.7909 44 16V36C44 38.2091 42.2091 40 40 40H8C5.79086 40 4 38.2091 4 36V12Z" fill="#60A5FA"/>
+                    <path d="M4 16C4 13.7909 5.79086 12 8 12H40C42.2091 12 44 13.7909 44 16V36C44 38.2091 42.2091 40 40 40H8C5.79086 40 4 38.2091 4 36V16Z" fill="#7DD3FC"/>
+                </svg>
+            </div>
+            <div class="tav-folder-info">
+                <div class="tav-folder-name">${gName}</div>
+                <div class="tav-folder-meta">${displayCount} 项</div>
+            </div>
+            ${moreBtnHtml}
+        `;
+        folderContainer.appendChild(folderItem);
+    }
+}
+
+// ==========================================
+// 状态栏分组全屏详情页逻辑
+// ==========================================
+function openTavGroupDetail(groupName) {
+    window.currentTavStatusGroup = groupName;
+    document.getElementById('tavGroupDetailTitle').innerText = groupName;
+    
+    const listEl = document.getElementById('tavGroupDetailList');
+    listEl.innerHTML = '';
+    
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+    
+    // 核心修改：如果进入的是默认分组，则显示所有状态栏
+    let groupItems = [];
+    if (groupName === '默认分组') {
+        groupItems = statusBars;
+    } else {
+        groupItems = statusBars.filter(sb => {
+            // 强制内置状态栏属于默认分组，防止旧数据没有 group 属性导致被分到未分类
+            let gName = sb.id.startsWith('builtin_status_') ? '默认分组' : (sb.group || '未分类分组');
+            return gName === groupName;
+        });
+    }
+
+    if (groupItems.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; font-size:12px; padding:20px;">该分组下暂无状态栏</div>';
+    } else {
+        groupItems.forEach(sb => {
+            const posMap = {
+                'floating': '全局悬浮可拖动',
+                'top': '顶部悬浮',
+                'bottom': '底部悬浮',
+                'card_top': '卡片内部顶部',
+                'card_bottom': '卡片内部底部'
+            };
+
+            let themeName = '透明白';
+            if (sb.theme === 'theme-black') themeName = '透明黑';
+            if (sb.theme === 'theme-aqua') themeName = '水蓝色';
+            if (sb.theme === 'theme-mint') themeName = '薄巧色';
+
+            let previewHtml = sb.html;
+            if (sb.theme) {
+                previewHtml = previewHtml.replace('class="hanxi-container"', `class="hanxi-container ${sb.theme}"`);
+            }
+
+            // 仅对透明折叠栏 (1, 2, 3) 显示主题切换按钮
+            let themeRowHtml = '';
+            if (['builtin_status_1', 'builtin_status_2', 'builtin_status_3'].includes(sb.id)) {
+                themeRowHtml = `
+                    <div class="tav-setting-row" style="padding: 10px 0; border-bottom: 1px solid var(--tav-border-color);">
+                        <span>主题颜色</span>
+                        <div class="tav-ins-btn outline" style="padding: 4px 12px; font-size: 12px; border-color: #888; color: #555; display: flex; align-items: center; gap: 6px;" onclick="tavOpenThemeSelector('${sb.id}')">
+                            ${themeName} 
+                            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"></circle><circle cx="17.5" cy="10.5" r=".5"></circle><circle cx="8.5" cy="7.5" r=".5"></circle><circle cx="6.5" cy="12.5" r=".5"></circle><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"></path></svg>
+                        </div>
+                    </div>
+                `;
+            }
+
+            const card = document.createElement('div');
+            card.className = 'tav-status-item-card';
+            card.innerHTML = `
+                <div class="tav-status-header" onclick="this.parentElement.classList.toggle('open')">
+                    <div class="tav-status-header-left">
+                        <div class="tav-toggle-switch ${sb.active ? 'active' : ''}" onclick="event.stopPropagation(); toggleTavStatusBar('${sb.id}', this)"></div>
+                        <span class="tav-status-title">${sb.name}</span>
+                    </div>
+                    <div class="tav-status-header-right">
+                        <svg class="tav-status-arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                    </div>
+                </div>
+                <div class="tav-status-body">
+                    ${themeRowHtml}
+                    <div class="tav-setting-row-col">
+                        <span>插入位置</span>
+                        <div style="font-size:13px; color:#888; margin-top:4px;">${posMap[sb.pos]}</div>
+                    </div>
+                    <div class="tav-setting-row-col">
+                        <span>提取规则</span>
+                        <input type="text" class="tav-ins-input" value="${sb.regex.replace(/"/g, '&quot;')}" onchange="updateTavStatusBar('${sb.id}', 'regex', this.value)" style="font-family:monospace; margin-top:4px;">
+                    </div>
+                    <div class="tav-setting-row-col">
+                        <span>附加提示词 (字数/内容限制)</span>
+                        <textarea class="tav-ins-textarea" onchange="updateTavStatusBar('${sb.id}', 'prompt', this.value)" style="margin-top:4px; height: 60px; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;" placeholder="例如：字数严格限制在20字以内。">${(sb.prompt || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>
+                    </div>
+                    <div class="tav-setting-row-col">
+                        <span>HTML 代码</span>
+                        <textarea class="tav-ins-textarea" onchange="updateTavStatusBar('${sb.id}', 'html', this.value); this.parentElement.nextElementSibling.nextElementSibling.querySelector('.tav-status-preview-box').innerHTML = this.value;" style="font-family:monospace; margin-top:4px; height: 120px; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;">${sb.html.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>
+                    </div>
+                    <div style="padding: 15px 0; border-top: 1px solid var(--tav-border-color); margin-top: 10px; display: flex; gap: 10px;">
+                        <div class="tav-ins-btn outline" style="flex: 1; color: #007aff; border-color: #007aff;" onclick="exportSingleTavStatusBar('${sb.id}')">导出</div>
+                        <div class="tav-ins-btn outline" style="flex: 1; color: #ff9500; border-color: #ff9500;" onclick="moveTavStatusBar('${sb.id}')">移动分组</div>
+                        <div class="tav-ins-btn outline" style="flex: 1; color: #ff3b30; border-color: #ff3b30;" onclick="deleteTavStatusBar('${sb.id}')">删除</div>
+                    </div>
+                    <div class="tav-setting-row-col">
+                        <span>HTML 预览</span>
+                        <div class="tav-status-preview-box" style="margin-top:4px; padding:10px; background:#f9f9f9; border-radius:8px; border:1px dashed #ccc; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; scroll-behavior: smooth; min-height: 40px; max-height: 300px;">
+                            ${previewHtml}
+                        </div>
+                    </div>
+                </div>
+            `;
+            listEl.appendChild(card);
+        });
+    }
+    
+    document.getElementById('tavStatusGroupDetailPanel').style.display = 'flex';
+}
+
+function closeTavGroupDetail() {
+    document.getElementById('tavStatusGroupDetailPanel').style.display = 'none';
+    window.currentTavStatusGroup = null;
+    renderTavStatusBars(); // 刷新主列表
+}
+
+// ==========================================
+// 状态栏分组增删改逻辑
+// ==========================================
+function openTavGroupActionMenu(groupName) {
+    document.getElementById('tavActionGroupName').value = groupName;
+    document.getElementById('tavGroupActionModalOverlay').classList.add('show');
+}
+
+function closeTavGroupActionMenu() {
+    document.getElementById('tavGroupActionModalOverlay').classList.remove('show');
+}
+
+function openTavGroupEditModal(mode) {
+    closeTavGroupActionMenu();
+    document.getElementById('tavGroupEditMode').value = mode;
+    const inputEl = document.getElementById('tavGroupEditInput');
+    
+    if (mode === 'create') {
+        document.getElementById('tavGroupEditTitle').innerText = '创建分组';
+        inputEl.value = '';
+    } else if (mode === 'rename') {
+        document.getElementById('tavGroupEditTitle').innerText = '修改分组名称';
+        inputEl.value = document.getElementById('tavActionGroupName').value;
+    }
+    
+    document.getElementById('tavGroupEditModalOverlay').classList.add('show');
+}
+
+function closeTavGroupEditModal() {
+    document.getElementById('tavGroupEditModalOverlay').classList.remove('show');
+}
+
+function confirmTavGroupEdit() {
+    const mode = document.getElementById('tavGroupEditMode').value;
+    const newName = document.getElementById('tavGroupEditInput').value.trim();
+    
+    if (!newName) return alert('分组名称不能为空！');
+    if (newName === '默认分组' || newName === '未分类分组') return alert('保留分组名称不可使用！');
+
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+
+    if (mode === 'create') {
+        statusBars.push({
+            id: 'placeholder_' + Date.now(),
+            name: '占位符', pos: 'floating', regex: 'none', prompt: '', html: '', active: false,
+            group: newName, isPlaceholder: true
+        });
+    } else if (mode === 'rename') {
+        const oldName = document.getElementById('tavActionGroupName').value;
+        if (oldName === '默认分组' || oldName === '未分类分组') return alert('默认分组不可重命名！');
+        
+        statusBars.forEach(sb => {
+            if (sb.group === oldName) sb.group = newName;
+        });
+    }
+
+    ChatDB.setItem('tav_status_bars', JSON.stringify(statusBars));
+    closeTavGroupEditModal();
+    renderTavStatusBars();
+}
+
+function deleteTavStatusGroup() {
+    const groupName = document.getElementById('tavActionGroupName').value;
+    if (groupName === '默认分组' || groupName === '未分类分组') return alert('默认分组不可删除！');
+    
+    if (confirm(`确定删除分组【${groupName}】吗？\n该分组下的所有状态栏将被移至“未分类分组”。`)) {
+        let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+        
+        statusBars = statusBars.filter(sb => !(sb.group === groupName && sb.isPlaceholder));
+        statusBars.forEach(sb => {
+            if (sb.group === groupName) sb.group = '未分类分组';
+        });
+
+        ChatDB.setItem('tav_status_bars', JSON.stringify(statusBars));
+        closeTavGroupActionMenu();
+        renderTavStatusBars();
+    }
+}
+
+function toggleTavStatusBar(id, el) {
+    el.classList.toggle('active');
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+    const sb = statusBars.find(s => s.id === id);
+    if (sb) {
+        sb.active = el.classList.contains('active');
+        ChatDB.setItem('tav_status_bars', JSON.stringify(statusBars));
+    }
+}
+
+function deleteTavStatusBar(id) {
+    if (confirm('确定删除此状态栏吗？')) {
+        let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+        statusBars = statusBars.filter(s => s.id !== id);
+        ChatDB.setItem('tav_status_bars', JSON.stringify(statusBars));
+        renderTavStatusBars();
+        if (window.currentTavStatusGroup) {
+            openTavGroupDetail(window.currentTavStatusGroup);
+        }
+    }
+}
+
+function moveTavStatusBar(id) {
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+    const sb = statusBars.find(s => s.id === id);
+    if (!sb) return;
+    
+    document.getElementById('tavMoveTargetSbId').value = id;
+    
+    // 获取所有分组
+    let groups = new Set(['默认分组', '未分类分组']);
+    statusBars.forEach(s => {
+        if (s.group) groups.add(s.group);
+    });
+    
+    const listEl = document.getElementById('tavMoveGroupList');
+    listEl.innerHTML = '';
+    
+    groups.forEach(g => {
+        const item = document.createElement('div');
+        item.style.cssText = 'padding: 12px; background: #f4f4f5; border-radius: 12px; font-size: 14px; color: #333; cursor: pointer; text-align: center; font-weight: bold; transition: background 0.2s;';
+        if (g === (sb.group || '默认分组')) {
+            item.style.background = '#111';
+            item.style.color = '#fff';
+        }
+        item.innerText = g;
+        item.onclick = () => {
+            // 单选逻辑
+            Array.from(listEl.children).forEach(child => {
+                child.style.background = '#f4f4f5';
+                child.style.color = '#333';
+                child.dataset.selected = 'false';
+            });
+            item.style.background = '#111';
+            item.style.color = '#fff';
+            item.dataset.selected = 'true';
+        };
+        if (g === (sb.group || '默认分组')) {
+            item.dataset.selected = 'true';
+        }
+        listEl.appendChild(item);
+    });
+    
+    document.getElementById('tavMoveGroupModalOverlay').classList.add('show');
+}
+
+function closeTavMoveGroupModal() {
+    document.getElementById('tavMoveGroupModalOverlay').classList.remove('show');
+}
+
+function confirmTavMoveGroup() {
+    const id = document.getElementById('tavMoveTargetSbId').value;
+    const listEl = document.getElementById('tavMoveGroupList');
+    let selectedGroup = null;
+    Array.from(listEl.children).forEach(child => {
+        if (child.dataset.selected === 'true') {
+            selectedGroup = child.innerText;
+        }
+    });
+    
+    if (!selectedGroup) return alert('请选择目标分组！');
+    
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+    const sb = statusBars.find(s => s.id === id);
+    if (sb) {
+        sb.group = selectedGroup;
+        ChatDB.setItem('tav_status_bars', JSON.stringify(statusBars));
+        closeTavMoveGroupModal();
+        if (window.currentTavStatusGroup) {
+            openTavGroupDetail(window.currentTavStatusGroup);
+        }
+        renderTavStatusBars();
+    }
+}
+
+function updateTavStatusBar(id, field, value) {
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+    const sb = statusBars.find(s => s.id === id);
+    if (sb) {
+        sb[field] = value;
+        ChatDB.setItem('tav_status_bars', JSON.stringify(statusBars));
+    }
+}
+
+// ==========================================
+// 正则管理逻辑 (Regex)
+// ==========================================
+function openTavRegexModal() {
+    document.getElementById('tavRegexName').value = '';
+    document.getElementById('tavRegexPattern').value = '';
+    document.getElementById('tavRegexReplace').value = '';
+    document.getElementById('tavRegexModalOverlay').classList.add('show');
+}
+
+function closeTavRegexModal() {
+    document.getElementById('tavRegexModalOverlay').classList.remove('show');
+}
+
+function saveTavRegex() {
+    const name = document.getElementById('tavRegexName').value.trim();
+    const pattern = document.getElementById('tavRegexPattern').value.trim();
+    const replace = document.getElementById('tavRegexReplace').value.trim();
+
+    if (!name || !pattern) return alert('规则名称和正则表达式不能为空！');
+
+    let regexList = JSON.parse(ChatDB.getItem('tav_regex_list') || '[]');
+    regexList.push({ id: Date.now().toString(), name, pattern, replace, active: true });
+    ChatDB.setItem('tav_regex_list', JSON.stringify(regexList));
+    
+    closeTavRegexModal();
+    renderTavRegexList();
+}
+
+function renderTavRegexList() {
+    const listEl = document.getElementById('tavRegexList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    // 修复：增加初始化标志位，允许用户清空所有正则而不被重置
+    let isInit = ChatDB.getItem('tav_regex_initialized');
+    let regexList = JSON.parse(ChatDB.getItem('tav_regex_list') || '[]');
+    
+    if (!isInit) {
+        // 首次加载，注入默认规则
+        regexList = [
+            { id: 'default1', name: '动作描写加粗斜体', pattern: '\\*(.*?)\\*', replace: "<span class='tav-action-text'>*$1*</span>", active: true },
+            { id: 'default2', name: '过滤多余换行', pattern: '\\n{3,}', replace: "\\n\\n", active: true }
+        ];
+        ChatDB.setItem('tav_regex_list', JSON.stringify(regexList));
+        ChatDB.setItem('tav_regex_initialized', 'true');
+    }
+
+    if (regexList.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; font-size:12px; padding:20px;">暂无正则规则</div>';
+        return;
+    }
+
+    regexList.forEach(r => {
+        const card = document.createElement('div');
+        card.className = 'tav-status-item-card';
+        card.innerHTML = `
+            <div class="tav-status-header" onclick="this.parentElement.classList.toggle('open')">
+                <div class="tav-status-header-left">
+                    <div class="tav-toggle-switch ${r.active ? 'active' : ''}" onclick="event.stopPropagation(); toggleTavRegex('${r.id}', this)"></div>
+                    <span class="tav-status-title">${r.name}</span>
+                </div>
+                <div class="tav-status-header-right">
+                    <svg class="tav-status-arrow" viewBox="0 0 24 24" fill="none" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                </div>
+            </div>
+            <div class="tav-status-body">
+                <div class="tav-setting-row-col">
+                    <span>正则表达式</span>
+                    <input type="text" class="tav-ins-input" value="${r.pattern.replace(/"/g, '&quot;')}" onchange="updateTavRegex('${r.id}', 'pattern', this.value)" style="color: #333; background: #fff;">
+                </div>
+                <div class="tav-setting-row-col">
+                    <span>替换内容</span>
+                    <input type="text" class="tav-ins-input" value="${r.replace.replace(/"/g, '&quot;')}" onchange="updateTavRegex('${r.id}', 'replace', this.value)" style="color: #333; background: #fff;">
+                </div>
+                <div style="padding: 15px 0; border-top: 1px solid var(--tav-border-color); margin-top: 10px;">
+                    <div class="tav-ins-btn outline" style="color: #ff3b30; border-color: #ff3b30;" onclick="deleteTavRegex('${r.id}')">DELETE</div>
+                </div>
+            </div>
+        `;
+        listEl.appendChild(card);
+    });
+}
+
+// ==========================================
+// API 同步逻辑 (线下独立，但可读取全局预设)
+// ==========================================
+function tavLoadApiConfig() {
+    const savedApi = JSON.parse(ChatDB.getItem('tav_api_config') || '{}');
+    
+    // 如果线下没有配置，则自动同步全局设置 APP 的配置
+    const globalUrl = localStorage.getItem('apiUrl') || '';
+    const globalKey = localStorage.getItem('apiKey') || '';
+    const globalModel = localStorage.getItem('apiModel') || 'gpt-4-turbo';
+    const globalTemp = localStorage.getItem('apiTemperature') || '0.8';
+
+    document.getElementById('tavApiUrl').value = savedApi.url || globalUrl;
+    document.getElementById('tavApiKey').value = savedApi.key || globalKey;
+    
+    const targetModel = savedApi.model || globalModel;
+    const modelSelect = document.getElementById('tavApiModel');
+    if (targetModel) {
+        let exists = Array.from(modelSelect.options).some(opt => opt.value === targetModel);
+        if(!exists) {
+            const opt = document.createElement('option');
+            opt.value = targetModel; opt.text = targetModel;
+            modelSelect.appendChild(opt);
+        }
+        modelSelect.value = targetModel;
+    }
+    
+    const targetTemp = savedApi.temperature !== undefined ? savedApi.temperature : globalTemp;
+    document.getElementById('tavApiTemp').value = targetTemp;
+    document.getElementById('tavApiTempValue').innerText = targetTemp;
+}
+
+function tavSaveApiConfig() {
+    const url = document.getElementById('tavApiUrl').value.trim();
+    const key = document.getElementById('tavApiKey').value.trim();
+    const model = document.getElementById('tavApiModel').value;
+    const temp = document.getElementById('tavApiTemp').value;
+
+    ChatDB.setItem('tav_api_config', JSON.stringify({ url, key, model, temperature: temp }));
+    alert('线下 API 设置已保存！(不影响全局)');
+}
+
+// 打开全局 API 预设库
+function tavOpenApiPresetPopup() {
+    const listEl = document.getElementById('tavApiPresetList');
+    listEl.innerHTML = '';
+    
+    let presets = JSON.parse(ChatDB.getItem('api_presets') || '[]');
+    if (presets.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; font-size:12px; padding:20px;">暂无全局 API 预设</div>';
+    } else {
+        presets.forEach(p => {
+            const item = document.createElement('div');
+            item.className = 'preset-item'; // 使用全局 preset-item 样式
+            item.innerHTML = `<span class="preset-item-name">${p.name}</span>`;
+            item.onclick = () => {
+                document.getElementById('tavApiUrl').value = p.url || '';
+                document.getElementById('tavApiKey').value = p.key || '';
+                
+                const modelSelect = document.getElementById('tavApiModel');
+                if (p.model) {
+                    let exists = Array.from(modelSelect.options).some(opt => opt.value === p.model);
+                    if(!exists) {
+                        const opt = document.createElement('option');
+                        opt.value = p.model; opt.text = p.model;
+                        modelSelect.appendChild(opt);
+                    }
+                    modelSelect.value = p.model;
+                }
+                
+                if (p.temperature !== undefined) {
+                    document.getElementById('tavApiTemp').value = p.temperature;
+                    document.getElementById('tavApiTempValue').innerText = p.temperature;
+                }
+                tavCloseApiPresetPopup();
+            };
+            listEl.appendChild(item);
+        });
+    }
+    document.getElementById('tavApiPresetModalOverlay').classList.add('show');
+}
+
+function tavCloseApiPresetPopup() {
+    document.getElementById('tavApiPresetModalOverlay').classList.remove('show');
+}
+
+// 拉取模型
+window.tavFetchedModels = [];
+async function tavFetchModels() {
+    const urlInput = document.getElementById('tavApiUrl').value.trim().replace(/\/$/, '');
+    const key = document.getElementById('tavApiKey').value.trim();
+    const select = document.getElementById('tavApiModel');
+    
+    if (!urlInput || !key) return alert('请先填写 API URL 和 Key');
+
+    select.innerHTML = '<option>拉取中...</option>';
+    const targetUrl = `${urlInput}/models`;
+
+    try {
+        let res;
+        try {
+            res = await fetch(targetUrl, { method: 'GET', headers: { 'Authorization': `Bearer ${key}` } });
+        } catch (directErr) {
+            const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
+            res = await fetch(proxyUrl, { method: 'GET', headers: { 'Authorization': `Bearer ${key}` } });
+        }
+        
+        if (!res.ok) throw new Error(`HTTP 状态码错误: ${res.status}`);
+        const data = await res.json();
+        
+        if (data.data && Array.isArray(data.data)) {
+            window.tavFetchedModels = data.data.map(m => ({ id: m.id })); 
+            const searchInput = document.getElementById('tavModelSearch');
+            if (searchInput) searchInput.value = '';
+            tavRenderModelSelect(); 
+            alert(`成功拉取 ${data.data.length} 个模型！`);
+        } else {
+            window.tavFetchedModels = [];
+            select.innerHTML = '<option>未找到模型</option>';
+            alert("拉取失败：接口返回的数据格式不正确");
+        }
+    } catch (e) {
+        window.tavFetchedModels = [];
+        select.innerHTML = '<option>拉取失败</option>';
+        alert('拉取失败！请检查地址、Key是否正确。\n详细错误: ' + e.message);
+    }
+}
+
+function tavRenderModelSelect(filterText = '') {
+    const select = document.getElementById('tavApiModel');
+    select.innerHTML = '';
+    const filtered = window.tavFetchedModels.filter(m => m.id.toLowerCase().includes(filterText.toLowerCase()));
+    if (filtered.length === 0) {
+        select.innerHTML = '<option value="">未找到匹配的模型</option>';
+        return;
+    }
+    filtered.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id; opt.textContent = m.id;
+        select.appendChild(opt);
+    });
+}
+
+// 拦截 tavToggleSettings，在打开设置时读取最新的 API 配置
+const originalTavToggleSettings = window.tavToggleSettings;
+window.tavToggleSettings = function() {
+    if (originalTavToggleSettings) originalTavToggleSettings();
+    tavLoadApiConfig();
+};
+
+function toggleTavRegex(id, el) {
+    el.classList.toggle('active');
+    let regexList = JSON.parse(ChatDB.getItem('tav_regex_list') || '[]');
+    const r = regexList.find(x => x.id === id);
+    if (r) {
+        r.active = el.classList.contains('active');
+        ChatDB.setItem('tav_regex_list', JSON.stringify(regexList));
+    }
+}
+
+function deleteTavRegex(id) {
+    if (confirm('确定删除此正则规则吗？')) {
+        let regexList = JSON.parse(ChatDB.getItem('tav_regex_list') || '[]');
+        regexList = regexList.filter(x => x.id !== id);
+        ChatDB.setItem('tav_regex_list', JSON.stringify(regexList));
+        renderTavRegexList();
+    }
+}
+
+function updateTavRegex(id, field, value) {
+    let regexList = JSON.parse(ChatDB.getItem('tav_regex_list') || '[]');
+    const r = regexList.find(x => x.id === id);
+    if (r) {
+        r[field] = value;
+        ChatDB.setItem('tav_regex_list', JSON.stringify(regexList));
+    }
+}
+
+
+// ==========================================
+// 聊天流渲染逻辑 (Chat Stream)
+// ==========================================
+let tavDisplayCount = 30; // 新增：线下模式分页数量，防止 iOS 渲染过多 DOM 导致内存溢出闪退
+
+function tavRenderChat(keepScroll = false) {
+    const streamEl = document.getElementById('tavStoryStream');
+    if (!streamEl) return;
+    
+    // 记录旧的滚动高度
+    const oldScrollHeight = streamEl.scrollHeight;
+    const oldScrollTop = streamEl.scrollTop;
+
+    streamEl.innerHTML = '';
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentChatRoomCharId || !currentLoginId) {
+        streamEl.innerHTML = '<div style="text-align:center; color:#ccc; font-size:12px; margin-top:40px;">暂无聊天记录</div>';
+        return;
+    }
+
+    // 核心修改：使用 tav_chat_history_ 实现线下隔离
+    let history = JSON.parse(ChatDB.getItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    if (history.length === 0) {
+        streamEl.innerHTML = '<div style="text-align:center; color:#ccc; font-size:12px; margin-top:40px;">暂无聊天记录</div>';
+        return;
+    }
+
+    // --- 核心修复：引入分页渲染机制，防止 iOS 闪退 ---
+    const startIndex = Math.max(0, history.length - tavDisplayCount);
+    const renderHistory = history.slice(startIndex);
+
+    // 【性能优化】：使用 DocumentFragment 在内存中组装 DOM，一次性插入，彻底消灭重绘卡顿！
+    const fragment = document.createDocumentFragment();
+
+    if (startIndex > 0) {
+        const loadMoreBtn = document.createElement('div');
+        loadMoreBtn.style.cssText = 'text-align: center; padding: 15px 0; color: #888; font-size: 12px; cursor: pointer; font-weight: bold;';
+        loadMoreBtn.innerText = '点击加载更多历史记录';
+        loadMoreBtn.onclick = () => {
+            tavDisplayCount += 30;
+            tavRenderChat(true);
+        };
+        fragment.appendChild(loadMoreBtn);
+    }
+    // -------------------------------------------------
+
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+    const char = allEntities.find(c => c.id === currentChatRoomCharId);
+    const charAvatar = char ? (char.avatarUrl || '') : '';
+    const charName = char ? (char.name || char.netName || 'Char') : 'Char';
+    
+    const me = allEntities.find(a => a.id === currentLoginId);
+    const userAvatar = me ? (me.avatarUrl || '') : '';
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (me ? me.personaId : null));
+    const userRealName = persona ? (persona.realName || me?.netName || 'You') : (me ? (me.netName || 'You') : 'You');
+
+    // 获取激活的正则规则
+    let regexList = JSON.parse(ChatDB.getItem('tav_regex_list') || '[]').filter(r => r.active);
+    
+    // 获取激活的状态栏
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]').filter(sb => sb.active);
+    let latestGlobalStatusData = {};
+
+    renderHistory.forEach(msg => {
+        const isMe = msg.sender === 'me';
+        let content = msg.content || '';
+        
+        let cardTopHtml = '';
+        let cardBottomHtml = '';
+
+        // 提取状态栏数据 (仅对角色的消息提取)
+        if (!isMe) {
+            statusBars.forEach(sb => {
+                try {
+                    const regex = new RegExp(sb.regex, 'g');
+                    let match;
+                    let lastMatch = null;
+                    // 找到最后一次匹配
+                    while ((match = regex.exec(content)) !== null) {
+                        lastMatch = match;
+                        // 🔪 核心修复：防止正则匹配到空字符串导致死循环卡死浏览器
+                        if (match.index === regex.lastIndex) {
+                            regex.lastIndex++;
+                        }
+                    }
+                    
+                    if (lastMatch) {
+                        let renderedHtml = sb.html;
+                        
+                        // 宽泛匹配模式：如果正则只有一个捕获组，说明捕获了整段文本，需要按 | 分割
+                        if (lastMatch.length === 2) {
+                            const parts = lastMatch[1].split('|').map(s => s.trim());
+                            for (let i = 0; i < parts.length; i++) {
+                                renderedHtml = renderedHtml.replace(new RegExp(`\\{\\{${i+1}\\}\\}`, 'g'), parts[i]);
+                            }
+                            // 清理未被替换的占位符
+                            renderedHtml = renderedHtml.replace(/\{\{\d+\}\}/g, '');
+                        } else {
+                            // 严格匹配模式：兼容旧的多个捕获组正则
+                            for (let i = 1; i < lastMatch.length; i++) {
+                                renderedHtml = renderedHtml.replace(new RegExp(`\\{\\{${i}\\}\\}`, 'g'), lastMatch[i]);
+                            }
+                        }
+                        
+                        // 核心修改：注入主题颜色 Class 和 按钮 ID
+                        if (sb.theme) {
+                            renderedHtml = renderedHtml.replace('class="hanxi-container"', `class="hanxi-container ${sb.theme}"`);
+                        }
+                        renderedHtml = renderedHtml.replace(/\{\{SB_ID\}\}/g, sb.id);
+                        
+                        // 从正文中移除匹配到的纯文本
+                        content = content.replace(lastMatch[0], '').trim();
+                        
+                        if (sb.pos === 'card_top') {
+                            cardTopHtml += renderedHtml;
+                        } else if (sb.pos === 'card_bottom') {
+                            cardBottomHtml += renderedHtml;
+                        } else {
+                            // 全局状态栏，记录最新的一条
+                            latestGlobalStatusData[sb.id] = renderedHtml;
+                        }
+                    }
+                } catch (e) { console.error('Status bar regex error:', e); }
+            });
+        }
+
+        let isHtmlContent = false;
+        let htmlCode = '';
+        
+        // 1. 匹配 markdown 的 ```html ... ``` 格式
+        const htmlMatch = content.match(/```html\s*([\s\S]*?)\s*```/i);
+        if (htmlMatch) {
+            isHtmlContent = true;
+            htmlCode = htmlMatch[1];
+        } 
+        // 2. 匹配包含 <style> 和 <script> 的代码块 (兼容用户直接输出的模块)
+        else if (content.includes('<style>') && content.includes('<script>')) {
+            isHtmlContent = true;
+            htmlCode = content;
+        }
+        // 3. 匹配标准的 HTML 文档
+        else if (content.includes('<!DOCTYPE html>') || content.includes('<html')) {
+            isHtmlContent = true;
+            htmlCode = content;
+        }
+
+        if (isHtmlContent) {
+            // 提取出 HTML 后，将剩余的普通文本部分（如果有）也保留下来
+            let textPart = content.replace(/```html\s*[\s\S]*?\s*```/i, '').trim();
+            if (!htmlMatch) {
+                // 如果没有 markdown 标记，假设整个 content 都是 HTML，不保留外部文本
+                textPart = '';
+            }
+
+            // 处理普通文本部分的换行和正则
+            if (textPart) {
+                regexList.forEach(r => {
+                    try {
+                        const regex = new RegExp(r.pattern, 'g');
+                        textPart = textPart.replace(regex, r.replace);
+                    } catch (e) { console.error('Regex error:', e); }
+                });
+                textPart = textPart.replace(/\n/g, '<br>');
+            }
+
+            // 将 HTML 代码放入 iframe 中，设置合适的宽高和圆角
+            // 必须转义 & 和 " 以确保 iframe 的 srcdoc 属性解析正确
+            const safeHtml = htmlCode.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+            
+            // 组合文本和 iframe 沙盒
+            content = (textPart ? textPart + '<br><br>' : '') + 
+                      `<iframe srcdoc="${safeHtml}" style="width: 100%; min-width: 280px; height: 500px; border: none; border-radius: 12px; background: #fff; display: block; box-shadow: 0 4px 15px rgba(0,0,0,0.1);"></iframe>`;
+        } else {
+            // 应用正则替换
+            regexList.forEach(r => {
+                try {
+                    const regex = new RegExp(r.pattern, 'g');
+                    content = content.replace(regex, r.replace);
+                } catch (e) { console.error('Regex error:', e); }
+            });
+
+            // 转换换行为 <br>
+            content = content.replace(/\n/g, '<br>');
+        }
+
+        const card = document.createElement('div');
+        card.className = `tav-chat-card ${isMe ? 'user' : 'char'}`;
+        
+        // 动态生成菜单 HTML
+        const menuHtml = `
+            <div class="tav-msg-menu-container ${isMe ? 'user' : 'char'}">
+                <div class="tav-msg-menu-btn" onclick="tavToggleMsgMenu(this, event)">
+                    <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+                </div>
+                <div class="tav-msg-menu">
+                    <div class="tav-msg-menu-item" onclick="tavEditMsg('${msg.id}')">编辑</div>
+                    <div class="tav-msg-menu-item" onclick="tavEditMsgStatus('${msg.id}')">编辑状态栏</div>
+                    <div class="tav-msg-menu-item danger" onclick="tavDeleteMsg('${msg.id}')">删除</div>
+                </div>
+            </div>
+        `;
+
+        let optionsHtml = '';
+        if (!isMe && msg.replyOptions && msg.replyOptions.length > 0 && msg === history[history.length - 1]) {
+            const labels = ['A', 'B', 'C'];
+            let btnsHtml = msg.replyOptions.map((opt, index) => {
+                const safeOpt = opt.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+                return `<div class="tav-option-btn" onclick="tavFillInput('${safeOpt}')">${labels[index]}. ${opt}</div>`;
+            }).join('');
+            btnsHtml += `<div class="tav-option-btn custom" onclick="tavFocusInput()">D. 自定义回复</div>`;
+            optionsHtml = `<div class="tav-reply-options">${btnsHtml}</div>`;
+        }
+
+        card.innerHTML = `
+            <div class="tav-chat-card-header">
+                <div class="tav-chat-card-avatar" style="background-image: url('${isMe ? userAvatar : charAvatar}');"></div>
+                <div class="tav-chat-card-name">${isMe ? userRealName : charName}</div>
+            </div>
+            ${cardTopHtml ? `<div class="tav-demo-inner-status top">${cardTopHtml}</div>` : ''}
+            <div class="tav-chat-card-content">${content}</div>
+            ${optionsHtml}
+            ${menuHtml}
+        `;
+        fragment.appendChild(card);
+
+        // 核心修改：将底部状态栏独立出来，放在卡片外部，这样就不会受卡片背景影响
+        if (cardBottomHtml) {
+            const statusWrapper = document.createElement('div');
+            statusWrapper.className = 'tav-demo-inner-status bottom external-status';
+            statusWrapper.innerHTML = cardBottomHtml;
+            fragment.appendChild(statusWrapper);
+        }
+    });
+
+    // 一次性将所有组装好的 DOM 插入页面，避免频繁重绘导致卡屏
+    streamEl.appendChild(fragment);
+
+    // 更新全局状态栏
+    updateGlobalStatusBars(statusBars, latestGlobalStatusData);
+
+    // 滚动到底部或保持位置
+    setTimeout(() => {
+        if (keepScroll) {
+            streamEl.scrollTop = streamEl.scrollHeight - oldScrollHeight + oldScrollTop;
+        } else {
+            streamEl.scrollTop = streamEl.scrollHeight;
+        }
+    }, 100);
+}
+
+function updateGlobalStatusBars(statusBars, latestData) {
+    const floatingPanel = document.getElementById('tav-floating-panel-content');
+    if (floatingPanel) floatingPanel.innerHTML = '';
+    
+    statusBars.forEach(sb => {
+        if (latestData[sb.id]) {
+            if (sb.pos === 'floating' && floatingPanel) {
+                const div = document.createElement('div');
+                div.innerHTML = latestData[sb.id];
+                floatingPanel.appendChild(div);
+            }
+            // 如果有 top 或 bottom 的全局状态栏，可以在这里扩展
+        }
+    });
+}
+
+// ==========================================
+// 聊天交互逻辑 (发送、AI、菜单、记忆库)
+// ==========================================
+
+// 控制 UI 加载状态
+function tavSetLoadingState(isLoading) {
+    const headerName = document.getElementById('tavHeaderName');
+    const sendBtn = document.querySelector('.tav-send-btn');
+    if (isLoading) {
+        headerName.classList.add('loading');
+        sendBtn.classList.add('loading');
+    } else {
+        headerName.classList.remove('loading');
+        sendBtn.classList.remove('loading');
+    }
+}
+
+// 发送消息 (仅发送，不触发 AI)
+function tavSendMsg() {
+    const inputEl = document.getElementById('tavChatInput');
+    const content = inputEl.value.trim();
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!content || !currentChatRoomCharId || !currentLoginId) return;
+
+    // 核心修改：使用 tav_chat_history_ 实现线下隔离，且不再双向同步给微信
+    let history = JSON.parse(ChatDB.getItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    history.push({
+        id: Date.now().toString(),
+        sender: 'me',
+        content: content,
+        timestamp: new Date().toISOString()
+    });
+    ChatDB.setItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(history));
+    
+    inputEl.value = '';
+    inputEl.style.height = '20px'; // 恢复默认高度
+    tavRenderChat();
+    tavUpdateContextTokens();
+}
+
+// 触发 AI 回复 (核心 Fetch 逻辑)
+async function tavTriggerAI(isRegenerate = false, isContinue = false) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentChatRoomCharId || !currentLoginId) return alert('请先选择一个角色进行聊天');
+    
+    const globalApiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    const apiConfig = JSON.parse(ChatDB.getItem('tav_api_config') || '{}');
+    const url = apiConfig.url || globalApiConfig.url || localStorage.getItem('apiUrl');
+    const key = apiConfig.key || globalApiConfig.key || localStorage.getItem('apiKey');
+    const model = apiConfig.model || globalApiConfig.model || localStorage.getItem('apiModel') || 'gpt-4-turbo';
+    const temp = apiConfig.temperature !== undefined ? apiConfig.temperature : (globalApiConfig.temperature !== undefined ? globalApiConfig.temperature : (localStorage.getItem('apiTemperature') || 0.8));
+
+    if (!url || !key) return alert('请先在设置中配置 API URL 和 Key');
+
+    tavSetLoadingState(true);
+
+    try {
+        // 核心修改：使用 tav_chat_history_
+        let history = JSON.parse(ChatDB.getItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+
+        if (isRegenerate && history.length > 0 && history[history.length-1].sender === 'char') {
+            history.pop(); // 移除最后一条 AI 消息
+        }
+
+        let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+        const char = allEntities.find(c => c.id === currentChatRoomCharId);
+        const charName = char ? (char.name || char.netName) : 'Char';
+        
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        const account = accounts.find(a => a.id === currentLoginId);
+        let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+        const persona = personas.find(p => p.id === (account ? account.personaId : null));
+        const userName = account ? (account.netName || 'User') : 'User';
+        const userRealName = persona ? (persona.realName || userName) : userName;
+
+        // 构建 Messages 数组
+        let messages = [];
+        let sysPrompt = "";
+
+        // 1. 读取系统提示词 (检查开关是否开启)
+        const sysToggle = document.getElementById('tavSystemPrompt')?.closest('.tav-status-item-card')?.querySelector('.tav-toggle-switch');
+        if (sysToggle && sysToggle.classList.contains('active')) {
+            sysPrompt += document.getElementById('tavSystemPrompt')?.value || '';
+        }
+        
+        // 2. 注入角色设定
+        if (char) {
+            if (char.isGroup) {
+                sysPrompt += `\n\n【多人场景/群聊设定】\n场景名称：${char.name}\n场景描述：${char.signature || char.scenario || char.description || '无'}\n\n【出场角色设定】\n`;
+                if (char.memberIds) {
+                    char.memberIds.forEach(mid => {
+                        if (mid === currentLoginId) return;
+                        const member = allEntities.find(e => e.id === mid);
+                        if (member) {
+                            if (member.isAccount) {
+                                const mPersona = personas.find(p => p.id === member.personaId);
+                                sysPrompt += `- 角色名字(真名): ${mPersona ? (mPersona.realName || member.netName) : (member.netName || member.name)} | 设定: ${mPersona ? mPersona.persona : '无'}\n`;
+                            } else {
+                                sysPrompt += `- 角色名字(真名): ${member.name || member.netName} | 设定: ${member.description || '无'}\n`;
+                            }
+                        }
+                    });
+                }
+                sysPrompt += `\n【多人扮演铁律】\n这是一个多人线下长剧情场景！大家都在线下真实见面，你必须同时扮演上述所有出场角色。当 User${userRealName}）发话或做出动作时，你需要根据情况让合适的角色做出反应，甚至让多个角色之间产生互动和剧情推进。请在每次回复中，通过动作描写和对话自然地展现不同角色的性格，绝对禁止角色串戏！`;
+            } else {
+                sysPrompt += `\n\n【角色设定】\n${char.description || ''}`;
+                if (char.scenario) {
+                    sysPrompt += `\n\n【当前场景】\n${char.scenario}`;
+                }
+            }
+        }
+
+        // 3. 注入用户设定 (面具)
+        if (persona && persona.persona) {
+            sysPrompt += `\n\n【用户设定】\n用户的真实名字是：【${userRealName}】。请在线下互动中称呼其真名。\n${persona.persona}`;
+        } else {
+            sysPrompt += `\n\n【用户设定】\n用户的真实名字是：【${userRealName}】。请在线下互动中称呼其真名。`;
+        }
+
+        // 4. 注入世界书 (仅读取设置中心绑定的世界书 tav_worldbook_bind)
+        const savedWb = JSON.parse(ChatDB.getItem('tav_worldbook_bind') || '[]');
+        const wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+        let activeWbs = [];
+        savedWb.forEach(id => {
+            const entry = wbData.entries.find(e => e.id === id);
+            if (entry && entry.content) activeWbs.push(entry.content);
+        });
+        if (activeWbs.length > 0) {
+            sysPrompt += `\n\n【世界书/背景设定】\n${activeWbs.join('\n')}`;
+        }
+
+        // 5. 注入向量记忆库
+        const isVectorEnabled = document.getElementById('tavVectorToggle')?.classList.contains('active');
+        if (isVectorEnabled) {
+            const memories = JSON.parse(ChatDB.getItem(`tav_memory_${currentChatRoomCharId}`) || '[]');
+            if (memories.length > 0) {
+                sysPrompt += '\n\n【核心记忆库】\n' + memories.map(m => m.text).join('\n');
+            }
+            sysPrompt += '\n\n【重要指令】请在回复的正文和状态栏之后，总结这一轮对话的核心内容（包括动作、剧情推进、重要信息），并使用 <summary>总结内容</summary> 标签包裹在回复的最末尾。';
+        }
+
+        // 新增：时间感知插件
+        const isTimeAwareEnabled = document.getElementById('tavTimeAwareToggle')?.classList.contains('active');
+        if (isTimeAwareEnabled) {
+            const pad = (n) => n.toString().padStart(2, '0');
+            const now = new Date();
+            const days = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+            const dayOfWeek = days[now.getDay()];
+            const hour = now.getHours();
+            let timePhase = '深夜';
+            if (hour >= 5 && hour < 9) timePhase = '早晨';
+            else if (hour >= 9 && hour < 12) timePhase = '上午';
+            else if (hour >= 12 && hour < 14) timePhase = '中午';
+            else if (hour >= 14 && hour < 18) timePhase = '下午';
+            else if (hour >= 18 && hour < 20) timePhase = '傍晚';
+            else if (hour >= 20 && hour < 24) timePhase = '晚上';
+            else if (hour >= 0 && hour < 5) timePhase = '凌晨/深夜';
+            
+            const timeStr = `${now.getFullYear()}年${pad(now.getMonth() + 1)}月${pad(now.getDate())}日 ${dayOfWeek} ${timePhase} ${pad(hour)}:${pad(now.getMinutes())}`;
+            sysPrompt += `\n\n【时间感知】\n当前现实时间是：${timeStr}。请务必在潜意识里认知到现在是${timePhase}，请在符合人设和剧情逻辑的前提下，自然地感知并适应这个时间点。`;
+        }
+
+        // 6. 注入 Chat APP 角色记忆库 (完美混合记忆系统)
+        const currentPersonaId = persona ? persona.id : currentLoginId;
+        let chatAppMemory = JSON.parse(ChatDB.getItem(`char_memory_${currentPersonaId}_${currentChatRoomCharId}`) || '{}');
+        
+        // 1. 【常驻记忆】：核心记忆 (Core)
+        let coreMemories = chatAppMemory.core || [];
+        if (coreMemories.length > 0) {
+            coreMemories.sort((a, b) => (a.weight || 5) - (b.weight || 5));
+            sysPrompt += `\n\n【核心记忆 (Core Memory - 绝对不可遗忘)】\n`;
+            coreMemories.forEach(mem => {
+                sysPrompt += `- ${mem.content}\n`;
+            });
+        }
+
+        // 2. 【近期剧情】：读取自定义条数的最新总结
+        let recentCount = (chatAppMemory.settings && chatAppMemory.settings.recentSummaryCount !== undefined) ? chatAppMemory.settings.recentSummaryCount : 3;
+        let allSummaries = chatAppMemory.summary || [];
+        let recentSummaries = recentCount > 0 ? allSummaries.slice(-recentCount) : []; 
+        let olderSummaries = recentCount > 0 ? allSummaries.slice(0, -recentCount) : allSummaries;
+
+        if (recentSummaries.length > 0) {
+            sysPrompt += `\n\n【近期剧情总结 (Story Context)】\n`;
+            recentSummaries.forEach(mem => {
+                sysPrompt += `${mem.content}\n`;
+            });
+        }
+
+        // 3. 【动态检索】：用向量语义检索旧总结
+        let retrievedMemories = [];
+        const historyLen = parseInt(ChatDB.getItem('tav_chat_history_length') || '20');
+        const msgCount = historyLen * 2;
+        const recentHistory = msgCount > 0 ? history.slice(-msgCount) : [];
+        let recentContextText = recentHistory.slice(-3).map(m => (m.content || '').replace(/<[^>]+>/g, '')).join(' ');
+        
+        function extractKeywords(text) {
+            if (!text) return [];
+            let cleanText = text.replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, ' ');
+            let words = cleanText.split(/\s+/).filter(w => w.length >= 2);
+            const stopWords = ['什么','怎么','我们','你们','他们','这个','那个','就是','还是','可以','没有','知道','觉得','喜欢','为什么','时候','现在','今天','明天','昨天','真的','如果'];
+            return words.filter(w => !stopWords.includes(w));
+        }
+        
+        let contextKeywords = extractKeywords(recentContextText);
+
+        function calculateSemanticScore(memoryText, memoryTags, contextWords) {
+            let memWords = extractKeywords(memoryText);
+            if (memoryTags && memoryTags.length > 0) memWords = memWords.concat(memoryTags);
+            if (memWords.length === 0 || contextWords.length === 0) return 0;
+            let intersection = memWords.filter(w => contextWords.includes(w)).length;
+            let union = new Set([...memWords, ...contextWords]).size;
+            return intersection / union;
+        }
+
+        if (olderSummaries.length > 0) {
+            olderSummaries.forEach(item => {
+                let score = calculateSemanticScore(item.content, item.tags, contextKeywords);
+                let weight = item.weight || 5;
+                let finalScore = score * (weight / 5); 
+                if (finalScore > 0.05) {
+                    retrievedMemories.push({
+                        content: item.content,
+                        tags: item.tags || [],
+                        weight: weight,
+                        score: finalScore
+                    });
+                }
+            });
+        }
+
+        if (retrievedMemories.length > 0) {
+            retrievedMemories.sort((a, b) => b.score - a.score);
+            let topMemories = retrievedMemories.slice(0, 3);
+            topMemories.sort((a, b) => a.weight - b.weight);
+            
+            sysPrompt += `\n\n【脑海中闪过的旧回忆 (Flashback)】\n当聊到相关话题时，你突然回想起了以前的这些事：\n`;
+            topMemories.forEach(mem => {
+                let tagStr = mem.tags && mem.tags.length > 0 ? ` [标签: ${mem.tags.join(',')}]` : '';
+                sysPrompt += `- (权重:${mem.weight})${tagStr} ${mem.content}\n`;
+            });
+            sysPrompt += `(请自然地体现出你记得这些事，不要生硬地复述)\n`;
+        }
+
+        if (chatAppMemory.note && chatAppMemory.note.length > 0) {
+            sysPrompt += `\n\n【作者备注 (全局)】\n${chatAppMemory.note.map(m => m.content).join('\n')}`;
+        }
+
+        // 7. 注入线上微信聊天记录
+        const onlineHistoryLen = parseInt(ChatDB.getItem('tav_online_chat_history_length') || '10');
+        if (onlineHistoryLen > 0) {
+            let onlineHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+            let recentOnlineHistory = onlineHistoryLen > 0 ? onlineHistory.slice(-onlineHistoryLen) : [];
+            if (recentOnlineHistory.length > 0) {
+                sysPrompt += `\n\n【线上聊天记录回顾】\n以下是你和 ${userRealName} 在线上聊天软件中的近期聊天记录，作为背景参考：\n`;
+                recentOnlineHistory.forEach(msg => {
+                    let senderName = msg.role === 'user' ? userRealName : charName;
+                    let content = (msg.content || '').replace(/<[^>]+>/g, ''); // 简单过滤HTML，增加安全校验
+                    sysPrompt += `${senderName}: ${content}\n`;
+                });
+            }
+        }
+
+        // 8. 注入状态栏格式要求
+        let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+        let activeStatusBars = statusBars.filter(sb => sb.active);
+        if (activeStatusBars.length > 0) {
+            sysPrompt += `\n\n【状态栏输出要求】\n请在回复的正文末尾，严格按照以下格式输出当前的状态数据，以便系统正则提取：\n`;
+            activeStatusBars.forEach(sb => {
+                sysPrompt += `- ${sb.name} (必须符合正则提取规则: ${sb.regex})`;
+                if (sb.prompt) {
+                    sysPrompt += `。内容要求：${sb.prompt}`;
+                }
+                sysPrompt += `\n`;
+            });
+        }
+
+        // 9. 注入越狱、文风、作者备注 (检查开关是否开启)
+        const jailToggle = document.getElementById('tavJailbreakPrompt')?.closest('.tav-status-item-card')?.querySelector('.tav-toggle-switch');
+        if (jailToggle && jailToggle.classList.contains('active')) {
+            const jailbreak = document.getElementById('tavJailbreakPrompt')?.value || '';
+            if (jailbreak) sysPrompt += `\n\n【系统指令】\n${jailbreak}`;
+        }
+
+        const styleToggle = document.getElementById('tavStylePrompt')?.closest('.tav-status-item-card')?.querySelector('.tav-toggle-switch');
+        if (styleToggle && styleToggle.classList.contains('active')) {
+            const style = document.getElementById('tavStylePrompt')?.value || '';
+            if (style) sysPrompt += `\n\n【文风要求】\n${style}`;
+        }
+
+        const noteToggle = document.getElementById('tavNotePrompt')?.closest('.tav-status-item-card')?.querySelector('.tav-toggle-switch');
+        if (noteToggle && noteToggle.classList.contains('active')) {
+            const note = document.getElementById('tavNotePrompt')?.value || '';
+            if (note) sysPrompt += `\n\n【作者备注】\n${note}`;
+        }
+
+        // 注入回复选项插件指令
+        const isReplyOptionsEnabled = document.getElementById('tavReplyOptionsToggle')?.classList.contains('active');
+        if (isReplyOptionsEnabled) {
+            sysPrompt += `\n\n【互动选项】请在回复正文结束后，根据当前剧情为 User 提供 3 个符合逻辑的回复选项，格式严格为：\n<options>\nA: 选项1内容\nB: 选项2内容\nC: 选项3内容\n</options>`;
+        }
+
+        messages.push({ role: 'system', content: sysPrompt });
+
+        // 10. 拼接酒馆线下历史记录
+        recentHistory.forEach(msg => {
+            messages.push({ role: msg.sender === 'me' ? 'user' : 'assistant', content: msg.content || '' });
+        });
+
+        // 11. 继续生成指令
+        if (isContinue && history.length > 0 && history[history.length-1].sender === 'char') {
+            messages.push({ role: 'user', content: '请继续你上一条未完成的回复，直接输出接下来的内容，不要重复已经说过的话。' });
+        }
+
+        const cleanUrl = url.replace(/\/$/, '');
+        const response = await fetch(cleanUrl + '/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${key}`
+            },
+            body: JSON.stringify({
+                model: model,
+                messages: messages,
+                temperature: parseFloat(temp)
+            })
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(JSON.stringify(err, null, 2));
+        }
+        const data = await response.json();
+        
+        // 防止内容截断导致报错，只要有 choices 就读取，哪怕是空字符串也保留（返回多少显示多少）
+        if (!data.choices || !data.choices[0] || data.choices[0].message === undefined) {
+            throw new Error("API 返回了成功状态，但数据格式异常。");
+        }
+        let replyText = data.choices[0].message.content || "";
+        let replyOptions = [];
+
+        // 提取回复选项
+        if (isReplyOptionsEnabled) {
+            const optionsMatch = replyText.match(/<options>([\s\S]*?)<\/options>/i);
+            if (optionsMatch) {
+                const optionsText = optionsMatch[1].trim();
+                const lines = optionsText.split('\n').filter(l => l.trim() !== '');
+                lines.forEach(line => {
+                    let cleanLine = line.replace(/^[A-D1-4][:：.、]\s*/i, '').trim();
+                    if (cleanLine) replyOptions.push(cleanLine);
+                });
+                replyOptions = replyOptions.slice(0, 3);
+                replyText = replyText.replace(/<options>[\s\S]*?<\/options>/i, '').trim();
+            }
+        }
+
+        // 提取并保存记忆总结
+        if (isVectorEnabled) {
+            const summaryMatch = replyText.match(/<summary>([\s\S]*?)<\/summary>/);
+            if (summaryMatch) {
+                const summaryText = summaryMatch[1].trim();
+                let memories = JSON.parse(ChatDB.getItem(`tav_memory_${currentChatRoomCharId}`) || '[]');
+                memories.push({ id: Date.now().toString(), text: summaryText });
+                ChatDB.setItem(`tav_memory_${currentChatRoomCharId}`, JSON.stringify(memories));
+                // 从展示文本中移除 summary 标签
+                replyText = replyText.replace(/<summary>[\s\S]*?<\/summary>/, '').trim();
+            }
+        }
+
+        // 保存消息 (核心修改：使用 tav_chat_history_)
+        if (isContinue && history.length > 0 && history[history.length-1].sender === 'char') {
+            history[history.length-1].content += replyText;
+            if (replyOptions.length > 0) history[history.length-1].replyOptions = replyOptions;
+        } else {
+            history.push({
+                id: Date.now().toString(),
+                sender: 'char',
+                content: replyText,
+                replyOptions: replyOptions.length > 0 ? replyOptions : null,
+                timestamp: new Date().toISOString()
+            });
+        }
+
+        ChatDB.setItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(history));
+        tavRenderChat();
+        tavUpdateContextTokens();
+
+    } catch (error) {
+        if (typeof showApiErrorModal === 'function') {
+            showApiErrorModal(error.message || 'API 请求失败或处理出错');
+        } else {
+            alert('API 请求失败或处理出错: ' + error.message);
+        }
+        console.error('tavTriggerAI Error:', error);
+    } finally {
+        tavSetLoadingState(false);
+    }
+}
+
+// 重新生成弹窗
+function tavPromptRegenerate() {
+    const modal = document.getElementById('tavConfirmModalOverlay');
+    document.getElementById('tavConfirmTitle').innerText = '重新生成';
+    document.getElementById('tavConfirmDesc').innerText = '是否确认删除最后一条 AI 回复并重新生成？';
+    const btn = document.getElementById('tavConfirmBtn');
+    btn.onclick = () => {
+        modal.classList.remove('show');
+        tavTriggerAI(true, false);
+    };
+    modal.classList.add('show');
+}
+
+// 继续生成弹窗
+function tavPromptContinue() {
+    const modal = document.getElementById('tavConfirmModalOverlay');
+    document.getElementById('tavConfirmTitle').innerText = '继续生成';
+    document.getElementById('tavConfirmDesc').innerText = '是否确认让 AI 继续生成未完成的回复？';
+    const btn = document.getElementById('tavConfirmBtn');
+    btn.onclick = () => {
+        modal.classList.remove('show');
+        tavTriggerAI(false, true);
+    };
+    modal.classList.add('show');
+}
+
+// 切换消息菜单显示
+function tavToggleMsgMenu(btnEl, event) {
+    event.stopPropagation();
+    document.querySelectorAll('.tav-msg-menu.show').forEach(menu => {
+        if (menu !== btnEl.nextElementSibling) menu.classList.remove('show');
+    });
+    const menu = btnEl.nextElementSibling;
+    menu.classList.toggle('show');
+}
+
+// 点击全局空白处关闭菜单
+document.addEventListener('click', () => {
+    document.querySelectorAll('.tav-msg-menu.show').forEach(menu => {
+        menu.classList.remove('show');
+    });
+});
+
+// 编辑消息/状态栏逻辑
+function tavEditMsg(id, isStatus = false) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentChatRoomCharId || !currentLoginId) return;
+    
+    // 核心修改：使用 tav_chat_history_
+    let history = JSON.parse(ChatDB.getItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    const msg = history.find(m => m.id === id);
+    if (!msg) return;
+
+    const modal = document.getElementById('tavEditContentModalOverlay');
+    document.getElementById('tavEditContentTitle').innerText = isStatus ? '编辑状态栏 (HTML)' : '编辑消息';
+    const textarea = document.getElementById('tavEditContentTextarea');
+    textarea.value = msg.content;
+
+    const saveBtn = document.getElementById('tavEditContentSaveBtn');
+    saveBtn.onclick = () => {
+        msg.content = textarea.value;
+        ChatDB.setItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(history));
+        modal.classList.remove('show');
+        tavRenderChat();
+        tavUpdateContextTokens();
+    };
+    modal.classList.add('show');
+}
+
+function tavEditMsgStatus(id) {
+    tavEditMsg(id, true);
+}
+
+function tavDeleteMsg(id) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentChatRoomCharId || !currentLoginId) return;
+    
+    if (confirm('确定删除这条消息吗？')) {
+        // 核心修改：使用 tav_chat_history_
+        let history = JSON.parse(ChatDB.getItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+        history = history.filter(msg => msg.id !== id);
+        ChatDB.setItem(`tav_chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(history));
+        tavRenderChat();
+        tavUpdateContextTokens();
+    }
+}
+
+// ==========================================
+// 记忆库管理逻辑
+// ==========================================
+function tavOpenMemoryBank() {
+    const isVectorEnabled = document.getElementById('tavVectorToggle')?.classList.contains('active');
+    if (!isVectorEnabled) return alert('请先在右侧设置中开启【线下记忆库】插件！');
+    if (!currentChatRoomCharId) return alert('请先选择一个角色');
+
+    tavRenderMemoryBank();
+    document.getElementById('tavMemoryBankPanel').style.display = 'flex';
+}
+
+function closeTavMemoryBankPanel() {
+    document.getElementById('tavMemoryBankPanel').style.display = 'none';
+}
+
+function tavRenderMemoryBank() {
+    const listEl = document.getElementById('tavMemoryBankList');
+    listEl.innerHTML = '';
+    let memories = JSON.parse(ChatDB.getItem(`tav_memory_${currentChatRoomCharId}`) || '[]');
+
+    if (memories.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; font-size:13px; padding:40px 0;">暂无记忆总结，开启插件后每轮对话将自动生成。</div>';
+        return;
+    }
+
+    memories.forEach(m => {
+        const card = document.createElement('div');
+        card.style.cssText = 'background: #fff; border-radius: 16px; padding: 15px 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.02); display: flex; flex-direction: column; gap: 12px;';
+        card.innerHTML = `
+            <div style="font-size: 14px; color: #333; line-height: 1.6; word-break: break-all;">${m.text}</div>
+            <div style="display: flex; justify-content: flex-end; gap: 15px; border-top: 1px solid #f5f5f5; padding-top: 12px; margin-top: 4px;">
+                <span style="font-size: 13px; color: #111; cursor: pointer; font-weight: bold;" onclick="tavEditMemory('${m.id}')">Edit</span>
+                <span style="font-size: 13px; color: #ff3b30; cursor: pointer; font-weight: bold;" onclick="tavDeleteMemory('${m.id}')">Delete</span>
+            </div>
+        `;
+        listEl.appendChild(card);
+    });
+}
+
+function tavEditMemory(id) {
+    let memories = JSON.parse(ChatDB.getItem(`tav_memory_${currentChatRoomCharId}`) || '[]');
+    const mem = memories.find(m => m.id === id);
+    if (!mem) return;
+
+    const modal = document.getElementById('tavEditContentModalOverlay');
+    document.getElementById('tavEditContentTitle').innerText = '编辑记忆';
+    const textarea = document.getElementById('tavEditContentTextarea');
+    textarea.value = mem.text;
+
+    const saveBtn = document.getElementById('tavEditContentSaveBtn');
+    saveBtn.onclick = () => {
+        mem.text = textarea.value;
+        ChatDB.setItem(`tav_memory_${currentChatRoomCharId}`, JSON.stringify(memories));
+        modal.classList.remove('show');
+        tavRenderMemoryBank();
+    };
+    modal.classList.add('show');
+}
+
+function tavDeleteMemory(id) {
+    if (confirm('确定删除这条记忆吗？')) {
+        let memories = JSON.parse(ChatDB.getItem(`tav_memory_${currentChatRoomCharId}`) || '[]');
+        memories = memories.filter(m => m.id !== id);
+        ChatDB.setItem(`tav_memory_${currentChatRoomCharId}`, JSON.stringify(memories));
+        tavRenderMemoryBank();
+    }
+}
+
+// 页面加载时渲染状态栏列表
+window.addEventListener('ChatDBReady', () => {
+    if (document.getElementById('tavStatusBarList')) {
+        renderTavStatusBars();
+        renderTavRegexList();
+    }
+});
+
+// ==========================================
+// 回复选项插件逻辑
+// ==========================================
+function tavToggleReplyOptionsPlugin(el) {
+    el.classList.toggle('active');
+    ChatDB.setItem('tav_plugin_reply_options', el.classList.contains('active'));
+}
+
+function tavFillInput(text) {
+    const inputEl = document.getElementById('tavChatInput');
+    if (inputEl) {
+        inputEl.value = text;
+        inputEl.focus();
+        inputEl.style.height = '';
+        inputEl.style.height = inputEl.scrollHeight + 'px';
+    }
+}
+
+function tavFocusInput() {
+    const inputEl = document.getElementById('tavChatInput');
+    if (inputEl) {
+        inputEl.focus();
+    }
+}
+
+// 注入文本到输入框 (供透明状态栏的选项按钮调用)
+window.injectMufyText = function(text) {
+    const inputEl = document.getElementById('tavChatInput');
+    if (inputEl) {
+        inputEl.value = text;
+        inputEl.focus();
+        inputEl.style.height = '';
+        inputEl.style.height = inputEl.scrollHeight + 'px';
+    }
+};
+// 实时保存当前激活的提示词（按角色隔离）
+function tavSaveActivePrompt(type, value) {
+    if (!currentChatRoomCharId) return;
+    ChatDB.setItem(`tav_active_prompt_${type}_${currentChatRoomCharId}`, value);
+}
+
+// ==========================================
+// 状态栏主题切换逻辑
+// ==========================================
+function tavOpenThemeSelector(sbId) {
+    document.getElementById('tavThemeTargetSbId').value = sbId;
+    document.getElementById('tavStatusBarThemeModalOverlay').classList.add('show');
+}
+
+function closeTavThemeSelector() {
+    document.getElementById('tavStatusBarThemeModalOverlay').classList.remove('show');
+}
+
+function tavApplyStatusBarTheme(themeClass) {
+    const sbId = document.getElementById('tavThemeTargetSbId').value;
+    if (!sbId) return;
+
+    let statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+    const sb = statusBars.find(s => s.id === sbId);
+    if (sb) {
+        sb.theme = themeClass;
+        ChatDB.setItem('tav_status_bars', JSON.stringify(statusBars));
+        tavRenderChat(); // 重新渲染聊天界面以应用主题
+        renderTavStatusBars(); // 重新渲染外部文件夹列表
+        
+        // 核心修复：如果当前在分组详情页内，必须重新渲染详情页才能看到预览变化
+        if (window.currentTavStatusGroup) {
+            openTavGroupDetail(window.currentTavStatusGroup);
+        }
+    }
+    closeTavThemeSelector();
+}
+// 保存预设和插件开关状态
+function toggleTavPlugin(id, el) {
+    el.classList.toggle('active');
+    ChatDB.setItem(`tav_plugin_${id}`, el.classList.contains('active'));
+    if (typeof tavUpdateContextTokens === 'function') tavUpdateContextTokens();
+}
+
+// ==========================================
+// 状态栏导入导出逻辑
+// ==========================================
+function exportSingleTavStatusBar(id) {
+    const statusBars = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+    const sb = statusBars.find(s => s.id === id);
+    if (!sb) return alert('未找到该状态栏数据！');
+    
+    const blob = new Blob([JSON.stringify(sb, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    // 核心修改：文件名直接使用状态栏的名称，并过滤掉操作系统文件名不支持的特殊字符
+    const safeName = sb.name.replace(/[\\/:*?"<>|]/g, '_');
+    a.download = `${safeName}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+function importTavStatusBars() {
+    const input = document.getElementById('tavStatusBarImportInput');
+    if (input) input.click();
+}
+
+function handleTavStatusBarsImport(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        try {
+            const importedData = JSON.parse(e.target.result);
+            let currentData = JSON.parse(ChatDB.getItem('tav_status_bars') || '[]');
+            
+            // 兼容导入单个对象或数组
+            const itemsToImport = Array.isArray(importedData) ? importedData : [importedData];
+            
+            if (itemsToImport.length === 0) throw new Error("文件中没有状态栏数据");
+
+            itemsToImport.forEach(item => {
+                // 强制生成新ID，防止冲突
+                item.id = 'imported_' + Date.now() + Math.random().toString(36).substr(2, 5);
+                // 如果没有分组，默认放入“导入分组”
+                if (!item.group) item.group = '导入分组';
+                currentData.push(item);
+            });
+            
+            // 绝对不覆盖，永远是追加
+            ChatDB.setItem('tav_status_bars', JSON.stringify(currentData));
+            
+            alert(`成功导入 ${itemsToImport.length} 个状态栏！(已追加到现有列表中)`);
+            renderTavStatusBars();
+            
+            // 如果当前在分组详情页，刷新一下
+            if (window.currentTavStatusGroup) {
+                openTavGroupDetail(window.currentTavStatusGroup);
+            }
+        } catch (err) {
+            alert('导入失败：文件格式不正确或已损坏。\n' + err.message);
+        }
+    };
+    reader.readAsText(file);
+    event.target.value = ''; 
+}

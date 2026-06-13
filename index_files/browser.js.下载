@@ -1,0 +1,2862 @@
+// ==========================================
+// 系统浏览器 APP (SysBrowser) 逻辑
+// ==========================================
+
+const sysBrowserPanel = document.getElementById('sysBrowserAppPanel');
+
+// 视图元素
+const sysBrowserViews = {
+    home: document.getElementById('sys-browser-view-home'),
+    real: document.getElementById('sys-browser-view-real-web'),
+    ai: document.getElementById('sys-browser-view-ai-web'),
+    ao3: document.getElementById('sys-browser-view-ao3'),
+    haitang: document.getElementById('sys-browser-view-haitang'),
+    loading: document.getElementById('sys-browser-view-loading'),
+    tabs: document.getElementById('sys-browser-view-tabs'),
+    history: document.getElementById('sys-browser-view-history'),
+    bookshelf: document.getElementById('sys-browser-view-bookshelf'),
+    settings: document.getElementById('sys-browser-view-settings')
+};
+
+const sysBrowserAddressText = document.getElementById('sysBrowserAddressText');
+const sysBrowserSearchInput = document.getElementById('sysBrowserSearchInput');
+const sysBrowserRealIframe = document.getElementById('sysBrowserRealIframe');
+const sysBrowserAiTitle = document.getElementById('sysBrowserAiTitle');
+const sysBrowserMenuOverlay = document.getElementById('sysBrowserMenuOverlay');
+const sysBrowserAccountOverlay = document.getElementById('sysBrowserAccountOverlay');
+
+// 历史记录栈 (用于后退/前进)
+let sysBrowserHistoryStack = JSON.parse(ChatDB.getItem('sys_browser_history_stack') || '[{"url":"home","type":"home"}]');
+let sysBrowserCurrentHistoryIndex = parseInt(ChatDB.getItem('sys_browser_history_index') || '0');
+
+// 多标签页数据
+let sysBrowserTabs = JSON.parse(ChatDB.getItem('sys_browser_tabs') || '[{"id":1,"title":"起始页","isHome":true,"url":"home","type":"home"},{"id":2,"title":"维基百科","isHome":false,"url":"https://zh.wikipedia.org","type":"real"}]');
+let sysBrowserActiveTabId = parseInt(ChatDB.getItem('sys_browser_active_tab_id') || '1');
+
+// AI 生成网页缓存
+let sysBrowserCachedPages = JSON.parse(ChatDB.getItem('sys_browser_cached_pages') || '{}');
+
+// Poipiku 模拟数据 (持久化)
+let sysBrowserPoipikuData = JSON.parse(ChatDB.getItem('sys_browser_poipiku_posts') || '[]');
+
+let sysBrowserShareContext = null;
+
+function sharePoipikuToChar(postId) {
+    sysBrowserShareContext = { type: 'poipiku_post', postId: postId };
+    openUniversalShareModal();
+}
+
+function openUniversalShareModal() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) {
+        sysBrowserShowToast('请先登录账号');
+        return;
+    }
+    
+    const listEl = document.getElementById('universalShareContactList');
+    if (!listEl) {
+        sysBrowserShowToast('未找到分享弹窗组件');
+        return;
+    }
+    listEl.innerHTML = '';
+    
+    let contacts = JSON.parse(ChatDB.getItem(`contacts_${currentLoginId}`) || '[]');
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+    let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+    
+    const friends = contacts.map(id => allEntities.find(c => c.id === id)).filter(c => c);
+    
+    if (friends.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#aaa; font-size:12px;">暂无好友可分享</div>';
+    } else {
+        friends.forEach(f => {
+            const displayName = remarks[f.id] || f.netName || f.name;
+            const item = document.createElement('div');
+            item.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 10px; background: #f9f9f9; border-radius: 10px; cursor: pointer;';
+            item.innerHTML = `
+                <div style="width: 36px; height: 36px; border-radius: 8px; background-image: url('${f.avatarUrl || ''}'); background-size: cover; background-color: #eee;"></div>
+                <div style="font-size: 14px; font-weight: bold; color: #333;">${displayName}</div>
+            `;
+            item.onclick = () => confirmSysBrowserShare(f.id);
+            listEl.appendChild(item);
+        });
+    }
+    document.getElementById('universalShareModalOverlay').classList.add('show');
+}
+
+// 打开浏览器 APP
+function openSysBrowserApp() {
+    sysBrowserPanel.style.display = 'flex';
+    sysBrowserUpdateNavButtons();
+    
+    // 初始化当前账号信息
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (currentLoginId) {
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let allEntities = [...accounts, ...chars];
+        const acc = allEntities.find(a => a.id === currentLoginId);
+        if (acc) {
+            document.getElementById('sysBrowserCurrentName').innerText = acc.netName || acc.name || '未命名';
+            const avatar = acc.avatarUrl || 'https://api.dicebear.com/7.x/avataaars/svg?seed=User1';
+            document.getElementById('sysBrowserCurrentAvatar').style.backgroundImage = `url('${avatar}')`;
+        }
+    }
+}
+
+// 关闭浏览器 APP
+function closeSysBrowserApp() {
+    sysBrowserPanel.style.display = 'none';
+}
+
+// 切换视图
+function sysBrowserSwitchView(viewName) {
+    Object.values(sysBrowserViews).forEach(v => v.classList.remove('active'));
+    if (sysBrowserViews[viewName]) {
+        sysBrowserViews[viewName].classList.add('active');
+    }
+}
+
+// 更新底部导航按钮状态
+function sysBrowserUpdateNavButtons() {
+    const btnBack = document.getElementById('sys-browser-btn-back');
+    const btnForward = document.getElementById('sys-browser-btn-forward');
+    
+    if (sysBrowserCurrentHistoryIndex > 0) btnBack.classList.remove('disabled');
+    else btnBack.classList.add('disabled');
+
+    if (sysBrowserCurrentHistoryIndex < sysBrowserHistoryStack.length - 1) btnForward.classList.remove('disabled');
+    else btnForward.classList.add('disabled');
+}
+
+// 导航到指定 URL
+function sysBrowserNavigateTo(url, type, isHistoryAction = false) {
+    if (!isHistoryAction) {
+        sysBrowserHistoryStack = sysBrowserHistoryStack.slice(0, sysBrowserCurrentHistoryIndex + 1);
+        sysBrowserHistoryStack.push({ url, type });
+        sysBrowserCurrentHistoryIndex++;
+        ChatDB.setItem('sys_browser_history_stack', JSON.stringify(sysBrowserHistoryStack));
+        ChatDB.setItem('sys_browser_history_index', sysBrowserCurrentHistoryIndex.toString());
+    }
+
+    if (type === 'home') {
+        sysBrowserSwitchView('home');
+        sysBrowserAddressText.innerText = 'Search or enter website';
+        sysBrowserSearchInput.value = '';
+    } else if (type === 'real') {
+        sysBrowserAddressText.innerText = url.replace('https://', '');
+        sysBrowserRealIframe.src = url;
+        sysBrowserSwitchView('real');
+    } else if (type === 'ai' || type === 'search_list') {
+        sysBrowserAddressText.innerText = type === 'search_list' ? 'search.browser.com' : '★ wiki.worldbook.ai';
+        sysBrowserSwitchView('loading');
+        setTimeout(() => {
+            const cached = sysBrowserCachedPages[url];
+            if (cached) {
+                sysBrowserAiTitle.innerText = cached.title;
+                document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-meta').innerHTML = cached.metaHtml;
+                document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-img').style.display = cached.imgDisplay;
+                document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-content').innerHTML = cached.contentHtml;
+            } else {
+                // 默认占位内容
+                if (type === 'search_list') {
+                    sysBrowserAiTitle.innerText = `搜索结果: ${url}`;
+                    document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-meta').innerHTML = `<span>约找到 3,420,000 个结果</span>`;
+                    document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-img').style.display = 'none';
+                    document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-content').innerHTML = `
+                        <div style="margin-bottom: 20px; cursor: pointer;" onclick="sysBrowserNavigateTo('${url} - 维基百科', 'ai')">
+                            <h3 style="color: #1a0dab; font-size: 18px; margin-bottom: 4px; text-decoration: underline;">${url} - 维基百科，自由的百科全书</h3>
+                            <p style="color: #006621; font-size: 13px; margin-bottom: 4px;">https://zh.wikipedia.org/wiki/${url}</p>
+                            <p style="color: #545454; font-size: 14px;">点击查看关于 ${url} 的详细百科内容，包含历史、发展及相关设定...</p>
+                        </div>
+                        <div style="margin-bottom: 20px; cursor: pointer;" onclick="sysBrowserNavigateTo('${url} - 最新资讯', 'ai')">
+                            <h3 style="color: #1a0dab; font-size: 18px; margin-bottom: 4px; text-decoration: underline;">${url} - 最新资讯与讨论</h3>
+                            <p style="color: #006621; font-size: 13px; margin-bottom: 4px;">https://news.browser.com/search?q=${url}</p>
+                            <p style="color: #545454; font-size: 14px;">查看网友们关于 ${url} 的最新讨论和热门帖子，了解最新动态...</p>
+                        </div>
+                    `;
+                } else {
+                    sysBrowserAiTitle.innerText = url;
+                    document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-meta').innerHTML = `<span>作者: AI 引擎</span><span>刚刚发布</span>`;
+                    document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-img').style.display = 'flex';
+                    document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-content').innerHTML = `
+                        <p>这是一段由 AI 根据当前世界书和角色设定生成的虚拟网页内容。排版干净优雅，适合沉浸式阅读。</p>
+                        <p>你可以想象这里写满了关于魔法、科幻或者你们共同回忆的故事。点击右下角的分享按钮，就可以把这个“网页”发送给你的角色，触发特殊的对话剧情！</p>
+                    `;
+                }
+            }
+            sysBrowserSwitchView('ai');
+        }, 800);
+    } else if (type === 'poipiku') {
+        sysBrowserAddressText.innerText = 'poipiku.com';
+        sysBrowserRenderPoipiku('home');
+        sysBrowserSwitchView('ao3'); // 复用同一个视图容器
+    } else if (type === 'haitang') {
+        sysBrowserAddressText.innerText = 'haitang123.com';
+        sysBrowserRenderHaitang('home');
+        sysBrowserSwitchView('haitang');
+    }
+    
+    // 新增：更新当前标签页信息
+    const activeTab = sysBrowserTabs.find(t => t.id === sysBrowserActiveTabId);
+    if (activeTab) {
+        if (type === 'home') {
+            activeTab.title = '起始页';
+            activeTab.isHome = true;
+            activeTab.url = 'home';
+            activeTab.type = 'home';
+        } else {
+            activeTab.title = url;
+            activeTab.isHome = false;
+            activeTab.url = url;
+            activeTab.type = type;
+        }
+        ChatDB.setItem('sys_browser_tabs', JSON.stringify(sysBrowserTabs));
+    }
+
+    sysBrowserUpdateNavButtons();
+    if (!isHistoryAction) {
+        sysBrowserAddHistoryRecord(url, type);
+    }
+}
+
+function sysBrowserGoBack() {
+    if (sysBrowserCurrentHistoryIndex > 0) {
+        sysBrowserCurrentHistoryIndex--;
+        ChatDB.setItem('sys_browser_history_index', sysBrowserCurrentHistoryIndex.toString());
+        const state = sysBrowserHistoryStack[sysBrowserCurrentHistoryIndex];
+        sysBrowserNavigateTo(state.url, state.type, true);
+    }
+}
+
+function sysBrowserGoForward() {
+    if (sysBrowserCurrentHistoryIndex < sysBrowserHistoryStack.length - 1) {
+        sysBrowserCurrentHistoryIndex++;
+        ChatDB.setItem('sys_browser_history_index', sysBrowserCurrentHistoryIndex.toString());
+        const state = sysBrowserHistoryStack[sysBrowserCurrentHistoryIndex];
+        sysBrowserNavigateTo(state.url, state.type, true);
+    }
+}
+
+function sysBrowserGoHome() {
+    if (sysBrowserHistoryStack[sysBrowserCurrentHistoryIndex].type !== 'home') {
+        sysBrowserNavigateTo('home', 'home');
+    } else {
+        sysBrowserSwitchView('home');
+    }
+}
+
+function sysBrowserRefreshPage() {
+    if (sysBrowserViews.real.classList.contains('active')) {
+        sysBrowserRealIframe.src = sysBrowserRealIframe.src;
+    }
+}
+
+function sysBrowserHandleSearch(e) {
+    if (e.key === 'Enter') {
+        const val = sysBrowserSearchInput.value.trim();
+        if (!val) return;
+        
+        if (val.toLowerCase() === 'poipiku' || val.toLowerCase() === 'ao3') {
+            sysBrowserNavigateTo('poipiku', 'poipiku');
+        } else if (val.toLowerCase() === 'haitang' || val.includes('海棠')) {
+            sysBrowserNavigateTo('haitang', 'haitang');
+        } else if (val.startsWith('http://') || val.startsWith('https://')) {
+            sysBrowserNavigateTo(val, 'real');
+        } else if (val.includes('.com') || val.includes('.cn')) {
+            sysBrowserNavigateTo('https://' + val, 'real');
+        } else {
+            sysBrowserNavigateTo(val, 'search_list');
+        }
+        sysBrowserSearchInput.blur();
+    }
+}
+
+// --- Poipiku 渲染逻辑 (蓝白主题) ---
+function sysBrowserRenderPoipiku(page) {
+    const body = document.getElementById('sysBrowserAo3Body');
+    body.innerHTML = '';
+
+    if (page === 'home') {
+        let html = '';
+        
+        if (sysBrowserPoipikuData.length === 0) {
+            html += '<div style="text-align: center; color: #aaa; font-size: 13px; padding: 40px 0;">暂无动态，请点击右上角设置生成</div>';
+        }
+
+        sysBrowserPoipikuData.forEach(post => {
+            // 如果有图片描述，才渲染图片框
+            let imgHtml = '';
+            if (post.imageDesc && post.imageDesc.trim() !== '') {
+                imgHtml = `
+                    <div class="poipiku-img-container" onclick="this.classList.toggle('revealed')">
+                        <div class="poipiku-img-blur">
+                            <div class="poipiku-show-btn">点击显示 (Click to Show)</div>
+                        </div>
+                        <div class="poipiku-img-real">
+                            <div class="poipiku-img-desc-text">${post.imageDesc}</div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            html += `
+                <div class="poipiku-card">
+                    <div class="poipiku-card-header">
+                        <div class="poipiku-user-info">
+                            <div class="poipiku-avatar" style="background-image: url('${post.avatar}');"></div>
+                            <div class="poipiku-name">${post.author}</div>
+                        </div>
+                        <div class="poipiku-follow-btn">☆安静的关注</div>
+                    </div>
+                    
+                    <div class="poipiku-card-meta">
+                        <div class="poipiku-category">${post.category}</div>
+                        <div class="poipiku-actions" style="display: flex; align-items: center; width: 100%;">
+                            <div onclick="sharePoipikuToChar(${post.id})" style="margin-left: auto; display: flex; align-items: center; gap: 4px; cursor: pointer; color: #1da1f2; font-size: 12px; font-weight: bold;">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" stroke="none"><path d="M14 5l7 7-7 7v-4.1c-5 0-8.5 1.6-11 5.1 1-5 4-10 11-11V5z"/></svg> 分享
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="poipiku-text-content">
+                        ${post.text}
+                    </div>
+
+                    <div class="poipiku-tags">
+                        ${post.tags.map(t => `<span class="poipiku-tag">● #${t}</span>`).join('')}
+                    </div>
+
+                    ${imgHtml}
+                </div>
+            `;
+        });
+        body.innerHTML = html;
+    } else if (page === 'setting') {
+        // 渲染设置页面
+        let stylePresets = JSON.parse(ChatDB.getItem('tav_presets_style') || '[]');
+        let styleOptions = '<option value="">请选择预设文风 (可选)</option>';
+        if (stylePresets.length === 0) {
+            styleOptions = '<option value="">暂无文风预设，请先在线下配置</option>';
+        } else {
+            stylePresets.forEach(p => {
+                styleOptions += `<option value="${p.content.replace(/"/g, '&quot;')}">${p.name}</option>`;
+            });
+        }
+
+        // 读取持久化的设置
+        let savedSettings = JSON.parse(ChatDB.getItem('poipiku_gen_settings') || '{}');
+
+        body.innerHTML = `
+            <div class="poipiku-card" style="padding: 20px;">
+                <h2 style="color: #1da1f2; border-bottom: 2px solid #1da1f2; padding-bottom: 10px; margin-bottom: 20px; font-weight: 900;">AI Generation Settings</h2>
+                
+                <div class="poipiku-input-group">
+                    <label>Characters (出场角色 - 必选)</label>
+                    <div id="poipikuGenCharSelectText" onclick="openPoipikuCharSelectModal()" class="poipiku-input" style="cursor: pointer; text-align: center; background: #f9f9f9; color: #888;">未选择 (点击选择)</div>
+                </div>
+
+                <div style="display: flex; gap: 15px;">
+                    <div class="poipiku-input-group" style="flex: 1;">
+                        <label>图文插画数量</label>
+                        <input type="number" id="poipikuSettingImageCount" class="poipiku-input" value="${savedSettings.imageCount !== undefined ? savedSettings.imageCount : 1}" min="0" placeholder="填0则不生成">
+                    </div>
+                    <div class="poipiku-input-group" style="flex: 1;">
+                        <label>同人文数量</label>
+                        <input type="number" id="poipikuSettingTextCount" class="poipiku-input" value="${savedSettings.textCount !== undefined ? savedSettings.textCount : 1}" min="0" placeholder="填0则不生成">
+                    </div>
+                </div>
+                <div class="poipiku-input-group">
+                    <label>同人文字数要求</label>
+                    <input type="text" id="poipikuSettingTextLength" class="poipiku-input" value="${savedSettings.textLength || '500字左右'}" placeholder="例如：500字左右，或长篇大论">
+                </div>
+
+                <div class="poipiku-input-group">
+                    <label>Worldbook (关联世界书)</label>
+                    <div id="poipikuGenWbSelectText" onclick="openPoipikuWbSelectModal()" class="poipiku-input" style="cursor: pointer; text-align: center; background: #f9f9f9; color: #888;">未选择 (点击选择)</div>
+                </div>
+
+                <div class="poipiku-input-group">
+                    <label>Writing Style (预设文风)</label>
+                    <select id="poipikuSettingStyle" class="poipiku-input">
+                        ${styleOptions}
+                    </select>
+                </div>
+
+                <div class="poipiku-input-group">
+                    <label>Prompt (画面与配文要求)</label>
+                    <textarea id="poipikuSettingPrompt" class="poipiku-textarea" placeholder="例如：画一张他们在海边散步的图，配文要显得很慵懒...">${savedSettings.prompt || ''}</textarea>
+                </div>
+
+                <button id="poipikuGenBtn" class="poipiku-submit-btn" onclick="executePoipikuGenAPI()">上传 (Generate)</button>
+            </div>
+        `;
+        
+        // 恢复下拉框选中状态
+        if (savedSettings.style) document.getElementById('poipikuSettingStyle').value = savedSettings.style;
+        
+        currentPoipikuSelectedChars = savedSettings.charIds || [];
+        if (currentPoipikuSelectedChars.length > 0) {
+            const charTextEl = document.getElementById('poipikuGenCharSelectText');
+            charTextEl.innerText = `已选 ${currentPoipikuSelectedChars.length} 个角色`;
+            charTextEl.style.color = '#111';
+        }
+
+        currentPoipikuWbEntries = savedSettings.wbEntries || [];
+        if (currentPoipikuWbEntries.length > 0) {
+            const textEl = document.getElementById('poipikuGenWbSelectText');
+            textEl.innerText = `已选 ${currentPoipikuWbEntries.length} 个条目`;
+            textEl.style.color = '#111';
+        }
+    }
+}
+
+// --- 菜单与 Toast ---
+function sysBrowserToggleMenu() {
+    sysBrowserMenuOverlay.classList.toggle('show');
+}
+
+let sysBrowserToastTimeout = null;
+function sysBrowserShowToast(text, duration = 2000) {
+    if(sysBrowserMenuOverlay.classList.contains('show')) sysBrowserToggleMenu();
+    const toast = document.getElementById('sysBrowserToast');
+    document.getElementById('sysBrowserToastText').innerText = text;
+    toast.classList.add('show');
+    
+    if (sysBrowserToastTimeout) clearTimeout(sysBrowserToastTimeout);
+    
+    if (duration > 0) {
+        sysBrowserToastTimeout = setTimeout(() => {
+            toast.classList.remove('show');
+        }, duration);
+    }
+}
+
+function sysBrowserShareToChar() {
+    sysBrowserToggleMenu(); // 关闭菜单抽屉
+    sysBrowserShareContext = { type: 'page' };
+    openUniversalShareModal();
+}
+
+function closeUniversalShareModal() {
+    document.getElementById('universalShareModalOverlay').classList.remove('show');
+}
+
+function confirmSysBrowserShare(targetId) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    
+    let title = '网页分享';
+    let desc = '点击查看详情';
+    let appName = '浏览器';
+    let content = '';
+    let shareUrl = '';
+    let shareContent = '';
+    
+    if (sysBrowserShareContext && sysBrowserShareContext.type === 'poipiku_post') {
+        const post = sysBrowserPoipikuData.find(p => p.id === sysBrowserShareContext.postId);
+        if (!post) return;
+        title = `${post.author} 的 Poipiku 动态`;
+        desc = post.text;
+        appName = 'Poipiku';
+        shareUrl = 'poipiku';
+        shareContent = `作者：${post.author}\n分类：${post.category}\n配文：${post.text}\n图片描述：${post.imageDesc || '无'}`;
+        content = `
+            <div class="app-share-card" onclick="alert('打开 Poipiku 查看')">
+                <div class="app-share-title">${title}</div>
+                <div class="app-share-desc">${desc}</div>
+                <div class="app-share-footer">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" stroke="none"><path d="M14 5l7 7-7 7v-4.1c-5 0-8.5 1.6-11 5.1 1-5 4-10 11-11V5z"/></svg>
+                    来自 ${appName}
+                </div>
+            </div>
+        `;
+    } else {
+        const currentState = sysBrowserHistoryStack[sysBrowserCurrentHistoryIndex];
+        if (currentState) {
+            shareUrl = currentState.url;
+            if (currentState.type === 'poipiku') {
+                title = 'Poipiku 插画交流平台';
+                desc = '我发现了一个有趣的同人作品主页，快来看看吧！';
+                appName = 'Poipiku';
+                shareContent = '分享了 Poipiku 首页';
+            } else if (currentState.type === 'haitang') {
+                title = '海棠文化线上文学城';
+                desc = '分享了一个精彩的小说页面，快来看看吧！';
+                appName = '海棠书屋';
+                shareContent = '分享了海棠书屋页面';
+            } else if (currentState.type === 'ai') {
+                title = currentState.url;
+                desc = '分享了一个百科页面';
+                appName = '世界百科';
+                shareContent = `分享了百科词条：${currentState.url}`;
+            } else if (currentState.type === 'real') {
+                title = currentState.url;
+                desc = '分享了一个网页链接';
+                appName = 'Safari';
+                shareContent = `分享了网址：${currentState.url}`;
+            }
+        }
+        content = `
+            <div class="app-share-card" onclick="alert('打开 ${appName} 查看')">
+                <div class="app-share-title">${title}</div>
+                <div class="app-share-desc">${desc}</div>
+                <div class="app-share-footer">
+                    <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" stroke="none"><path d="M14 5l7 7-7 7v-4.1c-5 0-8.5 1.6-11 5.1 1-5 4-10 11-11V5z"/></svg>
+                    来自 ${appName}
+                </div>
+            </div>
+        `;
+    }
+    
+    // 构造消息并保存
+    let newMsg = { role: 'user', type: 'app_share', shareTitle: title, shareDesc: desc, appName: appName, content: content, shareUrl: shareUrl, shareContent: shareContent, timestamp: Date.now() };
+    
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${targetId}`) || '[]');
+    history.push(newMsg);
+    ChatDB.setItem(`chat_history_${currentLoginId}_${targetId}`, JSON.stringify(history));
+    
+    let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${targetId}_${currentLoginId}`) || '[]');
+    targetHistory.push({ ...newMsg, role: 'char' });
+    ChatDB.setItem(`chat_history_${targetId}_${currentLoginId}`, JSON.stringify(targetHistory));
+    
+    let sessions = JSON.parse(ChatDB.getItem(`chat_sessions_${currentLoginId}`) || '[]');
+    sessions = sessions.filter(id => id !== targetId);
+    sessions.unshift(targetId);
+    ChatDB.setItem(`chat_sessions_${currentLoginId}`, JSON.stringify(sessions));
+    
+    let targetSessions = JSON.parse(ChatDB.getItem(`chat_sessions_${targetId}`) || '[]');
+    targetSessions = targetSessions.filter(id => id !== currentLoginId);
+    targetSessions.unshift(currentLoginId);
+    ChatDB.setItem(`chat_sessions_${targetId}`, JSON.stringify(targetSessions));
+    
+    let unreadCount = parseInt(ChatDB.getItem(`unread_${targetId}_${currentLoginId}`) || '0');
+    ChatDB.setItem(`unread_${targetId}_${currentLoginId}`, (unreadCount + 1).toString());
+    
+    closeUniversalShareModal();
+    sysBrowserShowToast('已分享给 Ta');
+    
+    // 刷新聊天列表
+    if (typeof renderChatList === 'function') renderChatList();
+    // 如果当前正在和该角色聊天，刷新聊天室
+    if (typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId === targetId) {
+        if (typeof renderChatHistory === 'function') renderChatHistory(targetId);
+    }
+}
+
+// --- 多标签页逻辑 ---
+function sysBrowserRenderTabs() {
+    const grid = document.getElementById('sysBrowserTabsGrid');
+    grid.innerHTML = '';
+    sysBrowserTabs.forEach(tab => {
+        const isActive = tab.id === sysBrowserActiveTabId ? 'active-tab' : '';
+        const content = tab.isHome 
+            ? `<svg viewBox="0 0 24 24" width="32" height="32" stroke="#ccc" stroke-width="1.5" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`
+            : `<span style="color: #aaa; font-weight: bold; font-size: 14px; text-align: center; padding: 10px; word-break: break-all;">${tab.title}</span>`;
+        
+        grid.innerHTML += `
+            <div class="sys-browser-tab-card ${isActive}" onclick="sysBrowserSelectTab(${tab.id})">
+                <div class="sys-browser-tab-card-header">
+                    <span class="sys-browser-tab-card-title">${tab.title}</span>
+                    <div class="sys-browser-tab-card-close" onclick="sysBrowserCloseTab(${tab.id}, event)"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></div>
+                </div>
+                <div class="sys-browser-tab-card-content">${content}</div>
+            </div>
+        `;
+    });
+    document.getElementById('sysBrowserTabCountDisplay').innerText = sysBrowserTabs.length;
+}
+
+function sysBrowserOpenTabs() {
+    sysBrowserRenderTabs();
+    sysBrowserSwitchView('tabs');
+    sysBrowserAddressText.innerText = '标签页';
+}
+
+function sysBrowserCreateNewTab() {
+    const newId = Date.now();
+    sysBrowserTabs.push({ id: newId, title: '起始页', isHome: true, url: 'home', type: 'home' });
+    sysBrowserActiveTabId = newId;
+    ChatDB.setItem('sys_browser_tabs', JSON.stringify(sysBrowserTabs));
+    ChatDB.setItem('sys_browser_active_tab_id', sysBrowserActiveTabId.toString());
+    sysBrowserGoHome();
+    document.getElementById('sysBrowserTabCountDisplay').innerText = sysBrowserTabs.length;
+}
+
+function sysBrowserCloseTab(id, event) {
+    event.stopPropagation();
+    sysBrowserTabs = sysBrowserTabs.filter(t => t.id !== id);
+    if (sysBrowserTabs.length === 0) {
+        sysBrowserCreateNewTab();
+    } else if (sysBrowserActiveTabId === id) {
+        sysBrowserActiveTabId = sysBrowserTabs[sysBrowserTabs.length - 1].id;
+        ChatDB.setItem('sys_browser_active_tab_id', sysBrowserActiveTabId.toString());
+    }
+    ChatDB.setItem('sys_browser_tabs', JSON.stringify(sysBrowserTabs));
+    sysBrowserRenderTabs();
+}
+
+function sysBrowserSelectTab(id) {
+    sysBrowserActiveTabId = id;
+    ChatDB.setItem('sys_browser_active_tab_id', sysBrowserActiveTabId.toString());
+    const tab = sysBrowserTabs.find(t => t.id === id);
+    if (tab) {
+        if (tab.isHome) {
+            sysBrowserGoHome();
+        } else {
+            sysBrowserNavigateTo(tab.url, tab.type);
+        }
+    }
+}
+
+// --- 历史记录与设置 ---
+function sysBrowserAddBookmark() {
+    sysBrowserToggleMenu();
+    const currentState = sysBrowserHistoryStack[sysBrowserCurrentHistoryIndex];
+    if (!currentState || currentState.type === 'home') {
+        sysBrowserShowToast('当前页面无法添加书签');
+        return;
+    }
+    
+    let bookmarks = JSON.parse(ChatDB.getItem('sys_browser_bookmarks') || '[]');
+    // 检查是否已存在
+    if (bookmarks.find(b => b.url === currentState.url)) {
+        sysBrowserShowToast('书签已存在');
+        return;
+    }
+    
+    bookmarks.push({
+        id: 'bm_' + Date.now(),
+        url: currentState.url,
+        type: currentState.type,
+        title: currentState.url,
+        displayUrl: currentState.type === 'real' ? currentState.url : (currentState.type === 'poipiku' ? 'poipiku.com' : 'wiki.worldbook.ai')
+    });
+    
+    ChatDB.setItem('sys_browser_bookmarks', JSON.stringify(bookmarks));
+    sysBrowserShowToast('已添加书签');
+}
+
+function sysBrowserOpenHistory() {
+    sysBrowserToggleMenu();
+    sysBrowserSwitchView('history');
+    sysBrowserAddressText.innerText = '书签与历史';
+    
+    // 动态渲染书签
+    const bookmarksList = document.getElementById('sys-browser-list-bookmarks');
+    if (bookmarksList) {
+        bookmarksList.innerHTML = '';
+        let bookmarks = JSON.parse(ChatDB.getItem('sys_browser_bookmarks') || '[]');
+        
+        if (bookmarks.length === 0) {
+            bookmarksList.innerHTML = '<div style="padding: 30px; text-align: center; color: #aaa; font-size: 13px;">暂无书签</div>';
+        } else {
+            bookmarks.forEach(bm => {
+                let icon = `<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>`;
+                if (bm.type === 'ai') {
+                    icon = `<svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>`;
+                }
+                
+                const item = document.createElement('div');
+                item.className = 'sys-browser-history-item';
+                item.onclick = () => sysBrowserNavigateTo(bm.url, bm.type);
+                
+                item.innerHTML = `
+                    <div class="sys-browser-history-icon">${icon}</div>
+                    <div class="sys-browser-history-info">
+                        <div class="sys-browser-history-item-title">${bm.title}</div>
+                        <div class="sys-browser-history-item-url">${bm.displayUrl}</div>
+                    </div>
+                `;
+                
+                const delBtn = document.createElement('div');
+                delBtn.className = 'bookmark-delete-btn';
+                delBtn.style.cssText = 'padding: 10px; color: #ff3b30; cursor: pointer; font-weight: bold; font-size: 18px;';
+                delBtn.innerText = '×';
+                delBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    let currentBookmarks = JSON.parse(ChatDB.getItem('sys_browser_bookmarks') || '[]');
+                    currentBookmarks = currentBookmarks.filter(b => b.id !== bm.id);
+                    ChatDB.setItem('sys_browser_bookmarks', JSON.stringify(currentBookmarks));
+                    item.remove();
+                    if (currentBookmarks.length === 0) {
+                        bookmarksList.innerHTML = '<div style="padding: 30px; text-align: center; color: #aaa; font-size: 13px;">暂无书签</div>';
+                    }
+                };
+                item.appendChild(delBtn);
+                bookmarksList.appendChild(item);
+            });
+        }
+    }
+}
+
+function sysBrowserSwitchHistoryTab(tabName, element) {
+    document.querySelectorAll('.sys-browser-history-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.sys-browser-history-list-container').forEach(c => c.classList.remove('active'));
+    
+    element.classList.add('active');
+    document.getElementById(`sys-browser-list-${tabName}`).classList.add('active');
+}
+
+function sysBrowserAddHistoryRecord(url, type) {
+    if (type === 'home') return;
+    const list = document.getElementById('sys-browser-list-history');
+    if (list.innerHTML.includes('暂无历史记录')) list.innerHTML = '';
+    
+    let icon = `<svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>`;
+    let displayUrl = 'wiki.worldbook.ai';
+    
+    if (type === 'real') {
+        icon = `<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>`;
+        displayUrl = url;
+    } else if (type === 'poipiku') {
+        icon = `<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>`;
+        displayUrl = 'poipiku.com';
+    } else if (type === 'haitang') {
+        icon = `<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>`;
+        displayUrl = 'haitang123.com';
+    } else if (type === 'search_list') {
+        icon = `<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`;
+        displayUrl = 'search.browser.com';
+    }
+    
+    const itemId = 'hist_' + Date.now();
+    const html = `
+        <div class="sys-browser-history-item" id="${itemId}">
+            <div class="sys-browser-history-icon" onclick="sysBrowserNavigateTo('${url}', '${type}')">${icon}</div>
+            <div class="sys-browser-history-info" onclick="sysBrowserNavigateTo('${url}', '${type}')">
+                <div class="sys-browser-history-item-title">${url}</div>
+                <div class="sys-browser-history-item-url">${displayUrl}</div>
+            </div>
+            <div onclick="sysBrowserDeleteHistoryItem('${itemId}', event)" style="padding: 10px; color: #ff3b30; cursor: pointer; font-weight: bold; font-size: 18px;">×</div>
+        </div>
+    `;
+    list.insertAdjacentHTML('afterbegin', html);
+}
+
+function sysBrowserDeleteHistoryItem(itemId, event) {
+    event.stopPropagation();
+    const item = document.getElementById(itemId);
+    if (item) {
+        item.remove();
+    }
+    const list = document.getElementById('sys-browser-list-history');
+    if (list.children.length === 0) {
+        list.innerHTML = '<div style="padding: 30px; text-align: center; color: #aaa; font-size: 13px;">暂无历史记录</div>';
+    }
+}
+
+let currentSysBrowserWbEntries = JSON.parse(ChatDB.getItem('sys_browser_wb_entries') || '[]');
+
+function sysBrowserOpenSettings() {
+    sysBrowserToggleMenu();
+    sysBrowserSwitchView('settings');
+    sysBrowserAddressText.innerText = '设置';
+    
+    // 初始化世界书文本
+    currentSysBrowserWbEntries = JSON.parse(ChatDB.getItem('sys_browser_wb_entries') || '[]');
+    const textEl = document.getElementById('sysBrowserWbSelectText');
+    if (textEl) {
+        if (currentSysBrowserWbEntries.length > 0) {
+            textEl.innerText = `已选 ${currentSysBrowserWbEntries.length} 个条目`;
+            textEl.style.color = '#111';
+        } else {
+            textEl.innerText = '未选择';
+            textEl.style.color = '#888';
+        }
+    }
+}
+
+function openSysBrowserWbSelectModal() {
+    const listEl = document.getElementById('sysBrowserWbSelectList');
+    listEl.innerHTML = '';
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { groups: [], entries: [] };
+    
+    if (wbData.groups.length === 0 || wbData.entries.length === 0) {
+        listEl.innerHTML = '<div style="padding: 20px; text-align: center; color: #aaa; font-size: 12px;">暂无世界书数据</div>';
+    } else {
+        wbData.groups.forEach(group => {
+            const groupEntries = wbData.entries.filter(e => e.group === group);
+            if (groupEntries.length === 0) return;
+            
+            const groupContainer = document.createElement('div');
+            groupContainer.style.borderBottom = '1px solid #f5f5f5';
+            
+            const groupHeader = document.createElement('div');
+            groupHeader.style.display = 'flex';
+            groupHeader.style.alignItems = 'center';
+            groupHeader.style.justifyContent = 'space-between';
+            groupHeader.style.padding = '15px 5px';
+            groupHeader.style.cursor = 'pointer';
+            
+            const leftDiv = document.createElement('div');
+            leftDiv.style.display = 'flex';
+            leftDiv.style.alignItems = 'center';
+            leftDiv.style.gap = '12px';
+            
+            const groupCb = document.createElement('input');
+            groupCb.type = 'checkbox';
+            groupCb.setAttribute('data-group-target', group);
+            groupCb.style.width = '18px';
+            groupCb.style.height = '18px';
+            groupCb.style.cursor = 'pointer';
+            groupCb.style.accentColor = '#111';
+            
+            const allSelected = groupEntries.every(e => currentSysBrowserWbEntries.includes(e.id));
+            groupCb.checked = allSelected;
+            
+            groupCb.onclick = (e) => e.stopPropagation();
+            groupCb.onchange = (e) => {
+                const isChecked = e.target.checked;
+                document.querySelectorAll(`.sys-browser-wb-entry-checkbox[data-group-name="${group}"]`).forEach(cb => {
+                    cb.checked = isChecked;
+                    if (isChecked && !currentSysBrowserWbEntries.includes(cb.value)) {
+                        currentSysBrowserWbEntries.push(cb.value);
+                    } else if (!isChecked) {
+                        currentSysBrowserWbEntries = currentSysBrowserWbEntries.filter(id => id !== cb.value);
+                    }
+                });
+            };
+            
+            const titleSpan = document.createElement('span');
+            titleSpan.innerText = group;
+            titleSpan.style.fontSize = '15px';
+            titleSpan.style.color = '#333';
+            titleSpan.style.fontWeight = '500';
+            
+            leftDiv.appendChild(groupCb);
+            leftDiv.appendChild(titleSpan);
+            
+            const arrowSvg = document.createElement('div');
+            arrowSvg.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="#aaa" style="transition: transform 0.2s;"><path d="M7 10l5 5 5-5z"/></svg>`;
+            const arrowIcon = arrowSvg.firstChild;
+            
+            groupHeader.appendChild(leftDiv);
+            groupHeader.appendChild(arrowSvg);
+            
+            const entriesContainer = document.createElement('div');
+            entriesContainer.style.display = 'none';
+            entriesContainer.style.paddingBottom = '10px';
+            
+            groupHeader.onclick = () => {
+                const isHidden = entriesContainer.style.display === 'none';
+                entriesContainer.style.display = isHidden ? 'block' : 'none';
+                arrowIcon.style.transform = isHidden ? 'rotate(180deg)' : 'rotate(0deg)';
+            };
+            
+            groupEntries.forEach(entry => {
+                const entryDiv = document.createElement('div');
+                entryDiv.style.display = 'flex';
+                entryDiv.style.alignItems = 'center';
+                entryDiv.style.gap = '12px';
+                entryDiv.style.padding = '12px 5px 12px 35px';
+                
+                const entryCb = document.createElement('input');
+                entryCb.type = 'checkbox';
+                entryCb.className = `sys-browser-wb-entry-checkbox`;
+                entryCb.setAttribute('data-group-name', group);
+                entryCb.value = entry.id;
+                entryCb.checked = currentSysBrowserWbEntries.includes(entry.id);
+                entryCb.style.width = '16px';
+                entryCb.style.height = '16px';
+                entryCb.style.cursor = 'pointer';
+                entryCb.style.accentColor = '#111';
+                
+                entryCb.onchange = (e) => {
+                    if (e.target.checked) {
+                        if (!currentSysBrowserWbEntries.includes(entry.id)) currentSysBrowserWbEntries.push(entry.id);
+                    } else {
+                        currentSysBrowserWbEntries = currentSysBrowserWbEntries.filter(id => id !== entry.id);
+                    }
+                    const allCbs = Array.from(document.querySelectorAll(`.sys-browser-wb-entry-checkbox[data-group-name="${group}"]`));
+                    const allChecked = allCbs.every(cb => cb.checked);
+                    document.querySelector(`input[data-group-target="${group}"]`).checked = allChecked;
+                };
+                
+                const entryTitle = document.createElement('span');
+                entryTitle.innerText = entry.title || '未命名';
+                entryTitle.style.fontSize = '14px';
+                entryTitle.style.color = '#666';
+                
+                entryDiv.appendChild(entryCb);
+                entryDiv.appendChild(entryTitle);
+                entriesContainer.appendChild(entryDiv);
+            });
+            
+            groupContainer.appendChild(groupHeader);
+            groupContainer.appendChild(entriesContainer);
+            listEl.appendChild(groupContainer);
+        });
+    }
+    document.getElementById('sysBrowserWbSelectModalOverlay').classList.add('show');
+}
+
+function confirmSysBrowserWbSelect() {
+    ChatDB.setItem('sys_browser_wb_entries', JSON.stringify(currentSysBrowserWbEntries));
+    const textEl = document.getElementById('sysBrowserWbSelectText');
+    if (currentSysBrowserWbEntries.length > 0) {
+        textEl.innerText = `已选 ${currentSysBrowserWbEntries.length} 个条目`;
+        textEl.style.color = '#111';
+    } else {
+        textEl.innerText = '未选择';
+        textEl.style.color = '#888';
+    }
+    document.getElementById('sysBrowserWbSelectModalOverlay').classList.remove('show');
+}
+
+function handleSysBrowserTopRightClick() {
+    const currentState = sysBrowserHistoryStack[sysBrowserCurrentHistoryIndex];
+    if (!currentState) return;
+    
+    if (currentState.type === 'real') {
+        sysBrowserRefreshPage();
+    } else if (currentState.type === 'ai' || currentState.type === 'search_list') {
+        openSysBrowserGenModal();
+    } else if (currentState.type === 'poipiku' || currentState.type === 'haitang') {
+        sysBrowserShowToast('此页面请在设置中生成');
+    }
+}
+
+function openSysBrowserGenModal() {
+    document.getElementById('sysBrowserGenModalOverlay').classList.add('show');
+}
+
+function closeSysBrowserGenModal() {
+    document.getElementById('sysBrowserGenModalOverlay').classList.remove('show');
+}
+
+function confirmSysBrowserGen() {
+    const type = document.getElementById('sysBrowserGenType').value;
+    const count = parseInt(document.getElementById('sysBrowserGenCount').value) || 3;
+    closeSysBrowserGenModal();
+    
+    const currentState = sysBrowserHistoryStack[sysBrowserCurrentHistoryIndex];
+    if (currentState) {
+        generateSysBrowserWebpageAPI(currentState.url, type, count);
+    }
+}
+
+async function generateSysBrowserWebpageAPI(keyword, type, count) {
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        return alert('请先在设置中配置 API 信息！');
+    }
+
+    let wbContext = '';
+    if (currentSysBrowserWbEntries.length > 0) {
+        let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+        let entries = wbData.entries.filter(e => currentSysBrowserWbEntries.includes(e.id));
+        wbContext = entries.map(e => e.content).join('\n');
+    }
+
+    let prompt = `你是一个网页内容生成引擎。用户在浏览器中搜索或访问了关键词：【${keyword}】。
+请根据以下世界书背景设定，生成符合该关键词的网页内容。
+${wbContext ? `【世界观背景】：\n${wbContext}\n` : ''}`;
+
+    if (type === 'search') {
+        prompt += `
+请生成 ${count} 条【搜索结果列表】。
+必须严格返回一个合法的 JSON 数组，格式如下：
+[
+  {
+    "title": "搜索结果的标题",
+    "url": "伪造的网址(如: www.example.com/xxx)",
+    "snippet": "搜索结果的摘要描述，吸引人点击"
+  }
+]
+注意：只返回 JSON 数组，不要包含任何 markdown 标记。`;
+    } else if (type === 'zhihu') {
+        prompt += `
+请生成一篇【知乎问答论坛】风格的网页。包含一个问题和 ${count} 个回答。
+必须严格返回一个合法的 JSON 对象，格式如下：
+{
+  "title": "关于该关键词的知乎提问标题",
+  "desc": "问题的详细描述补充",
+  "answers": [
+    {
+      "author": "随机生成的网友昵称",
+      "upvotes": "赞同数(如: 1.2万)",
+      "content": "回答的正文内容，使用 HTML 标签如 <p>, <strong> 进行排版，内容要符合知乎网友的语气（如：谢邀、人在美国、利益相关等）"
+    }
+  ]
+}
+注意：只返回 JSON 对象，不要包含任何 markdown 标记。`;
+    } else {
+        prompt += `
+请生成 ${count} 篇【百科词条或新闻报道】风格的网页正文。
+必须严格返回一个合法的 JSON 数组，格式如下：
+[
+  {
+    "title": "文章标题",
+    "content": "文章的正文内容，使用 HTML 标签如 <h3>, <p>, <ul>, <li>, <strong> 等进行排版"
+  }
+]
+注意：只返回 JSON 数组，不要包含任何 markdown 标记。`;
+    }
+
+    sysBrowserSwitchView('loading');
+    sysBrowserShowToast('正在生成网页内容...', 0); // 传入 0 表示不自动隐藏
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.8
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```html/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const contentContainer = document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-content');
+            const metaContainer = document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-meta');
+            const imgContainer = document.querySelector('#sys-browser-view-ai-web .sys-browser-ai-article-img');
+            
+            if (type === 'search') {
+                const parsed = JSON.parse(replyRaw);
+                let listArray = Array.isArray(parsed) ? parsed : [parsed];
+                sysBrowserAiTitle.innerText = `搜索结果: ${keyword}`;
+                metaContainer.innerHTML = `<span>约找到 3,420,000 个结果</span>`;
+                imgContainer.style.display = 'none';
+                
+                let html = '';
+                listArray.forEach(item => {
+                    html += `
+                        <div style="margin-bottom: 20px; cursor: pointer;" onclick="sysBrowserNavigateTo('${item.title}', 'ai')">
+                            <h3 style="color: #1a0dab; font-size: 18px; margin-bottom: 4px; text-decoration: underline;">${item.title}</h3>
+                            <p style="color: #006621; font-size: 13px; margin-bottom: 4px;">https://${item.url}</p>
+                            <p style="color: #545454; font-size: 14px;">${item.snippet}</p>
+                        </div>
+                    `;
+                });
+                contentContainer.innerHTML = html;
+                
+            } else if (type === 'zhihu') {
+                const parsed = JSON.parse(replyRaw);
+                sysBrowserAiTitle.innerText = parsed.title || keyword;
+                metaContainer.innerHTML = `<span style="color: #0066ff; font-weight: bold;">知乎 Zhihu</span><span>问题描述</span>`;
+                imgContainer.style.display = 'none';
+                
+                let html = `<div style="font-size: 14px; color: #555; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #eee;">${parsed.desc || ''}</div>`;
+                
+                if (parsed.answers && Array.isArray(parsed.answers)) {
+                    parsed.answers.forEach(ans => {
+                        html += `
+                            <div style="margin-bottom: 25px; padding-bottom: 20px; border-bottom: 1px solid #f0f0f0;">
+                                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                                    <div style="width: 32px; height: 32px; border-radius: 4px; background: #eee; display: flex; justify-content: center; align-items: center; font-size: 12px; color: #888;">${ans.author.charAt(0)}</div>
+                                    <div style="font-size: 14px; font-weight: bold; color: #444;">${ans.author}</div>
+                                </div>
+                                <div style="font-size: 12px; color: #888; margin-bottom: 10px;">▲ ${ans.upvotes} 人赞同了该回答</div>
+                                <div style="font-size: 15px; color: #333; line-height: 1.6; word-break: break-all;">
+                                    ${ans.content}
+                                </div>
+                            </div>
+                        `;
+                    });
+                }
+                contentContainer.innerHTML = html;
+                
+            } else {
+                // Wiki 模式
+                const parsed = JSON.parse(replyRaw);
+                let listArray = Array.isArray(parsed) ? parsed : [parsed];
+                sysBrowserAiTitle.innerText = keyword;
+                metaContainer.innerHTML = `<span>作者: AI 引擎</span><span>刚刚发布</span>`;
+                imgContainer.style.display = 'none';
+                
+                let html = '';
+                listArray.forEach(item => {
+                    html += `
+                        <div style="margin-bottom: 30px; padding-bottom: 20px; border-bottom: 1px solid #eee;">
+                            <h2 style="font-size: 20px; font-weight: bold; color: #111; margin-bottom: 15px;">${item.title}</h2>
+                            <div style="font-size: 15px; color: #333; line-height: 1.8;">${item.content}</div>
+                        </div>
+                    `;
+                });
+                contentContainer.innerHTML = html;
+            }
+            
+            // 新增：将生成的网页内容保存到缓存中
+            sysBrowserCachedPages[keyword] = {
+                title: sysBrowserAiTitle.innerText,
+                metaHtml: metaContainer.innerHTML,
+                imgDisplay: imgContainer.style.display,
+                contentHtml: contentContainer.innerHTML
+            };
+            ChatDB.setItem('sys_browser_cached_pages', JSON.stringify(sysBrowserCachedPages));
+            
+            sysBrowserSwitchView('ai');
+            sysBrowserShowToast('网页生成成功！');
+        } else {
+            sysBrowserShowToast('生成失败，请检查 API。');
+            sysBrowserSwitchView('ai');
+        }
+    } catch (e) {
+        console.error(e);
+        sysBrowserShowToast('生成出错：' + e.message);
+        sysBrowserSwitchView('ai');
+    }
+}
+
+function sysBrowserClearData() {
+    sysBrowserShowToast('浏览数据已清除');
+    document.getElementById('sys-browser-list-history').innerHTML = '<div style="padding: 30px; text-align: center; color: #aaa; font-size: 13px;">暂无历史记录</div>';
+    sysBrowserHistoryStack = [{ url: 'home', type: 'home' }];
+    sysBrowserCurrentHistoryIndex = 0;
+    sysBrowserCachedPages = {};
+    ChatDB.setItem('sys_browser_history_stack', JSON.stringify(sysBrowserHistoryStack));
+    ChatDB.setItem('sys_browser_history_index', '0');
+    ChatDB.removeItem('sys_browser_cached_pages');
+    sysBrowserUpdateNavButtons();
+}
+
+// --- 账号切换逻辑 ---
+function sysBrowserOpenAccountModal() {
+    const listEl = document.getElementById('sysBrowserAccountList');
+    listEl.innerHTML = '';
+    
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    // 只显示用户账号，不显示 char 账号
+    let allEntities = [...accounts];
+    
+    allEntities.forEach(acc => {
+        const isCurrent = acc.id === currentLoginId;
+        const name = acc.netName || acc.name || '未命名';
+        const avatar = acc.avatarUrl || 'https://api.dicebear.com/7.x/avataaars/svg?seed=User1';
+        
+        const item = document.createElement('div');
+        item.className = `sys-browser-account-item ${isCurrent ? 'active' : ''}`;
+        item.onclick = () => sysBrowserSwitchAccount(acc.id, name, avatar);
+        item.innerHTML = `
+            <div class="sys-browser-account-item-avatar" style="background-image: url('${avatar}');"></div>
+            <div class="sys-browser-account-item-name">${name}</div>
+        `;
+        listEl.appendChild(item);
+    });
+    
+    document.getElementById('sysBrowserAccountOverlay').classList.add('show');
+}
+
+function sysBrowserCloseAccountModal() {
+    document.getElementById('sysBrowserAccountOverlay').classList.remove('show');
+}
+
+function sysBrowserSwitchAccount(id, name, avatar) {
+    ChatDB.setItem('current_login_account', id);
+    
+    document.getElementById('sysBrowserCurrentName').innerText = name;
+    document.getElementById('sysBrowserCurrentAvatar').style.backgroundImage = `url('${avatar}')`;
+    
+    sysBrowserCloseAccountModal();
+    sysBrowserShowToast(`已切换至 ${name}`);
+    
+    // 同步刷新全局 UI
+    if (typeof renderMePage === 'function') renderMePage();
+    if (typeof renderChatList === 'function') renderChatList();
+    if (typeof renderContactList === 'function') renderContactList();
+    if (typeof renderMoments === 'function') renderMoments();
+}
+
+function sysBrowserRenderHistoryList() {
+    const list = document.getElementById('sys-browser-list-history');
+    if (!list) return;
+    list.innerHTML = '';
+    let hasHistory = false;
+    
+    for (let i = 0; i < sysBrowserHistoryStack.length; i++) {
+        const state = sysBrowserHistoryStack[i];
+        if (state.type !== 'home') {
+            hasHistory = true;
+            
+            let icon = `<svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>`;
+            let displayUrl = 'wiki.worldbook.ai';
+            
+            if (state.type === 'real') {
+                icon = `<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>`;
+                displayUrl = state.url;
+            } else if (state.type === 'poipiku') {
+                icon = `<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>`;
+                displayUrl = 'poipiku.com';
+            } else if (state.type === 'haitang') {
+                icon = `<svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>`;
+                displayUrl = 'haitang123.com';
+            } else if (state.type === 'search_list') {
+                icon = `<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`;
+                displayUrl = 'search.browser.com';
+            }
+            
+            const itemId = 'hist_' + i + '_' + Date.now();
+            const html = `
+                <div class="sys-browser-history-item" id="${itemId}">
+                    <div class="sys-browser-history-icon" onclick="sysBrowserNavigateTo('${state.url}', '${state.type}')">${icon}</div>
+                    <div class="sys-browser-history-info" onclick="sysBrowserNavigateTo('${state.url}', '${state.type}')">
+                        <div class="sys-browser-history-item-title">${state.url}</div>
+                        <div class="sys-browser-history-item-url">${displayUrl}</div>
+                    </div>
+                    <div onclick="sysBrowserDeleteHistoryItem('${itemId}', event)" style="padding: 10px; color: #ff3b30; cursor: pointer; font-weight: bold; font-size: 18px;">×</div>
+                </div>
+            `;
+            list.insertAdjacentHTML('afterbegin', html);
+        }
+    }
+    
+    if (!hasHistory) {
+        list.innerHTML = '<div style="padding: 30px; text-align: center; color: #aaa; font-size: 13px;">暂无历史记录</div>';
+    }
+}
+
+// 初始化
+function initSysBrowser() {
+    sysBrowserRenderHistoryList();
+    sysBrowserRenderTabs();
+    sysBrowserUpdateNavButtons();
+    
+    const currentState = sysBrowserHistoryStack[sysBrowserCurrentHistoryIndex];
+    if (currentState) {
+        sysBrowserNavigateTo(currentState.url, currentState.type, true);
+    }
+}
+
+window.addEventListener('ChatDBReady', () => {
+    sysBrowserHistoryStack = JSON.parse(ChatDB.getItem('sys_browser_history_stack') || '[{"url":"home","type":"home"}]');
+    sysBrowserCurrentHistoryIndex = parseInt(ChatDB.getItem('sys_browser_history_index') || '0');
+    sysBrowserTabs = JSON.parse(ChatDB.getItem('sys_browser_tabs') || '[{"id":1,"title":"起始页","isHome":true,"url":"home","type":"home"},{"id":2,"title":"维基百科","isHome":false,"url":"https://zh.wikipedia.org","type":"real"}]');
+    sysBrowserActiveTabId = parseInt(ChatDB.getItem('sys_browser_active_tab_id') || '1');
+    sysBrowserCachedPages = JSON.parse(ChatDB.getItem('sys_browser_cached_pages') || '{}');
+    sysBrowserPoipikuData = JSON.parse(ChatDB.getItem('sys_browser_poipiku_posts') || '[]');
+    
+    sysBrowserHaitangData = JSON.parse(ChatDB.getItem('sys_browser_haitang_data') || '[]');
+    let needsSave = false;
+    sysBrowserHaitangData.forEach(book => {
+        if (book.chapters) {
+            ChatDB.setItem('haitang_book_' + book.id, JSON.stringify(book.chapters));
+            delete book.chapters;
+            needsSave = true;
+        }
+    });
+    if (needsSave) {
+        ChatDB.setItem('sys_browser_haitang_data', JSON.stringify(sysBrowserHaitangData));
+    }
+    
+    initSysBrowser();
+});
+
+// ==========================================
+// Poipiku AI 生成逻辑
+// ==========================================
+let currentPoipikuWbEntries = [];
+let currentPoipikuSelectedChars = [];
+
+function openPoipikuCharSelectModal() {
+    const listEl = document.getElementById('poipikuCharSelectList');
+    listEl.innerHTML = '';
+    
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    
+    const groups = [
+        { name: '角色 (Chars)', items: chars.map(c => ({ id: c.id, name: c.name || c.netName || '未命名' })) },
+        { name: '用户面具 (User Personas)', items: personas.map(p => ({ id: p.id, name: p.realName || '未命名', isPersona: true })) }
+    ];
+    
+    groups.forEach(group => {
+        if (group.items.length === 0) return;
+        
+        const groupContainer = document.createElement('div');
+        groupContainer.style.borderBottom = '1px solid #f5f5f5';
+        
+        const groupHeader = document.createElement('div');
+        groupHeader.style.display = 'flex';
+        groupHeader.style.alignItems = 'center';
+        groupHeader.style.justifyContent = 'space-between';
+        groupHeader.style.padding = '15px 5px';
+        groupHeader.style.cursor = 'pointer';
+        
+        const titleSpan = document.createElement('span');
+        titleSpan.innerText = group.name;
+        titleSpan.style.fontSize = '15px';
+        titleSpan.style.color = '#333';
+        titleSpan.style.fontWeight = '500';
+        
+        const arrowSvg = document.createElement('div');
+        arrowSvg.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="#aaa" style="transition: transform 0.2s;"><path d="M7 10l5 5 5-5z"/></svg>`;
+        const arrowIcon = arrowSvg.firstChild;
+        
+        groupHeader.appendChild(titleSpan);
+        groupHeader.appendChild(arrowSvg);
+        
+        const entriesContainer = document.createElement('div');
+        entriesContainer.style.display = 'none';
+        entriesContainer.style.paddingBottom = '10px';
+        
+        groupHeader.onclick = () => {
+            const isHidden = entriesContainer.style.display === 'none';
+            entriesContainer.style.display = isHidden ? 'block' : 'none';
+            arrowIcon.style.transform = isHidden ? 'rotate(180deg)' : 'rotate(0deg)';
+        };
+        
+        group.items.forEach(item => {
+            const entryDiv = document.createElement('div');
+            entryDiv.style.display = 'flex';
+            entryDiv.style.alignItems = 'center';
+            entryDiv.style.gap = '12px';
+            entryDiv.style.padding = '12px 5px 12px 15px';
+            
+            const entryCb = document.createElement('input');
+            entryCb.type = 'checkbox';
+            entryCb.value = item.isPersona ? `persona_${item.id}` : `char_${item.id}`;
+            entryCb.checked = currentPoipikuSelectedChars.includes(entryCb.value);
+            entryCb.style.width = '16px';
+            entryCb.style.height = '16px';
+            entryCb.style.cursor = 'pointer';
+            entryCb.style.accentColor = '#1da1f2';
+            
+            entryCb.onchange = (e) => {
+                if (e.target.checked) {
+                    if (!currentPoipikuSelectedChars.includes(entryCb.value)) currentPoipikuSelectedChars.push(entryCb.value);
+                } else {
+                    currentPoipikuSelectedChars = currentPoipikuSelectedChars.filter(id => id !== entryCb.value);
+                }
+            };
+            
+            const entryTitle = document.createElement('span');
+            entryTitle.innerText = item.name;
+            entryTitle.style.fontSize = '14px';
+            entryTitle.style.color = '#666';
+            
+            entryDiv.appendChild(entryCb);
+            entryDiv.appendChild(entryTitle);
+            entriesContainer.appendChild(entryDiv);
+        });
+        
+        groupContainer.appendChild(groupHeader);
+        groupContainer.appendChild(entriesContainer);
+        listEl.appendChild(groupContainer);
+    });
+    
+    document.getElementById('poipikuCharSelectModalOverlay').classList.add('show');
+}
+
+function confirmPoipikuCharSelect() {
+    const textEl = document.getElementById('poipikuGenCharSelectText');
+    if (currentPoipikuSelectedChars.length > 0) {
+        textEl.innerText = `已选 ${currentPoipikuSelectedChars.length} 个角色`;
+        textEl.style.color = '#111';
+    } else {
+        textEl.innerText = '未选择 (点击选择)';
+        textEl.style.color = '#888';
+    }
+    document.getElementById('poipikuCharSelectModalOverlay').classList.remove('show');
+}
+
+function openPoipikuWbSelectModal() {
+    const listEl = document.getElementById('poipikuWbSelectList');
+    listEl.innerHTML = '';
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { groups: [], entries: [] };
+    
+    if (wbData.groups.length === 0 || wbData.entries.length === 0) {
+        listEl.innerHTML = '<div style="padding: 20px; text-align: center; color: #aaa; font-size: 12px;">暂无世界书数据</div>';
+    } else {
+        wbData.groups.forEach(group => {
+            const groupEntries = wbData.entries.filter(e => e.group === group);
+            if (groupEntries.length === 0) return;
+            
+            const groupContainer = document.createElement('div');
+            groupContainer.style.borderBottom = '1px solid #f5f5f5';
+            
+            const groupHeader = document.createElement('div');
+            groupHeader.style.display = 'flex';
+            groupHeader.style.alignItems = 'center';
+            groupHeader.style.justifyContent = 'space-between';
+            groupHeader.style.padding = '15px 5px';
+            groupHeader.style.cursor = 'pointer';
+            
+            const leftDiv = document.createElement('div');
+            leftDiv.style.display = 'flex';
+            leftDiv.style.alignItems = 'center';
+            leftDiv.style.gap = '12px';
+            
+            const groupCb = document.createElement('input');
+            groupCb.type = 'checkbox';
+            groupCb.setAttribute('data-group-target', group);
+            groupCb.style.width = '18px';
+            groupCb.style.height = '18px';
+            groupCb.style.cursor = 'pointer';
+            groupCb.style.accentColor = '#ff4b72';
+            
+            const allSelected = groupEntries.every(e => currentPoipikuWbEntries.includes(e.id));
+            groupCb.checked = allSelected;
+            
+            groupCb.onclick = (e) => e.stopPropagation();
+            groupCb.onchange = (e) => {
+                const isChecked = e.target.checked;
+                document.querySelectorAll(`.poipiku-wb-entry-checkbox[data-group-name="${group}"]`).forEach(cb => {
+                    cb.checked = isChecked;
+                    if (isChecked && !currentPoipikuWbEntries.includes(cb.value)) {
+                        currentPoipikuWbEntries.push(cb.value);
+                    } else if (!isChecked) {
+                        currentPoipikuWbEntries = currentPoipikuWbEntries.filter(id => id !== cb.value);
+                    }
+                });
+            };
+            
+            const titleSpan = document.createElement('span');
+            titleSpan.innerText = group;
+            titleSpan.style.fontSize = '15px';
+            titleSpan.style.color = '#333';
+            titleSpan.style.fontWeight = '500';
+            
+            leftDiv.appendChild(groupCb);
+            leftDiv.appendChild(titleSpan);
+            
+            const arrowSvg = document.createElement('div');
+            arrowSvg.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="#aaa" style="transition: transform 0.2s;"><path d="M7 10l5 5 5-5z"/></svg>`;
+            const arrowIcon = arrowSvg.firstChild;
+            
+            groupHeader.appendChild(leftDiv);
+            groupHeader.appendChild(arrowSvg);
+            
+            const entriesContainer = document.createElement('div');
+            entriesContainer.style.display = 'none';
+            entriesContainer.style.paddingBottom = '10px';
+            
+            groupHeader.onclick = () => {
+                const isHidden = entriesContainer.style.display === 'none';
+                entriesContainer.style.display = isHidden ? 'block' : 'none';
+                arrowIcon.style.transform = isHidden ? 'rotate(180deg)' : 'rotate(0deg)';
+            };
+            
+            groupEntries.forEach(entry => {
+                const entryDiv = document.createElement('div');
+                entryDiv.style.display = 'flex';
+                entryDiv.style.alignItems = 'center';
+                entryDiv.style.gap = '12px';
+                entryDiv.style.padding = '12px 5px 12px 35px';
+                
+                const entryCb = document.createElement('input');
+                entryCb.type = 'checkbox';
+                entryCb.className = `poipiku-wb-entry-checkbox`;
+                entryCb.setAttribute('data-group-name', group);
+                entryCb.value = entry.id;
+                entryCb.checked = currentPoipikuWbEntries.includes(entry.id);
+                entryCb.style.width = '16px';
+                entryCb.style.height = '16px';
+                entryCb.style.cursor = 'pointer';
+                entryCb.style.accentColor = '#ff4b72';
+                
+                entryCb.onchange = (e) => {
+                    if (e.target.checked) {
+                        if (!currentPoipikuWbEntries.includes(entry.id)) currentPoipikuWbEntries.push(entry.id);
+                    } else {
+                        currentPoipikuWbEntries = currentPoipikuWbEntries.filter(id => id !== entry.id);
+                    }
+                    const allCbs = Array.from(document.querySelectorAll(`.poipiku-wb-entry-checkbox[data-group-name="${group}"]`));
+                    const allChecked = allCbs.every(cb => cb.checked);
+                    document.querySelector(`input[data-group-target="${group}"]`).checked = allChecked;
+                };
+                
+                const entryTitle = document.createElement('span');
+                entryTitle.innerText = entry.title || '未命名';
+                entryTitle.style.fontSize = '14px';
+                entryTitle.style.color = '#666';
+                
+                entryDiv.appendChild(entryCb);
+                entryDiv.appendChild(entryTitle);
+                entriesContainer.appendChild(entryDiv);
+            });
+            
+            groupContainer.appendChild(groupHeader);
+            groupContainer.appendChild(entriesContainer);
+            listEl.appendChild(groupContainer);
+        });
+    }
+    document.getElementById('poipikuWbSelectModalOverlay').classList.add('show');
+}
+
+function confirmPoipikuWbSelect() {
+    const textEl = document.getElementById('poipikuGenWbSelectText');
+    if (currentPoipikuWbEntries.length > 0) {
+        textEl.innerText = `已选 ${currentPoipikuWbEntries.length} 个条目`;
+        textEl.style.color = '#111';
+    } else {
+        textEl.innerText = '未选择 (点击选择)';
+        textEl.style.color = '#888';
+    }
+    document.getElementById('poipikuWbSelectModalOverlay').classList.remove('show');
+}
+
+async function executePoipikuGenAPI() {
+    const imageCount = parseInt(document.getElementById('poipikuSettingImageCount').value) || 0;
+    const textCount = parseInt(document.getElementById('poipikuSettingTextCount').value) || 0;
+    const textLength = document.getElementById('poipikuSettingTextLength').value.trim() || '适中';
+    const style = document.getElementById('poipikuSettingStyle').value;
+    const customPrompt = document.getElementById('poipikuSettingPrompt').value.trim();
+
+    if (currentPoipikuSelectedChars.length === 0) return alert('请至少选择一个出场角色！');
+    if (imageCount <= 0 && textCount <= 0) return alert('请至少生成1篇内容！');
+
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        return alert('请先在设置中配置 API 信息！');
+    }
+
+    // 保存设置
+    const settingsToSave = {
+        charIds: currentPoipikuSelectedChars, imageCount, textCount, textLength, style, prompt: customPrompt, wbEntries: currentPoipikuWbEntries
+    };
+    ChatDB.setItem('poipiku_gen_settings', JSON.stringify(settingsToSave));
+
+    const btn = document.getElementById('poipikuGenBtn');
+    const originalBtnText = btn.innerText;
+    btn.innerText = '正在生成中...';
+    btn.style.pointerEvents = 'none';
+    btn.style.opacity = '0.7';
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    
+    let charactersContext = '';
+    currentPoipikuSelectedChars.forEach((selectedId, index) => {
+        if (selectedId.startsWith('persona_')) {
+            const pId = selectedId.replace('persona_', '');
+            const p = personas.find(x => x.id === pId);
+            if (p) {
+                charactersContext += `【出场角色 ${index + 1}】：${p.realName || '未命名'}\n设定：${p.persona || '普通用户'}\n\n`;
+            }
+        } else if (selectedId.startsWith('char_')) {
+            const cId = selectedId.replace('char_', '');
+            const c = chars.find(x => x.id === cId);
+            if (c) {
+                charactersContext += `【出场角色 ${index + 1}】：${c.name || '未命名'}\n设定：${c.description || '无'}\n\n`;
+            }
+        }
+    });
+
+    let wbContext = '';
+    if (currentPoipikuWbEntries.length > 0) {
+        let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+        let entries = wbData.entries.filter(e => currentPoipikuWbEntries.includes(e.id));
+        wbContext = entries.map(e => e.content).join('\n');
+    }
+
+    const totalCount = imageCount + textCount;
+
+    let prompt = `你是一个在 Poipiku 上发布作品的创作者。
+请根据以下设定，生成 ${totalCount} 篇 Poipiku 动态。其中包含 ${imageCount} 篇图文插画动态，和 ${textCount} 篇同人文动态。
+
+${charactersContext}
+${wbContext ? `【世界观背景】：\n${wbContext}\n` : ''}
+${style ? `【文风要求】：${style}\n` : ''}
+${customPrompt ? `【画面与配文要求】：${customPrompt}\n` : ''}
+【同人文字数要求】：${textLength}
+
+请严格返回一个合法的 JSON 数组，包含 ${totalCount} 个对象。
+对于图文插画动态，格式如下：
+  {
+    "author": "随机生成一个路人画师的网名（绝对不能是主角的名字）",
+    "category": "请你根据内容随机生成一个简短的分类词（如：涂鸦、R18、剧透、日常等）",
+    "imageDesc": "详细描述你画的图片画面内容（因为无法直接生成图片，请用文字详细描述画面）",
+    "text": "你发布这张图时配的文字（可以带点画师的吐槽、碎碎念）",
+    "tags": ["标签1", "标签2"]
+  }
+对于同人文动态，格式如下：
+  {
+    "author": "随机生成一个路人写手的网名（绝对不能是主角的名字）",
+    "category": "请你根据内容随机生成一个简短的分类词（如：短打、段子、同人、R18等）",
+    "imageDesc": "", 
+    "text": "这里写同人文/短打的正文内容，字数尽量符合要求，使用 HTML 标签如 <p> 进行段落排版",
+    "tags": ["标签1", "标签2"]
+  }
+注意：只返回 JSON 数组，不要包含任何 markdown 标记（如 \`\`\`json）。`;
+
+    sysBrowserShowToast(`正在创作 ${totalCount} 篇动态，请稍候...`, 0); // 传入 0 表示不自动隐藏
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.8
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            let worksArray = Array.isArray(parsed) ? parsed : [parsed];
+            
+            const npcAvatars = [
+                'https://i.postimg.cc/8cVtnWVq/IMG-20260509-054541.jpg',
+                'https://i.postimg.cc/qB8m6m8F/IMG-20260509-054512.jpg',
+                'https://i.postimg.cc/8khyfyh0/IMG-20260509-054523.jpg',
+                'https://i.postimg.cc/44z8H8zL/IMG-20260509-054532.jpg',
+                'https://i.postimg.cc/FFjPkPjD/IMG-20260509-054551.jpg',
+                'https://i.postimg.cc/DfqC4Cqx/IMG-20260509-054600.jpg',
+                'https://i.postimg.cc/2j4HLH47/IMG-20260509-054609.jpg',
+                'https://i.postimg.cc/gcvMLMvK/IMG-20260509-054628.jpg',
+                'https://i.postimg.cc/66dH4HdL/IMG-20260509-054640.jpg',
+                'https://i.postimg.cc/44z8H8zv/IMG-20260509-054649.jpg'
+            ];
+
+            // 倒序插入，保证第一篇在最上面
+            worksArray.reverse().forEach((workData, index) => {
+                const finalCategory = workData.category || "涂鸦";
+                const randomAvatar = npcAvatars[Math.floor(Math.random() * npcAvatars.length)];
+                const newPost = {
+                    id: Date.now() + index,
+                    author: workData.author || "Anonymous",
+                    avatar: randomAvatar,
+                    time: "刚刚",
+                    category: finalCategory,
+                    imageDesc: workData.imageDesc || "",
+                    text: workData.text || "无配文",
+                    tags: workData.tags || ["Poipiku"],
+                    reactions: { 
+                        heart: Math.floor(Math.random() * 500) + 10, 
+                        star: Math.floor(Math.random() * 100) + 5, 
+                        smile: Math.floor(Math.random() * 50) + 1 
+                    }
+                };
+                sysBrowserPoipikuData.unshift(newPost);
+            });
+
+            ChatDB.setItem('sys_browser_poipiku_posts', JSON.stringify(sysBrowserPoipikuData));
+            sysBrowserRenderPoipiku('home');
+            sysBrowserShowToast(`成功生成 ${worksArray.length} 篇动态！`);
+        } else {
+            sysBrowserShowToast('生成失败，请检查 API。');
+        }
+    } catch (e) {
+        console.error(e);
+        sysBrowserShowToast('生成出错：' + e.message);
+    } finally {
+        btn.innerText = originalBtnText;
+        btn.style.pointerEvents = 'auto';
+        btn.style.opacity = '1';
+    }
+}
+
+// ==========================================
+// 海棠书屋 (Haitang) 逻辑
+// ==========================================
+let sysBrowserHaitangData = JSON.parse(ChatDB.getItem('sys_browser_haitang_data') || '[]');
+window.addEventListener('ChatDBReady', () => {
+    sysBrowserHaitangData = JSON.parse(ChatDB.getItem('sys_browser_haitang_data') || '[]');
+});
+let isHaitangEditMode = false;
+let haitangSelectedBooks = [];
+let currentHaitangSelectedChars = [];
+
+function openHaitangCharSelectModal() {
+    const listEl = document.getElementById('haitangCharSelectList');
+    listEl.innerHTML = '';
+    
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    
+    const groups = [
+        { name: '角色 (Chars)', items: chars.map(c => ({ id: c.id, name: c.name || c.netName || '未命名' })) },
+        { name: '用户面具 (User Personas)', items: personas.map(p => ({ id: p.id, name: p.realName || '未命名', isPersona: true })) }
+    ];
+    
+    groups.forEach(group => {
+        if (group.items.length === 0) return;
+        
+        const groupContainer = document.createElement('div');
+        groupContainer.style.borderBottom = '1px solid #f5f5f5';
+        
+        const groupHeader = document.createElement('div');
+        groupHeader.style.display = 'flex';
+        groupHeader.style.alignItems = 'center';
+        groupHeader.style.justifyContent = 'space-between';
+        groupHeader.style.padding = '15px 5px';
+        groupHeader.style.cursor = 'pointer';
+        
+        const titleSpan = document.createElement('span');
+        titleSpan.innerText = group.name;
+        titleSpan.style.fontSize = '15px';
+        titleSpan.style.color = '#333';
+        titleSpan.style.fontWeight = '500';
+        
+        const arrowSvg = document.createElement('div');
+        arrowSvg.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="#aaa" style="transition: transform 0.2s;"><path d="M7 10l5 5 5-5z"/></svg>`;
+        const arrowIcon = arrowSvg.firstChild;
+        
+        groupHeader.appendChild(titleSpan);
+        groupHeader.appendChild(arrowSvg);
+        
+        const entriesContainer = document.createElement('div');
+        entriesContainer.style.display = 'none';
+        entriesContainer.style.paddingBottom = '10px';
+        
+        groupHeader.onclick = () => {
+            const isHidden = entriesContainer.style.display === 'none';
+            entriesContainer.style.display = isHidden ? 'block' : 'none';
+            arrowIcon.style.transform = isHidden ? 'rotate(180deg)' : 'rotate(0deg)';
+        };
+        
+        group.items.forEach(item => {
+            const entryDiv = document.createElement('div');
+            entryDiv.style.display = 'flex';
+            entryDiv.style.alignItems = 'center';
+            entryDiv.style.gap = '12px';
+            entryDiv.style.padding = '12px 5px 12px 15px';
+            
+            const entryCb = document.createElement('input');
+            entryCb.type = 'checkbox';
+            entryCb.value = item.isPersona ? `persona_${item.id}` : `char_${item.id}`;
+            entryCb.checked = currentHaitangSelectedChars.includes(entryCb.value);
+            entryCb.style.width = '16px';
+            entryCb.style.height = '16px';
+            entryCb.style.cursor = 'pointer';
+            entryCb.style.accentColor = '#111111';
+            
+            entryCb.onchange = (e) => {
+                if (e.target.checked) {
+                    if (!currentHaitangSelectedChars.includes(entryCb.value)) currentHaitangSelectedChars.push(entryCb.value);
+                } else {
+                    currentHaitangSelectedChars = currentHaitangSelectedChars.filter(id => id !== entryCb.value);
+                }
+            };
+            
+            const entryTitle = document.createElement('span');
+            entryTitle.innerText = item.name;
+            entryTitle.style.fontSize = '14px';
+            entryTitle.style.color = '#666';
+            
+            entryDiv.appendChild(entryCb);
+            entryDiv.appendChild(entryTitle);
+            entriesContainer.appendChild(entryDiv);
+        });
+        
+        groupContainer.appendChild(groupHeader);
+        groupContainer.appendChild(entriesContainer);
+        listEl.appendChild(groupContainer);
+    });
+    
+    document.getElementById('haitangCharSelectModalOverlay').classList.add('show');
+}
+
+function confirmHaitangCharSelect() {
+    const textEl = document.getElementById('haitangGenCharSelectText');
+    if (currentHaitangSelectedChars.length > 0) {
+        textEl.innerText = `已选 ${currentHaitangSelectedChars.length} 个角色`;
+        textEl.style.color = '#111';
+    } else {
+        textEl.innerText = '未选择 (点击选择)';
+        textEl.style.color = '#888';
+    }
+    document.getElementById('haitangCharSelectModalOverlay').classList.remove('show');
+}
+
+window.toggleHaitangEditMode = function() {
+    isHaitangEditMode = !isHaitangEditMode;
+    haitangSelectedBooks = [];
+    sysBrowserRenderHaitang('home');
+};
+
+window.toggleHaitangBookSelect = function(id) {
+    if (!isHaitangEditMode) return;
+    const index = haitangSelectedBooks.indexOf(id);
+    if (index > -1) {
+        haitangSelectedBooks.splice(index, 1);
+    } else {
+        haitangSelectedBooks.push(id);
+    }
+    sysBrowserRenderHaitang('home');
+};
+
+window.haitangSelectAll = function() {
+    if (haitangSelectedBooks.length === sysBrowserHaitangData.length && sysBrowserHaitangData.length > 0) {
+        haitangSelectedBooks = []; // 取消全选
+    } else {
+        haitangSelectedBooks = sysBrowserHaitangData.map(b => b.id);
+    }
+    sysBrowserRenderHaitang('home');
+};
+
+window.haitangDeleteSelected = function() {
+    if (haitangSelectedBooks.length === 0) {
+        sysBrowserShowToast('请先选择要删除的书籍');
+        return;
+    }
+    if (confirm(`确定要删除选中的 ${haitangSelectedBooks.length} 本书吗？`)) {
+        haitangSelectedBooks.forEach(id => {
+            ChatDB.removeItem('haitang_book_' + id);
+        });
+        sysBrowserHaitangData = sysBrowserHaitangData.filter(b => !haitangSelectedBooks.includes(b.id));
+        haitangSelectedBooks = [];
+        isHaitangEditMode = false;
+        
+        // 保存到本地存储
+        ChatDB.setItem('sys_browser_haitang_data', JSON.stringify(sysBrowserHaitangData));
+        
+        sysBrowserRenderHaitang('home');
+        sysBrowserShowToast('删除成功');
+    }
+};
+
+function sysBrowserRenderHaitang(page, bookId = null, chapterIndex = 0) {
+    const body = document.getElementById('sysBrowserHaitangBody');
+    const capsuleWrapper = document.getElementById('htCapsuleWrapper');
+    const navHome = document.getElementById('htNavHome');
+    const navSetting = document.getElementById('htNavSetting');
+    
+    // 退出沉浸式阅读
+    const container = document.getElementById('sys-browser-view-haitang');
+    const topBar = document.querySelector('.sys-browser-top-bar');
+    const bottomBar = document.querySelector('.sys-browser-bottom-bar');
+    container.classList.remove('immersive-reading');
+    if(topBar) topBar.style.display = 'flex';
+    if(bottomBar) bottomBar.style.display = 'flex';
+    
+    // 控制顶部胶囊的显示与状态
+    if (page === 'home' || page === 'setting') {
+        if(capsuleWrapper) capsuleWrapper.style.display = 'flex';
+        if (page === 'home') {
+            if(navHome) navHome.classList.add('active');
+            if(navSetting) navSetting.classList.remove('active');
+        } else {
+            if(navHome) navHome.classList.remove('active');
+            if(navSetting) navSetting.classList.add('active');
+        }
+    } else {
+        // 详情页和阅读页隐藏胶囊
+        if(capsuleWrapper) capsuleWrapper.style.display = 'none';
+    }
+
+    body.innerHTML = '';
+
+    if (page === 'home') {
+        // 提取前3本作为“继续阅读”横向展示
+        let horizontalBooks = sysBrowserHaitangData.slice(0, 3);
+        let horizontalHtml = '';
+        horizontalBooks.forEach(book => {
+            horizontalHtml += `
+                <div class="ht-book-card-h" onclick="sysBrowserRenderHaitang('detail', ${book.id})">
+                    <div class="ht-book-cover-h">封面</div>
+                    <div class="ht-book-info-h">
+                        <div class="ht-book-title-h">${book.title}</div>
+                        <div class="ht-book-progress-h">已读 0%</div>
+                    </div>
+                </div>
+            `;
+        });
+
+        // 提取所有书籍作为“为你推荐”垂直展示
+        let verticalHtml = '';
+        sysBrowserHaitangData.forEach(book => {
+            let checkboxHtml = '';
+            if (isHaitangEditMode) {
+                const isChecked = haitangSelectedBooks.includes(book.id) ? 'checked' : '';
+                checkboxHtml = `<input type="checkbox" class="ht-book-checkbox" value="${book.id}" ${isChecked} onclick="event.stopPropagation(); toggleHaitangBookSelect(${book.id})" style="margin-right: 15px; accent-color: #111; width: 18px; height: 18px; flex-shrink: 0;">`;
+            }
+            
+            verticalHtml += `
+                <div class="ht-book-list-item" onclick="${isHaitangEditMode ? `toggleHaitangBookSelect(${book.id})` : `sysBrowserRenderHaitang('detail', ${book.id})`}">
+                    ${checkboxHtml}
+                    <div class="ht-book-cover-v">封面</div>
+                    <div class="ht-book-info-v">
+                        <div>
+                            <div class="ht-book-title-v">${book.title}</div>
+                            <div class="ht-book-desc-v">${book.desc || '暂无简介'}</div>
+                        </div>
+                        <div class="ht-book-meta-v">
+                            <div class="ht-book-author-v">${book.author}</div>
+                            <div class="ht-book-tags">
+                                <span class="ht-book-tag">${book.tag}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+
+        let editBarHtml = '';
+        if (isHaitangEditMode) {
+            editBarHtml = `
+                <div style="position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 30px; padding: 8px 16px; display: flex; align-items: center; gap: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); border: 1px solid rgba(0,0,0,0.05); z-index: 100; white-space: nowrap;">
+                    <div onclick="haitangSelectAll()" style="font-size: 14px; font-weight: bold; color: #111; cursor: pointer; padding: 4px 8px; transition: opacity 0.2s;" onmousedown="this.style.opacity=0.5" onmouseup="this.style.opacity=1">全选</div>
+                    <div style="width: 1px; height: 16px; background: #e5e5ea;"></div>
+                    <div onclick="haitangDeleteSelected()" style="font-size: 14px; font-weight: bold; color: #ff3b30; cursor: pointer; padding: 4px 8px; transition: opacity 0.2s;" onmousedown="this.style.opacity=0.5" onmouseup="this.style.opacity=1">删除</div>
+                    <div style="width: 1px; height: 16px; background: #e5e5ea;"></div>
+                    <div onclick="toggleHaitangEditMode()" style="font-size: 14px; font-weight: bold; color: #888; cursor: pointer; padding: 4px 8px; transition: opacity 0.2s;" onmousedown="this.style.opacity=0.5" onmouseup="this.style.opacity=1">取消</div>
+                </div>
+            `;
+        }
+
+        body.innerHTML = `
+            <div class="ht-section-header">
+                <div class="ht-section-title">继续阅读</div>
+                <div class="ht-section-more">全部</div>
+            </div>
+            <div class="ht-horizontal-scroll">
+                ${horizontalHtml || '<div style="font-size: 13px; color: #888; padding: 20px;">暂无阅读记录</div>'}
+            </div>
+
+            <div class="ht-section-header">
+                <div class="ht-section-title">为你推荐</div>
+                ${!isHaitangEditMode ? `<div class="ht-section-more" onclick="toggleHaitangEditMode()">编辑</div>` : ''}
+            </div>
+            <div class="ht-vertical-list">
+                ${verticalHtml || '<div style="font-size: 13px; color: #888; padding: 20px; text-align: center;">暂无书籍，请点击顶部 AI 创作生成</div>'}
+            </div>
+
+            <div class="ht-footer">
+                Readingo UI Style<br>
+                Copyright © 2026. All Rights Reserved.
+            </div>
+            ${editBarHtml}
+        `;
+    } else if (page === 'detail') {
+        const bookMeta = sysBrowserHaitangData.find(b => b.id === bookId);
+        if (!bookMeta) return;
+        const chapters = JSON.parse(ChatDB.getItem('haitang_book_' + bookId) || '[]');
+        const book = { ...bookMeta, chapters };
+        
+        let chaptersHtml = '';
+        let latestChapter = '暂无章节';
+        if (book.chapters && book.chapters.length > 0) {
+            latestChapter = book.chapters[book.chapters.length - 1].title;
+            // 倒序排列章节
+            let reversedChapters = [...book.chapters].reverse();
+            reversedChapters.forEach((chap, idx) => {
+                let realIdx = book.chapters.length - 1 - idx;
+                chaptersHtml += `<div class="ht-chapter-item" onclick="sysBrowserRenderHaitang('chapter', ${book.id}, ${realIdx})">${chap.title}</div>`;
+            });
+        } else {
+            chaptersHtml = `<div class="ht-chapter-item" onclick="sysBrowserRenderHaitang('chapter', ${book.id}, -1)">正文内容</div>`;
+        }
+
+        body.innerHTML = `
+            <div class="ht-detail-container">
+                <div class="ht-glass-back-btn" onclick="sysBrowserRenderHaitang('home')">
+                    <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </div>
+                <div class="ht-detail-immersive-btn" onclick="sysBrowserRenderHaitang('chapter', ${book.id}, 0); setTimeout(() => toggleHaitangImmersive(true), 50);">
+                    <svg viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg> 沉浸阅读
+                </div>
+                <div class="ht-detail-cover">封面</div>
+                <div class="ht-detail-title">${book.title}</div>
+                <div class="ht-detail-author">${book.author}</div>
+                <div class="ht-detail-tags">
+                    <span class="ht-detail-tag">连载中</span>
+                    <span class="ht-detail-tag">${book.tag}</span>
+                </div>
+                <div class="ht-detail-desc-text">${book.desc || '暂无简介'}</div>
+                
+                <div class="ht-detail-actions">
+                    <div class="ht-detail-btn" onclick="sysBrowserRenderHaitang('chapter', ${book.id}, 0)">开始阅读</div>
+                    <div class="ht-detail-btn outline" onclick="sysBrowserAddBookToShelf(${book.id})">加入书架</div>
+                    <div class="ht-detail-btn outline" onclick="openHaitangUrgeModal(${book.id})">催更</div>
+                </div>
+            </div>
+            <div class="ht-detail-chapter-section">
+                <div class="ht-chapter-section-title">目录</div>
+                <div class="ht-chapter-list">
+                    ${chaptersHtml}
+                </div>
+            </div>
+        `;
+    } else if (page === 'chapter') {
+        const bookMeta = sysBrowserHaitangData.find(b => b.id === bookId);
+        if (!bookMeta) return;
+        const chapters = JSON.parse(ChatDB.getItem('haitang_book_' + bookId) || '[]');
+        const book = { ...bookMeta, chapters };
+        
+        // --- 新增：记录阅读进度到书架 ---
+        let shelf = JSON.parse(ChatDB.getItem('sys_browser_bookshelf') || '[]');
+        let shelfBook = shelf.find(b => b.id === book.id);
+        if (shelfBook) {
+            let totalChapters = book.chapters && book.chapters.length > 0 ? book.chapters.length : 1;
+            let currentChapter = chapterIndex >= 0 ? chapterIndex + 1 : 1;
+            shelfBook.progress = Math.round((currentChapter / totalChapters) * 100);
+            ChatDB.setItem('sys_browser_bookshelf', JSON.stringify(shelf));
+        }
+        // ------------------------------
+
+        let chapterTitle = book.title;
+        let chapterContent = book.content; 
+        
+        if (chapterIndex >= 0 && book.chapters && book.chapters[chapterIndex]) {
+            chapterTitle = book.chapters[chapterIndex].title;
+            chapterContent = book.chapters[chapterIndex].content;
+        }
+
+        let prevBtn = chapterIndex > 0 ? `<button onclick="sysBrowserRenderHaitang('chapter', ${book.id}, ${chapterIndex - 1})">上一章</button>` : `<button style="opacity: 0.3; cursor: not-allowed;">上一章</button>`;
+        let nextBtn = chapterIndex < book.chapters.length - 1 ? `<button onclick="sysBrowserRenderHaitang('chapter', ${book.id}, ${chapterIndex + 1})">下一章</button>` : `<button style="opacity: 0.3; cursor: not-allowed;">下一章</button>`;
+
+        body.innerHTML = `
+            <div style="position: relative; min-height: 100%; display: flex; flex-direction: column; overflow: hidden;">
+                <div class="ht-glass-back-btn" onclick="sysBrowserRenderHaitang('detail', ${book.id})">
+                    <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </div>
+                <div class="ht-article-content" onclick="handleHaitangReadingClick(event, ${book.id}, ${chapterIndex})" style="flex: 1;">
+                    <h2 style="color: inherit; font-size: 1.2em; font-weight: 900; margin-bottom: 25px; text-align: center; padding-top: 10px;">${chapterTitle}</h2>
+                    ${chapterContent}
+                </div>
+                <div class="ht-read-footer">
+                    ${prevBtn}
+                    <button onclick="toggleHaitangImmersive(true)" style="background: #111; color: #fff;">沉浸式阅读</button>
+                    ${nextBtn}
+                </div>
+                
+                <div id="htImmersiveMenu" class="ht-immersive-menu">
+                    <div class="ht-immersive-header">
+                        <div class="ht-immersive-back" onclick="toggleHaitangImmersive(false)">
+                            <svg viewBox="0 0 24 24"><polyline points="15 18 9 12 15 6"></polyline></svg> 退出
+                        </div>
+                    </div>
+                    <div class="ht-immersive-drawer">
+                        <div class="ht-drawer-header">
+                            <div class="ht-drawer-btn cancel" onclick="cancelHtSettings()">取消</div>
+                            <div class="ht-drawer-title">阅读设置</div>
+                            <div class="ht-drawer-btn save" onclick="saveHtSettings()">保存</div>
+                        </div>
+                        <div class="ht-drawer-row">
+                            <span>字体大小</span>
+                            <input type="range" min="12" max="30" value="18" oninput="previewHtSetting('fontSize', this.value + 'px')">
+                        </div>
+                        <div class="ht-drawer-row">
+                            <span>背景颜色</span>
+                            <div class="ht-color-options">
+                                <div class="ht-color-dot" style="background: #ffffff; border: 1px solid #ccc;" onclick="previewHtSetting('bgColor', '#ffffff', '#111111')"></div>
+                                <div class="ht-color-dot" style="background: #f4ecd8;" onclick="previewHtSetting('bgColor', '#f4ecd8', '#3e2d1d')"></div>
+                                <div class="ht-color-dot" style="background: #cce8cf;" onclick="previewHtSetting('bgColor', '#cce8cf', '#1a3b22')"></div>
+                                <div class="ht-color-dot" style="background: #1a1a1a;" onclick="previewHtSetting('bgColor', '#1a1a1a', '#999999')"></div>
+                            </div>
+                        </div>
+                        <div class="ht-drawer-row">
+                            <span>字体</span>
+                            <select onchange="previewHtSetting('fontFamily', this.value)">
+                                <option value="inherit">系统默认</option>
+                                <option value="'PingFang SC', -apple-system, sans-serif">苹方 (PingFang SC)</option>
+                                <option value="'Hiragino Sans GB', sans-serif">冬青黑体 (Hiragino)</option>
+                                <option value="'Helvetica Neue', Helvetica, Arial, sans-serif">Helvetica Neue</option>
+                                <option value="'KaiTi', 'STKaiti', serif">楷体</option>
+                                <option value="custom">自定义 URL 字体...</option>
+                            </select>
+                        </div>
+                        <div class="ht-drawer-row" id="htCustomFontRow" style="display: none; margin-top: -10px;">
+                            <input type="text" id="htCustomFontUrl" placeholder="输入字体 .ttf/.woff URL" style="flex:1; padding: 10px 12px; border: 1px solid #ddd; border-radius: 10px; font-size: 13px; outline: none; background: #f9f9f9;" onchange="previewCustomFontUrl(this.value)">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        setTimeout(() => applyHtSettings(), 0);
+    } else if (page === 'setting') {
+        // 读取已保存的设置
+        let savedSettings = JSON.parse(ChatDB.getItem('haitang_gen_settings') || '{}');
+
+        let stylePresets = JSON.parse(ChatDB.getItem('tav_presets_style') || '[]');
+        let styleOptions = '<option value="">请选择预设文风 (可选)</option>';
+        if (stylePresets.length === 0) {
+            styleOptions = '<option value="">暂无文风预设，请先在线下配置</option>';
+        } else {
+            stylePresets.forEach(p => {
+                styleOptions += `<option value="${p.content.replace(/"/g, '&quot;')}" ${savedSettings.style === p.content ? 'selected' : ''}>${p.name}</option>`;
+            });
+        }
+
+        body.innerHTML = `
+            <div class="ht-setting-wrapper" style="padding: 20px;">
+                <h2 style="color: #111; padding-bottom: 15px; margin-bottom: 20px; font-size: 22px; font-weight: 900;">AI 创作设置</h2>
+                
+                <div class="poipiku-input-group">
+                    <label>出场角色 (必选)</label>
+                    <div id="haitangGenCharSelectText" onclick="openHaitangCharSelectModal()" class="poipiku-input" style="cursor: pointer; text-align: center;">未选择 (点击选择)</div>
+                </div>
+
+                <div style="display: flex; gap: 15px;">
+                    <div class="poipiku-input-group" style="flex: 1;">
+                        <label>生成书籍数量</label>
+                        <input type="number" id="htSettingCount" class="poipiku-input" value="${savedSettings.postCount !== undefined ? savedSettings.postCount : 1}" min="1">
+                    </div>
+                    <div class="poipiku-input-group" style="flex: 1;">
+                        <label>分类标签</label>
+                        <select id="htSettingCategory" class="poipiku-input">
+                            <option value="[言情]">[言情]</option>
+                            <option value="[同人]">[同人]</option>
+                            <option value="[原创]">[原创]</option>
+                            <option value="[耽美]">[耽美]</option>
+                            <option value="[百合]">[百合]</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="poipiku-input-group">
+                    <label>每章字数要求</label>
+                    <input type="text" id="htSettingLength" class="poipiku-input" value="${savedSettings.textLength || '800字左右'}" placeholder="例如：800字左右">
+                </div>
+
+                <div class="poipiku-input-group">
+                    <label>关联世界书</label>
+                    <div id="poipikuGenWbSelectText" onclick="openPoipikuWbSelectModal()" class="poipiku-input" style="cursor: pointer; text-align: center;">未选择 (点击选择)</div>
+                </div>
+
+                <div class="poipiku-input-group">
+                    <label>预设文风</label>
+                    <select id="htSettingStyle" class="poipiku-input">
+                        ${styleOptions}
+                    </select>
+                </div>
+
+                <div class="poipiku-input-group">
+                    <label>剧情大纲/XP要求</label>
+                    <textarea id="htSettingPrompt" class="poipiku-textarea" placeholder="例如：写一段他们久别重逢的剧情，张力拉满...">${savedSettings.prompt || ''}</textarea>
+                </div>
+
+                <button class="ht-submit-btn" onclick="executeHaitangGenAPI()">开始生成 (Generate)</button>
+            </div>
+        `;
+        
+        // 恢复分类标签
+        if (savedSettings.category) {
+            document.getElementById('htSettingCategory').value = savedSettings.category;
+        }
+        
+        // 恢复角色选择
+        currentHaitangSelectedChars = savedSettings.charIds || [];
+        if (currentHaitangSelectedChars.length > 0) {
+            const charTextEl = document.getElementById('haitangGenCharSelectText');
+            if(charTextEl) {
+                charTextEl.innerText = `已选 ${currentHaitangSelectedChars.length} 个角色`;
+                charTextEl.style.color = '#111';
+            }
+        }
+        
+        // 恢复世界书选择
+        currentPoipikuWbEntries = savedSettings.wbEntries || [];
+        if (currentPoipikuWbEntries.length > 0) {
+            const textEl = document.getElementById('poipikuGenWbSelectText');
+            if(textEl) {
+                textEl.innerText = `已选 ${currentPoipikuWbEntries.length} 个条目`;
+                textEl.style.color = '#111';
+            }
+        }
+    }
+}
+
+async function executeHaitangGenAPI() {
+    const postCount = parseInt(document.getElementById('htSettingCount').value) || 1;
+    const category = document.getElementById('htSettingCategory').value;
+    const textLength = document.getElementById('htSettingLength').value.trim() || '适中';
+    const style = document.getElementById('htSettingStyle').value;
+    const customPrompt = document.getElementById('htSettingPrompt').value.trim();
+
+    if (currentHaitangSelectedChars.length === 0) return alert('请至少选择一个出场角色！');
+
+    // 保存设置到本地数据库
+    const settingsToSave = {
+        charIds: currentHaitangSelectedChars, postCount, category, textLength, style, prompt: customPrompt, wbEntries: currentPoipikuWbEntries
+    };
+    ChatDB.setItem('haitang_gen_settings', JSON.stringify(settingsToSave));
+
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        return alert('请先在设置中配置 API 信息！');
+    }
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    
+    let charactersContext = '';
+    currentHaitangSelectedChars.forEach((selectedId, index) => {
+        if (selectedId.startsWith('persona_')) {
+            const pId = selectedId.replace('persona_', '');
+            const p = personas.find(x => x.id === pId);
+            if (p) {
+                charactersContext += `【出场角色 ${index + 1}】：${p.realName || '未命名'}\n设定：${p.persona || '普通用户'}\n\n`;
+            }
+        } else if (selectedId.startsWith('char_')) {
+            const cId = selectedId.replace('char_', '');
+            const c = chars.find(x => x.id === cId);
+            if (c) {
+                charactersContext += `【出场角色 ${index + 1}】：${c.name || '未命名'}\n设定：${c.description || '无'}\n\n`;
+            }
+        }
+    });
+
+    let wbContext = '';
+    if (currentPoipikuWbEntries.length > 0) {
+        let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+        let entries = wbData.entries.filter(e => currentPoipikuWbEntries.includes(e.id));
+        wbContext = entries.map(e => e.content).join('\n');
+    }
+
+    let prompt = `你是一个在海棠书屋（海棠文化线上文学城）上连载小说的作者。
+请根据以下设定，生成 ${postCount} 本小说。每本小说需要包含简介和 2 个章节的正文。小说正文内容需要直白露骨，色情。
+
+${charactersContext}
+${wbContext ? `【世界观背景】：\n${wbContext}\n` : ''}
+${style ? `【文风要求】：${style}\n` : ''}
+${customPrompt ? `【剧情大纲/XP要求】：${customPrompt}\n` : ''}
+【每章字数要求】：${textLength}
+
+请严格返回一个合法的 JSON 数组，包含 ${postCount} 个对象，格式如下：
+[
+  {
+    "title": "《这里写小说的书名》",
+    "author": "这里写作者笔名（可以是你自己编的）",
+    "tag": "${category}",
+    "desc": "这里写小说的文案简介，吸引读者阅读",
+    "chapters": [
+        {
+            "title": "第一章 章节名",
+            "content": "这里写第一章的正文内容，使用 HTML 标签如 <p> 进行段落排版"
+        },
+        {
+            "title": "第二章 章节名",
+            "content": "这里写第二章的正文内容，使用 HTML 标签如 <p> 进行段落排版"
+        }
+    ]
+  }
+]
+注意：只返回 JSON 数组，不要包含任何 markdown 标记（如 \`\`\`json）。`;
+
+    sysBrowserShowToast(`正在码字中，请稍候...`, 0); // 传入 0 表示不自动隐藏
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.8
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            let worksArray = Array.isArray(parsed) ? parsed : [parsed];
+            
+            worksArray.reverse().forEach((workData, index) => {
+                const newId = Date.now() + index;
+                const newPost = {
+                    id: newId,
+                    title: workData.title || "《未命名》",
+                    author: workData.author || "匿名写手",
+                    tag: workData.tag || category,
+                    desc: workData.desc || "暂无简介",
+                    charIds: currentHaitangSelectedChars
+                };
+                ChatDB.setItem('haitang_book_' + newId, JSON.stringify(workData.chapters || []));
+                sysBrowserHaitangData.unshift(newPost);
+            });
+
+            // 保存到本地存储
+            ChatDB.setItem('sys_browser_haitang_data', JSON.stringify(sysBrowserHaitangData));
+
+            sysBrowserRenderHaitang('home');
+            sysBrowserShowToast(`成功生成 ${worksArray.length} 本小说！`);
+        } else {
+            sysBrowserShowToast('生成失败，请检查 API。');
+        }
+    } catch (e) {
+        console.error(e);
+        sysBrowserShowToast('生成出错：' + e.message);
+    }
+}
+
+// ==========================================
+// 书架逻辑 (Bookshelf)
+// ==========================================
+let isBookshelfEditMode = false;
+let bookshelfSelectedBooks = [];
+
+function sysBrowserAddBookToShelf(bookId) {
+    const book = sysBrowserHaitangData.find(b => b.id === bookId);
+    if (!book) return;
+    
+    let shelf = JSON.parse(ChatDB.getItem('sys_browser_bookshelf') || '[]');
+    if (shelf.find(b => b.id === bookId)) {
+        sysBrowserShowToast('已在书架中');
+        return;
+    }
+    
+    shelf.push({ id: book.id, title: book.title, author: book.author });
+    ChatDB.setItem('sys_browser_bookshelf', JSON.stringify(shelf));
+    sysBrowserShowToast('已加入书架');
+}
+
+function toggleBookshelfEditMode() {
+    isBookshelfEditMode = !isBookshelfEditMode;
+    bookshelfSelectedBooks = [];
+    const editBtn = document.getElementById('sysBrowserBookshelfEditBtn');
+    const editBar = document.getElementById('sysBrowserBookshelfEditBar');
+    if (isBookshelfEditMode) {
+        if(editBtn) editBtn.innerText = '取消';
+        if(editBar) editBar.style.display = 'flex';
+    } else {
+        if(editBtn) editBtn.innerText = 'Edit';
+        if(editBar) editBar.style.display = 'none';
+    }
+    sysBrowserRenderBookshelfGrid();
+}
+
+function bookshelfSelectAll() {
+    let shelf = JSON.parse(ChatDB.getItem('sys_browser_bookshelf') || '[]');
+    if (bookshelfSelectedBooks.length === shelf.length && shelf.length > 0) {
+        bookshelfSelectedBooks = [];
+    } else {
+        bookshelfSelectedBooks = shelf.map(b => b.id);
+    }
+    sysBrowserRenderBookshelfGrid();
+}
+
+function bookshelfDeleteSelected() {
+    if (bookshelfSelectedBooks.length === 0) {
+        sysBrowserShowToast('请先选择要删除的书籍');
+        return;
+    }
+    if (confirm(`确定要删除选中的 ${bookshelfSelectedBooks.length} 本书吗？`)) {
+        // 1. 删除书架记录
+        let shelf = JSON.parse(ChatDB.getItem('sys_browser_bookshelf') || '[]');
+        shelf = shelf.filter(b => !bookshelfSelectedBooks.includes(b.id));
+        ChatDB.setItem('sys_browser_bookshelf', JSON.stringify(shelf));
+        
+        // 2. 同步删除海棠文学城中的源数据和章节正文数据
+        bookshelfSelectedBooks.forEach(id => {
+            ChatDB.removeItem('haitang_book_' + id);
+        });
+        sysBrowserHaitangData = sysBrowserHaitangData.filter(b => !bookshelfSelectedBooks.includes(b.id));
+        ChatDB.setItem('sys_browser_haitang_data', JSON.stringify(sysBrowserHaitangData));
+        
+        bookshelfSelectedBooks = [];
+        toggleBookshelfEditMode(); // 退出编辑模式并重新渲染
+        sysBrowserShowToast('删除成功');
+    }
+}
+
+function toggleBookshelfBookSelect(id) {
+    if (!isBookshelfEditMode) return;
+    const index = bookshelfSelectedBooks.indexOf(id);
+    if (index > -1) {
+        bookshelfSelectedBooks.splice(index, 1);
+    } else {
+        bookshelfSelectedBooks.push(id);
+    }
+    sysBrowserRenderBookshelfGrid();
+}
+
+function sysBrowserRenderBookshelfGrid() {
+    const grid = document.getElementById('sysBrowserBookshelfGrid');
+    grid.innerHTML = '';
+    let shelf = JSON.parse(ChatDB.getItem('sys_browser_bookshelf') || '[]');
+    
+    if (shelf.length === 0) {
+        grid.innerHTML = '<div style="grid-column: 1 / -1; padding: 30px; text-align: center; color: #aaa; font-size: 13px;">书架空空如也</div>';
+        return;
+    }
+    
+    shelf.forEach(book => {
+        const item = document.createElement('div');
+        item.className = 'sys-browser-bookshelf-item';
+        
+        // 强制限制外层容器宽度，防止被长文本撑开
+        item.style.minWidth = '0';
+        item.style.width = '100%';
+        
+        // 读取进度
+        let progressText = book.progress !== undefined ? `已读 ${book.progress}%` : '未读';
+        
+        if (isBookshelfEditMode) {
+            item.onclick = () => toggleBookshelfBookSelect(book.id);
+            const isChecked = bookshelfSelectedBooks.includes(book.id) ? 'checked' : '';
+            item.innerHTML = `
+                <div class="bookshelf-polaroid" style="width: 100%; height: 100%; box-sizing: border-box; display: flex; flex-direction: column;">
+                    <div class="polaroid-photo" style="width: 100%; aspect-ratio: 3/4; position: relative; overflow: hidden; display: flex; flex-direction: column; box-sizing: border-box;">
+                        <div class="polaroid-cover-text" style="flex: 1; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; word-break: break-all; white-space: normal;">${book.title.replace(/《|》/g, '')}</div>
+                        <div class="polaroid-progress" style="position: absolute; bottom: 0; width: 100%; box-sizing: border-box;">${progressText}</div>
+                        <input type="checkbox" value="${book.id}" ${isChecked} class="polaroid-checkbox">
+                    </div>
+                    <div class="polaroid-title" style="margin-top: 8px; font-size: 13px; line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; text-overflow: ellipsis; word-break: break-all; white-space: normal;">${book.title}</div>
+                </div>
+            `;
+        } else {
+            item.onclick = () => {
+                sysBrowserNavigateTo('haitang', 'haitang');
+                sysBrowserRenderHaitang('detail', book.id); // 移除延迟，直接同步渲染详情页
+            };
+            item.innerHTML = `
+                <div class="bookshelf-polaroid" style="width: 100%; height: 100%; box-sizing: border-box; display: flex; flex-direction: column;">
+                    <div class="polaroid-photo" style="width: 100%; aspect-ratio: 3/4; position: relative; overflow: hidden; display: flex; flex-direction: column; box-sizing: border-box;">
+                        <div class="polaroid-cover-text" style="flex: 1; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; word-break: break-all; white-space: normal;">${book.title.replace(/《|》/g, '')}</div>
+                        <div class="polaroid-progress" style="position: absolute; bottom: 0; width: 100%; box-sizing: border-box;">${progressText}</div>
+                    </div>
+                    <div class="polaroid-title" style="margin-top: 8px; font-size: 13px; line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; text-overflow: ellipsis; word-break: break-all; white-space: normal;">${book.title}</div>
+                </div>
+            `;
+        }
+        
+        grid.appendChild(item);
+    });
+}
+
+function sysBrowserOpenBookshelf() {
+    sysBrowserToggleMenu();
+    sysBrowserSwitchView('bookshelf');
+    sysBrowserAddressText.innerText = '我的书架';
+    
+    isBookshelfEditMode = false;
+    bookshelfSelectedBooks = [];
+    
+    const header = document.querySelector('#sys-browser-view-bookshelf .sys-browser-history-header');
+    if (header && !document.getElementById('sysBrowserBookshelfImportBtn')) {
+        const rightContainer = document.createElement('div');
+        rightContainer.style.display = 'flex';
+        rightContainer.style.gap = '15px';
+        rightContainer.style.alignItems = 'center';
+        
+        const importBtn = document.createElement('div');
+        importBtn.id = 'sysBrowserBookshelfImportBtn';
+        importBtn.innerText = '+添加';
+        importBtn.style.cssText = 'font-size: 14px; color: #1677ff; font-weight: bold; cursor: pointer;';
+        importBtn.onclick = () => {
+            let input = document.getElementById('htTxtImportInput');
+            if (!input) {
+                input = document.createElement('input');
+                input.type = 'file';
+                input.id = 'htTxtImportInput';
+                input.accept = '.txt';
+                input.style.display = 'none';
+                input.onchange = handleHtTxtImport;
+                document.body.appendChild(input);
+            }
+            input.click();
+        };
+        
+        const editBtn = document.getElementById('sysBrowserBookshelfEditBtn');
+        if (editBtn) {
+            editBtn.parentNode.insertBefore(rightContainer, editBtn);
+            rightContainer.appendChild(importBtn);
+            rightContainer.appendChild(editBtn);
+        }
+    }
+    
+    const editBtn = document.getElementById('sysBrowserBookshelfEditBtn');
+    const editBar = document.getElementById('sysBrowserBookshelfEditBar');
+    if(editBtn) editBtn.innerText = '编辑';
+    if(editBar) editBar.style.display = 'none';
+    
+    sysBrowserRenderBookshelfGrid();
+}
+
+window.handleHtTxtImport = function(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    sysBrowserShowToast('正在解析TXT文件...', 0);
+    
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const text = e.target.result;
+        const chapters = parseTxtToChapters(text);
+        
+        const newBook = {
+            id: Date.now(),
+            title: file.name.replace('.txt', ''),
+            author: '本地导入',
+            tag: '[本地]',
+            desc: '本地导入的TXT文件',
+            charIds: []
+        };
+        
+        ChatDB.setItem('haitang_book_' + newBook.id, JSON.stringify(chapters));
+        
+        sysBrowserHaitangData.unshift(newBook);
+        ChatDB.setItem('sys_browser_haitang_data', JSON.stringify(sysBrowserHaitangData));
+        
+        let shelf = JSON.parse(ChatDB.getItem('sys_browser_bookshelf') || '[]');
+        shelf.push({ id: newBook.id, title: newBook.title, author: newBook.author, progress: 0 });
+        ChatDB.setItem('sys_browser_bookshelf', JSON.stringify(shelf));
+        
+        sysBrowserShowToast('导入成功！');
+        sysBrowserRenderBookshelfGrid();
+        
+        event.target.value = '';
+    };
+    reader.readAsText(file);
+};
+
+function parseTxtToChapters(text) {
+    const chapters = [];
+    const lines = text.split('\n');
+    let currentChapterContent = '';
+    let currentTitle = '正文';
+    
+    const chapterPattern = /^(第[零一二三四五六七八九十百千万0-9]+[章节回卷])/;
+    
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (chapterPattern.test(line) && line.length < 50) {
+            if (currentChapterContent) {
+                chapters.push({ title: currentTitle, content: '<p>' + currentChapterContent.split('\n').filter(l=>l).join('</p><p>') + '</p>' });
+            }
+            currentTitle = line;
+            currentChapterContent = '';
+        } else {
+            if (line) currentChapterContent += line + '\n';
+        }
+    }
+    if (currentChapterContent) {
+        chapters.push({ title: currentTitle, content: '<p>' + currentChapterContent.split('\n').filter(l=>l).join('</p><p>') + '</p>' });
+    }
+    
+    if (chapters.length === 0) {
+        const chunkSize = 5000;
+        for (let i = 0; i < text.length; i += chunkSize) {
+            const chunk = text.slice(i, i + chunkSize);
+            chapters.push({
+                title: '第 ' + (Math.floor(i / chunkSize) + 1) + ' 部分',
+                content: '<p>' + chunk.split('\n').filter(l=>l).join('</p><p>') + '</p>'
+            });
+        }
+    }
+    return chapters;
+}
+
+// ==========================================
+// 海棠书屋 催更逻辑
+// ==========================================
+function openHaitangUrgeModal(bookId) {
+    document.getElementById('htUrgeBookId').value = bookId;
+    document.getElementById('htUrgePlotInput').value = '';
+    document.getElementById('haitangUrgeModalOverlay').classList.add('show');
+}
+
+function closeHaitangUrgeModal() {
+    document.getElementById('haitangUrgeModalOverlay').classList.remove('show');
+}
+
+async function confirmHaitangUrge() {
+    const bookId = parseInt(document.getElementById('htUrgeBookId').value);
+    const plot = document.getElementById('htUrgePlotInput').value.trim();
+    const length = document.getElementById('htUrgeLengthInput').value.trim() || '适中';
+    
+    const bookMeta = sysBrowserHaitangData.find(b => b.id === bookId);
+    if (!bookMeta) return;
+    const chapters = JSON.parse(ChatDB.getItem('haitang_book_' + bookId) || '[]');
+    const book = { ...bookMeta, chapters };
+
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        return alert('请先在设置中配置 API 信息！');
+    }
+
+    closeHaitangUrgeModal();
+    sysBrowserShowToast('作者正在爆肝码字中，请稍候...', 0); // 传入 0 表示不自动隐藏
+
+    // 构建前文摘要 (取最后一章)
+    let previousContext = '';
+    if (book.chapters && book.chapters.length > 0) {
+        const lastChapter = book.chapters[book.chapters.length - 1];
+        previousContext = `【上一章内容回顾】：\n${lastChapter.content}\n\n`;
+    }
+
+    // 构建角色人设上下文
+    let charactersContext = '';
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+
+    let targetCharIds = book.charIds || [];
+    // 兼容旧版本生成的书籍
+    if (targetCharIds.length === 0) {
+        if (book.char1Id) targetCharIds.push(book.char1Id);
+        if (book.char2Id) targetCharIds.push(book.char2Id);
+    }
+
+    targetCharIds.forEach((selectedId, index) => {
+        if (typeof selectedId === 'string' && selectedId.startsWith('persona_')) {
+            const pId = selectedId.replace('persona_', '');
+            const p = personas.find(x => x.id === pId);
+            if (p) {
+                charactersContext += `【出场角色 ${index + 1}】：${p.realName || '未命名'}\n设定：${p.persona || '普通用户'}\n\n`;
+            }
+        } else {
+            // 兼容旧的纯 ID 或 char_ 前缀
+            const cId = (typeof selectedId === 'string' && selectedId.startsWith('char_')) ? selectedId.replace('char_', '') : selectedId;
+            const c = allEntities.find(x => x.id === cId);
+            if (c) {
+                let realName = c.name || c.netName || '未命名';
+                let desc = c.description || '无';
+                if (c.isAccount) {
+                    const p = personas.find(p => p.id === c.personaId);
+                    if (p) { realName = p.realName || realName; desc = p.persona || '普通用户'; }
+                }
+                charactersContext += `【出场角色 ${index + 1}】：${realName}\n设定：${desc}\n\n`;
+            }
+        }
+    });
+
+    // 构建海棠设置绑定的世界书上下文 (从本地存储读取)
+    let wbContext = '';
+    let savedSettings = JSON.parse(ChatDB.getItem('haitang_gen_settings') || '{}');
+    let savedWbEntries = savedSettings.wbEntries || [];
+    if (savedWbEntries.length > 0) {
+        let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+        let entries = wbData.entries.filter(e => savedWbEntries.includes(e.id));
+        wbContext = entries.map(e => e.content).join('\n');
+    }
+
+    let prompt = `你是一个在海棠书屋连载小说的作者。
+现在读者对你的小说《${book.title}》发起了催更。
+请根据读者的要求，续写下一章的正文。
+
+${charactersContext}
+${wbContext ? `【世界观背景】：\n${wbContext}\n` : ''}
+${previousContext}
+【读者要求的下一章剧情走向】：${plot ? plot : '顺着上一章的剧情自然发展'}
+【字数要求】：${length}
+
+请严格返回一个合法的 JSON 对象，格式如下：
+{
+    "title": "第X章 章节名",
+    "content": "这里写新章节的正文内容，使用 HTML 标签如 <p> 进行段落排版"
+}
+注意：只返回 JSON 对象，不要包含任何 markdown 标记（如 \`\`\`json）。`;
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.8
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            
+            if (!book.chapters) book.chapters = [];
+            book.chapters.push({
+                title: parsed.title || `新章节`,
+                content: parsed.content || "<p>无内容</p>"
+            });
+
+            // 保存到本地存储
+            ChatDB.setItem('haitang_book_' + bookId, JSON.stringify(book.chapters));
+
+            sysBrowserRenderHaitang('detail', book.id);
+            sysBrowserShowToast('催更成功！新章节已更新！');
+        } else {
+            sysBrowserShowToast('催更失败，请检查 API。');
+        }
+    } catch (e) {
+        console.error(e);
+        sysBrowserShowToast('催更出错：' + e.message);
+    }
+}
+
+window.toggleHaitangImmersive = function(forceState = null) {
+    const container = document.getElementById('sys-browser-view-haitang');
+    const topBar = document.querySelector('.sys-browser-top-bar');
+    const bottomBar = document.querySelector('.sys-browser-bottom-bar');
+    
+    let isImmersive = container.classList.contains('immersive-reading');
+    if (forceState !== null) {
+        isImmersive = !forceState;
+    }
+    
+    if (isImmersive) {
+        container.classList.remove('immersive-reading');
+        if(topBar) topBar.style.display = 'flex';
+        if(bottomBar) bottomBar.style.display = 'flex';
+        const menu = document.getElementById('htImmersiveMenu');
+        if (menu) menu.classList.remove('show');
+    } else {
+        container.classList.add('immersive-reading');
+        if(topBar) topBar.style.display = 'none';
+        if(bottomBar) bottomBar.style.display = 'none';
+        applyHtSettings();
+    }
+};
+
+let tempHtSettings = {}; // 用于存储预览状态
+
+window.handleHaitangReadingClick = function(event, bookId, chapterIndex) {
+    const container = document.getElementById('sys-browser-view-haitang');
+    if (!container.classList.contains('immersive-reading')) {
+        toggleHaitangImmersive(true);
+        return;
+    }
+    
+    const menu = document.getElementById('htImmersiveMenu');
+    // 如果菜单处于显示状态，点击屏幕任何地方（除了菜单本身）都会收回菜单并取消修改
+    if (menu && menu.classList.contains('show')) {
+        if (!event.target.closest('.ht-immersive-drawer') && !event.target.closest('.ht-immersive-header')) {
+            cancelHtSettings();
+        }
+        return;
+    }
+    
+    const content = document.querySelector('.ht-article-content');
+    const rect = content.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const width = rect.width;
+    
+    // 每次翻页的距离刚好是屏幕宽度
+    const scrollAmount = window.innerWidth; 
+    
+    if (x < width * 0.3) {
+        // 点击左侧 30%：上一页 (直接修改 scrollLeft 实现瞬间翻页)
+        if (content.scrollLeft > 0) {
+            content.scrollLeft -= scrollAmount;
+        } else {
+            // 已经是第一页，跳转上一章
+            if (chapterIndex > 0) {
+                sysBrowserRenderHaitang('chapter', bookId, chapterIndex - 1);
+                setTimeout(() => toggleHaitangImmersive(true), 50);
+            } else {
+                sysBrowserShowToast('已经是第一章了');
+            }
+        }
+    } else if (x > width * 0.7) {
+        // 点击右侧 30%：下一页
+        if (Math.ceil(content.scrollLeft + scrollAmount) < content.scrollWidth) {
+            content.scrollLeft += scrollAmount;
+        } else {
+            // 已经是最后一页，跳转下一章
+            // 修复报错：增加空值判断
+            const chaptersStr = ChatDB.getItem('haitang_book_' + bookId);
+            const chapters = chaptersStr ? JSON.parse(chaptersStr) : [];
+            if (chapters && chapters.length > 0 && chapterIndex < chapters.length - 1) {
+                sysBrowserRenderHaitang('chapter', bookId, chapterIndex + 1);
+                setTimeout(() => toggleHaitangImmersive(true), 50);
+            } else {
+                sysBrowserShowToast('已经是最后一章了');
+            }
+        }
+    } else {
+        // 点击中间 40%：呼出菜单
+        if (menu) {
+            tempHtSettings = JSON.parse(ChatDB.getItem('ht_reading_settings') || '{}');
+            menu.classList.add('show');
+        }
+    }
+};
+
+window.previewHtSetting = function(key, value, colorValue = null) {
+    if (key === 'fontFamily' && value === 'custom') {
+        const customRow = document.getElementById('htCustomFontRow');
+        if (customRow) customRow.style.display = 'flex';
+        return;
+    } else if (key === 'fontFamily') {
+        const customRow = document.getElementById('htCustomFontRow');
+        if (customRow) customRow.style.display = 'none';
+    }
+    
+    tempHtSettings[key] = value;
+    if (colorValue) tempHtSettings['fontColor'] = colorValue;
+    applyHtSettings(tempHtSettings);
+};
+
+window.previewCustomFontUrl = function(url) {
+    if (!url.trim()) return;
+    tempHtSettings['fontFamily'] = 'CustomReadingFont';
+    tempHtSettings['customFontUrl'] = url.trim();
+    applyHtSettings(tempHtSettings);
+};
+
+window.saveHtSettings = function() {
+    ChatDB.setItem('ht_reading_settings', JSON.stringify(tempHtSettings));
+    const menu = document.getElementById('htImmersiveMenu');
+    if (menu) menu.classList.remove('show');
+    applyHtSettings(); // 重新应用确保持久化
+    sysBrowserShowToast('设置已保存');
+};
+
+window.cancelHtSettings = function() {
+    const menu = document.getElementById('htImmersiveMenu');
+    if (menu) menu.classList.remove('show');
+    applyHtSettings(); // 不传参数，恢复读取 localStorage 的状态
+};
+
+window.applyHtSettings = function(settingsObj = null) {
+    const container = document.getElementById('sys-browser-view-haitang');
+    if (!container || !container.classList.contains('immersive-reading')) return;
+    
+    // 如果传入了 settingsObj，说明是预览状态；否则读取已保存的设置
+    let settings = settingsObj || JSON.parse(ChatDB.getItem('ht_reading_settings') || '{}');
+    
+    container.style.setProperty('--ht-bg-color', settings.bgColor || '#ffffff');
+    container.style.setProperty('--ht-font-color', settings.fontColor || '#111111');
+    container.style.setProperty('--ht-font-size', settings.fontSize || '18px');
+    
+    let fontFamily = settings.fontFamily || 'inherit';
+    
+    // 处理自定义字体加载
+    if (settings.fontFamily === 'CustomReadingFont' && settings.customFontUrl) {
+        let styleEl = document.getElementById('htCustomFontStyle');
+        if (!styleEl) {
+            styleEl = document.createElement('style');
+            styleEl.id = 'htCustomFontStyle';
+            document.head.appendChild(styleEl);
+        }
+        styleEl.innerHTML = `
+            @font-face {
+                font-family: 'CustomReadingFont';
+                src: url('${settings.customFontUrl}');
+            }
+        `;
+        fontFamily = "'CustomReadingFont', sans-serif";
+        
+        const customRow = document.getElementById('htCustomFontRow');
+        if (customRow) {
+            customRow.style.display = 'flex';
+            const input = document.getElementById('htCustomFontUrl');
+            if (input) input.value = settings.customFontUrl;
+        }
+        const fontSelect = document.querySelector('.ht-drawer-row select');
+        if (fontSelect) fontSelect.value = 'custom';
+        
+    } else {
+        const fontSelect = document.querySelector('.ht-drawer-row select');
+        if (fontSelect && settings.fontFamily) fontSelect.value = settings.fontFamily;
+        const customRow = document.getElementById('htCustomFontRow');
+        if (customRow) customRow.style.display = 'none';
+    }
+    
+    // 核心修复：动态注入 style 标签，使用 !important 强制覆盖主题 APP 的全局字体设置
+    let overrideStyle = document.getElementById('htFontOverrideStyle');
+    if (!overrideStyle) {
+        overrideStyle = document.createElement('style');
+        overrideStyle.id = 'htFontOverrideStyle';
+        document.head.appendChild(overrideStyle);
+    }
+    overrideStyle.innerHTML = `
+        #sys-browser-view-haitang.immersive-reading .ht-article-content,
+        #sys-browser-view-haitang.immersive-reading .ht-article-content * {
+            font-family: ${fontFamily} !important;
+        }
+    `;
+    
+    // 同步滑块的值
+    const fontSizeInput = document.querySelector('.ht-drawer-row input[type="range"]');
+    if (fontSizeInput && settings.fontSize) fontSizeInput.value = parseInt(settings.fontSize);
+};
+

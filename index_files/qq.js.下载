@@ -1,0 +1,4135 @@
+// ==========================================
+// QQ 联机大厅 APP 专属逻辑 (Supabase 云端重构版)
+// 包含：群聊、朋友圈、资料修改、聊天设置
+// ==========================================
+
+// 三图床自动切换上传引擎 (带跨域代理 + Base64终极兜底)
+async function uploadImageToUrl(file) {
+    if (typeof showToast === 'function') showToast('正在处理图片...', 'loading');
+    
+    // 尝试 1: img.scdn.io (使用 corsproxy.io 代理绕过本地跨域拦截)
+    try {
+        let fd1 = new FormData();
+        fd1.append('file', file);
+        let res1 = await fetch('https://corsproxy.io/?https://img.scdn.io/api/v1/upload', { 
+            method: 'POST', 
+            body: fd1,
+            headers: { 'Accept': 'application/json' }
+        });
+        let data1 = await res1.json();
+        if (data1 && data1.status && data1.data && data1.data.links && data1.data.links.url) {
+            if (typeof hideToast === 'function') hideToast();
+            return data1.data.links.url;
+        }
+    } catch (e) {
+        console.warn("img.scdn.io 代理上传失败...", e);
+    }
+
+    // 尝试 2: imgtp.com (使用 corsproxy.io 代理)
+    try {
+        let fd2 = new FormData();
+        fd2.append('image', file);
+        let res2 = await fetch('https://corsproxy.io/?https://www.imgtp.com/api/upload', { 
+            method: 'POST', 
+            body: fd2,
+            headers: { 'Accept': 'application/json' }
+        });
+        let data2 = await res2.json();
+        if (data2 && data2.code === 200 && data2.data && data2.data.url) {
+            if (typeof hideToast === 'function') hideToast();
+            return data2.data.url;
+        }
+    } catch (e) {
+        console.warn("imgtp 代理上传失败...", e);
+    }
+
+    // 尝试 3: ImgBB (原生支持跨域)
+    try {
+        let fd3 = new FormData();
+        fd3.append('image', file);
+        let res3 = await fetch('https://api.imgbb.com/1/upload?key=32db6a8711c014cb0f8f11b238260127', { method: 'POST', body: fd3 });
+        let data3 = await res3.json();
+        if (data3 && data3.success) {
+            if (typeof hideToast === 'function') hideToast();
+            return data3.data.url;
+        }
+    } catch (e) {
+        console.warn("ImgBB 上传失败...", e);
+    }
+
+    // 终极兜底：如果所有图床都因为网络或跨域失败，直接转为 Base64 本地存储！(保证100%能发图)
+    console.warn("所有图床均失败，启用 Base64 本地直存模式");
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            if (typeof hideToast === 'function') hideToast();
+            resolve(reader.result);
+        };
+        reader.onerror = () => {
+            if (typeof hideToast === 'function') hideToast();
+            reject(new Error("图片处理失败，请重试"));
+        };
+        reader.readAsDataURL(file);
+    });
+}
+
+
+// 自动将 Base64 头像转为 URL 的辅助函数
+async function ensureAvatarUrl(avatarStr) {
+    if (!avatarStr || !avatarStr.startsWith('data:image/')) return avatarStr;
+    try {
+        let res = await fetch(avatarStr);
+        let blob = await res.blob();
+        let url = await uploadImageToUrl(blob);
+        return url;
+    } catch (e) {
+        console.warn("Base64转URL失败", e);
+        return avatarStr;
+    }
+}
+
+// ==========================================
+// Supabase 核心实例与全局变量
+// ==========================================
+const QQ_SUPABASE_URL = 'https://bqkmrqmdfclmeaajnxed.supabase.co';
+const QQ_SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJxa21ycW1kZmNsbWVhYWpueGVkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNzk5NTYsImV4cCI6MjA5NDg1NTk1Nn0.Zc6EnxywCZr6VU3MCOrcEGa8s_6kJHiDZYVIQzO2ePo';
+
+// 初始化 Supabase 客户端
+const qqSupabase = window.supabase.createClient(QQ_SUPABASE_URL, QQ_SUPABASE_KEY);
+// 【关键修复】：删除 window.supabaseClient = qqSupabase; 防止被 auth.js 覆盖
+
+let qqMyOnlineId = null;
+let currentQQChatId = null;
+let isGroupChat = false; 
+let qqOnlineStatus = {}; // 记录好友真实的在线状态
+
+// Supabase 实时通道
+let supabasePresenceChannel = null;
+let supabaseBroadcastChannel = null;
+
+// 监听网页关闭，自动下线 (Supabase Presence 会自动处理，但保留以防万一)
+window.addEventListener('beforeunload', () => {
+    if (supabasePresenceChannel && qqMyOnlineId) {
+        supabasePresenceChannel.untrack();
+    }
+});
+
+// ==========================================
+// 核心通信引擎：Supabase Broadcast (替代 GoEasy)
+// ==========================================
+function publishSupabaseBroadcast(channel, payloadObj) {
+    if (!supabaseBroadcastChannel) return;
+    // Supabase Broadcast 限制为 1MB，远大于 GoEasy，无需压缩分片
+    supabaseBroadcastChannel.send({
+        type: 'broadcast',
+        event: channel,
+        payload: payloadObj
+    });
+}
+
+// 打开 QQ APP
+function openQQApp() {
+    document.getElementById('qqAppPanel').style.display = 'flex';
+    initQQPeer();
+    switchQQTab('messages', document.querySelector('.qq-nav-item.active'));
+    renderQQProfile();
+}
+
+// 关闭 QQ APP
+function closeQQApp() {
+    document.getElementById('qqAppPanel').style.display = 'none';
+}
+
+// 侧边栏切换
+function switchQQTab(pageId, element) {
+    document.querySelectorAll('.qq-nav-item').forEach(el => el.classList.remove('active'));
+    if (element) element.classList.add('active');
+    
+    document.querySelectorAll('.qq-page').forEach(el => el.classList.remove('active'));
+    document.getElementById('qq-page-' + pageId).classList.add('active');
+    
+    if (pageId === 'messages') renderQQMessageList();
+    if (pageId === 'contacts') renderQQContactList();
+    if (pageId === 'moments') renderQQMoments();
+    if (pageId === 'profile') renderQQProfile();
+}
+
+// ==========================================
+// 初始化 Supabase 引擎
+// ==========================================
+async function initQQPeer() {
+    if (supabasePresenceChannel) return; // 已初始化
+    
+    // 1. 获取或生成本地联机 ID
+    qqMyOnlineId = ChatDB.getItem('qq_online_id');
+    if (!qqMyOnlineId) {
+        qqMyOnlineId = Math.floor(100000 + Math.random() * 900000).toString();
+        ChatDB.setItem('qq_online_id', qqMyOnlineId);
+    }
+    
+    let el = document.getElementById('qqMyOnlineIdText');
+    if(el) el.innerText = '联机ID: ' + qqMyOnlineId;
+
+    // 2. 将当前用户注册/更新到云端数据库
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    try {
+        const { error } = await qqSupabase.from('qq_users').upsert({
+            id: String(qqMyOnlineId),
+            name: myProfile.name || '未命名',
+            avatar: myProfile.avatar || ''
+        });
+        if (error) {
+            console.warn("用户上云失败(可能未建表)，但不影响在线广播:", error.message);
+        } else {
+            console.log("Supabase 初始化成功，当前用户已上云:", qqMyOnlineId);
+        }
+    } catch (e) {
+        console.warn("用户上云异常:", e);
+    }
+
+    // 3. 开启在线状态感知 (Presence)
+    setupSupabasePresence();
+
+    // 4. 开启实时广播通道 (Broadcast - 用于游戏、邀请等瞬时指令)
+    setupSupabaseBroadcast();
+
+    // 5. 监听云端数据库变化 (Database Changes - 用于聊天和朋友圈)
+    setupSupabaseDBListeners();
+
+    // 6. 拉取云端公开朋友圈
+    syncCloudMoments();
+    
+    // 7. 全局拉取离线数据（好友请求、离线消息）
+    syncAllOfflineData();
+    
+    isInitializingQQ = false; // 初始化完成，释放锁
+}
+
+// 新增：全局拉取离线数据引擎
+async function syncAllOfflineData() {
+    try {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        let groupIds = friends.filter(f => f.isGroup).map(f => f.id);
+        
+        let query = supabaseClient.from('qq_messages').select('*');
+        if (groupIds.length > 0) {
+            let groupIdsStr = groupIds.map(id => `"${id}"`).join(',');
+            query = query.or(`receiver_id.eq.${qqMyOnlineId},group_id.in.(${groupIdsStr})`);
+        } else {
+            query = query.eq('receiver_id', qqMyOnlineId);
+        }
+        
+        const { data, error } = await query.order('created_at', { ascending: false }).limit(100);
+        if (data && data.length > 0) {
+            let changed = false;
+            // 修复：使用 for...of 替代 forEach，确保 await 按顺序执行，防止并发写入覆盖
+            for (let msg of data.reverse()) {
+                if (msg.msg_type === 'friend_request') {
+                    let profile = JSON.parse(msg.content);
+                    let requests = JSON.parse(ChatDB.getItem('qq_friend_requests') || '[]');
+                    // 修复：强制转换为字符串比对
+                    if (!requests.find(r => String(r.id) === String(msg.sender_id))) {
+                        requests.push({ id: String(msg.sender_id), name: profile.name, avatar: profile.avatar });
+                        ChatDB.setItem('qq_friend_requests', JSON.stringify(requests));
+                        document.getElementById('qqContactRedDot').style.display = 'block';
+                        changed = true;
+                    }
+                } else {
+                    await handleIncomingCloudMessage(msg, true);
+                }
+            }
+            if (changed) {
+                renderQQContactList();
+                renderQQMessageList();
+            }
+        }
+    } catch (e) {
+        console.warn("拉取离线数据失败", e);
+    }
+}
+
+function setupSupabasePresence() {
+    supabasePresenceChannel = qqSupabase.channel('qq_online_users');
+
+    supabasePresenceChannel.on('presence', { event: 'sync' }, () => {
+        const newState = supabasePresenceChannel.presenceState();
+        qqOnlineStatus = {};
+        for (const key in newState) {
+            const users = newState[key];
+            users.forEach(u => {
+                qqOnlineStatus[u.user_id] = true;
+            });
+        }
+        renderQQMessageList();
+        renderQQContactList();
+    });
+
+    supabasePresenceChannel.subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+            await supabasePresenceChannel.track({ user_id: qqMyOnlineId, online_at: new Date().toISOString() });
+        }
+    });
+}
+
+function setupSupabaseBroadcast() {
+    supabaseBroadcastChannel = qqSupabase.channel('qq_global_broadcast');
+
+    supabaseBroadcastChannel.on('broadcast', { event: '*' }, (payload) => {
+        const channel = payload.event;
+        const data = payload.payload;
+        
+        // 过滤：只处理发给我的、公共的、或者我所在的群聊/游戏的广播
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        let isMyGroup = friends.some(f => f.isGroup && channel === "group_" + f.id);
+
+        if (channel === "user_" + qqMyOnlineId || 
+            channel === "public_moments" || 
+            channel === "global_search" ||
+            isMyGroup ||
+            channel.startsWith("game_")) {
+            
+            handleQQOnlineData(data.senderId, data);
+        }
+    }).subscribe();
+}
+
+function setupSupabaseDBListeners() {
+    // 监听新消息
+    supabaseClient.channel('public:qq_messages')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'qq_messages' }, payload => {
+            const newMsg = payload.new;
+            if (newMsg.sender_id === qqMyOnlineId) return; // 防回音
+
+            // 如果是发给我的单聊，或者是群聊
+            if (newMsg.receiver_id === qqMyOnlineId || newMsg.group_id) {
+                handleIncomingCloudMessage(newMsg);
+            }
+        })
+        .subscribe();
+
+    // 监听朋友圈新动态
+    supabaseClient.channel('public:qq_moments')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'qq_moments' }, payload => {
+            const newMoment = payload.new;
+            if (newMoment.author_id === qqMyOnlineId) return;
+            handleIncomingCloudMoment(newMoment);
+        })
+        .subscribe();
+}
+
+// 处理云端推送来的新消息
+async function handleIncomingCloudMessage(newMsg, isOfflineSync = false) {
+    // 修复：强制将云端返回的 ID 转换为字符串，防止存入 localStorage 时键名不一致
+    let chatId = newMsg.group_id ? String(newMsg.group_id) : String(newMsg.sender_id);
+    
+    let senderName = "未知用户";
+    if (newMsg.group_id) {
+        const { data: userData } = await supabaseClient.from('qq_users').select('name').eq('id', newMsg.sender_id).single();
+        if (userData) senderName = userData.name;
+    }
+
+    let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${chatId}`) || '[]');
+    let displayContent = newMsg.group_id ? `${senderName}: ${newMsg.content}` : newMsg.content;
+    let msgTime = new Date(newMsg.created_at).getTime();
+    
+    // 去重检测：如果广播已经把这条消息加进去了，就不再重复添加
+    let exists = history.find(m => Math.abs(m.timestamp - msgTime) < 5000 && m.content === displayContent);
+    
+    if (!exists) {
+        // 角色反转：云端存的是真实发送者，对我来说是 'other'
+        history.push({ 
+            role: newMsg.msg_type === 'system' ? 'system' : 'other', 
+            content: displayContent, 
+            quote: newMsg.quote || '', 
+            timestamp: msgTime, 
+            senderName: senderName 
+        });
+        
+        ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${chatId}`, JSON.stringify(history));
+        incrementUnread(chatId); // 增加未读红点
+        
+        if (currentQQChatId === chatId && document.getElementById('qq-page-chat').classList.contains('show')) {
+            renderQQChatHistory();
+        } else if (!isOfflineSync) {
+            renderQQMessageList();
+        }
+    }
+}
+
+// 处理云端推送来的朋友圈
+async function handleIncomingCloudMoment(newMoment) {
+    // 如果不是公开的，且不是好友，则不显示
+    if (newMoment.visibility !== 'public') {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        if (!friends.find(f => f.id === newMoment.author_id)) return;
+    }
+
+    let moments = JSON.parse(ChatDB.getItem('qq_moments') || '[]');
+    if (!moments.find(m => m.id === newMoment.id)) {
+        let authorName = "未知用户";
+        let authorAvatar = "";
+        try {
+            const { data: userData } = await qqSupabase.from('qq_users').select('name, avatar').eq('id', newMoment.author_id).single();
+            if (userData) {
+                authorName = userData.name;
+                authorAvatar = userData.avatar;
+            }
+        } catch(e){}
+
+        let formattedMoment = {
+            id: newMoment.id,
+            authorId: newMoment.author_id,
+            name: authorName,
+            avatar: authorAvatar,
+            text: newMoment.content,
+            image: newMoment.image_url,
+            fileData: newMoment.file_url,
+            fileName: newMoment.file_url ? "附件" : null,
+            time: new Date(newMoment.created_at).getTime(),
+            visibility: newMoment.visibility,
+            likes: [],
+            comments: []
+        };
+        moments.unshift(formattedMoment);
+        moments.sort((a, b) => b.time - a.time);
+        if (moments.length > 200) moments = moments.slice(0, 200);
+        ChatDB.setItem('qq_moments', JSON.stringify(moments));
+        if (document.getElementById('qq-page-moments').classList.contains('active')) renderQQMoments();
+    }
+}
+
+// 新增：启动时同步云端公开朋友圈
+async function syncCloudMoments() {
+    try {
+        const { data, error } = await qqSupabase.from('qq_moments')
+            .select('*')
+            .order('created_at', { ascending: false })
+            .limit(50);
+        
+        if (data && data.length > 0) {
+            let moments = JSON.parse(ChatDB.getItem('qq_moments') || '[]');
+            let changed = false;
+            let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+            
+            for (let newMoment of data) {
+                // 修复：强制转换为字符串比对
+                if (newMoment.visibility !== 'public' && String(newMoment.author_id) !== String(qqMyOnlineId)) {
+                    if (!friends.find(f => String(f.id) === String(newMoment.author_id))) continue;
+                }
+                
+                // 修复：强制转换为字符串比对
+                if (!moments.find(m => String(m.id) === String(newMoment.id))) {
+                    let authorName = "未知用户";
+                    let authorAvatar = "";
+                    try {
+                        const { data: userData } = await qqSupabase.from('qq_users').select('name, avatar').eq('id', newMoment.author_id).single();
+                        if (userData) {
+                            authorName = userData.name;
+                            authorAvatar = userData.avatar;
+                        }
+                    } catch(e){}
+
+                    moments.push({
+                        id: String(newMoment.id),
+                        authorId: String(newMoment.author_id),
+                        name: authorName,
+                        avatar: authorAvatar,
+                        text: newMoment.content,
+                        image: newMoment.image_url,
+                        fileData: newMoment.file_url,
+                        fileName: newMoment.file_url ? "附件" : null,
+                        time: newMoment.created_at ? new Date(newMoment.created_at).getTime() : Date.now(), // 修复：防止 created_at 为空导致时间变成 NaN 无法排序显示
+                        visibility: newMoment.visibility,
+                        likes: [],
+                        comments: []
+                    });
+                    changed = true;
+                }
+            }
+            
+            if (changed) {
+                moments.sort((a, b) => b.time - a.time);
+                if (moments.length > 200) moments = moments.slice(0, 200);
+                ChatDB.setItem('qq_moments', JSON.stringify(moments));
+                if (document.getElementById('qq-page-moments').classList.contains('active')) {
+                    renderQQMoments();
+                }
+            }
+        }
+    } catch (e) {
+        console.warn("拉取云端朋友圈失败", e);
+    }
+}
+
+function addQQOnlineFriend(peerId, name, avatar = '', isGroup = false, members = []) {
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let existing = friends.find(f => f.id === peerId);
+    if (!existing) {
+        friends.push({ id: peerId, name: name, alias: '', avatar: avatar, isGroup: isGroup, members: members });
+        ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+    }
+}
+
+// 处理接收瞬时广播数据 (邀请、游戏、点赞等)
+function handleQQOnlineData(peerId, data) {
+    if (data.senderId === qqMyOnlineId) return;
+
+    if (data.type === 'moment_action') {
+        let moments = JSON.parse(ChatDB.getItem('qq_moments') || '[]');
+        let actionData = data.actionData;
+        let changed = false;
+        
+        if (actionData.action === 'delete') {
+            let len = moments.length;
+            moments = moments.filter(m => m.id !== actionData.momentId);
+            if (moments.length !== len) changed = true;
+        } else {
+            let moment = moments.find(m => m.id === actionData.momentId);
+            if (moment) {
+                if (actionData.action === 'like') {
+                    if (!moment.likes) moment.likes = [];
+                    if (actionData.isLike) {
+                        if (!moment.likes.find(l => l.id === actionData.user.id)) {
+                            moment.likes.push(actionData.user);
+                            changed = true;
+                        }
+                    } else {
+                        let idx = moment.likes.findIndex(l => l.id === actionData.user.id);
+                        if (idx > -1) {
+                            moment.likes.splice(idx, 1);
+                            changed = true;
+                        }
+                    }
+                } else if (actionData.action === 'comment') {
+                    if (!moment.comments) moment.comments = [];
+                    if (!moment.comments.find(c => c.id === actionData.comment.id)) {
+                        moment.comments.push(actionData.comment);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        
+        if (changed) {
+            ChatDB.setItem('qq_moments', JSON.stringify(moments));
+            if (document.getElementById('qq-page-moments').classList.contains('active')) renderQQMoments();
+        }
+    } else if (data.type === 'update_profile') {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        let friend = friends.find(f => f.id === peerId);
+        if (friend) {
+            friend.name = data.profile.name;
+            friend.avatar = data.profile.avatar;
+            ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+            renderQQMessageList();
+            renderQQContactList();
+            if (currentQQChatId === peerId) {
+                document.getElementById('qqChatTitle').innerText = friend.alias || friend.name;
+                renderQQChatHistory();
+            }
+        }
+    } else if (data.type === 'friend_request') {
+        let requests = JSON.parse(ChatDB.getItem('qq_friend_requests') || '[]');
+        if (!requests.find(r => r.id === peerId)) {
+            requests.push({ id: peerId, name: data.profile.name, avatar: data.profile.avatar });
+            ChatDB.setItem('qq_friend_requests', JSON.stringify(requests));
+            document.getElementById('qqContactRedDot').style.display = 'block';
+            if (document.getElementById('qq-page-contacts').classList.contains('active')) {
+                renderQQContactList();
+            }
+        }
+    } else if (data.type === 'friend_accept') {
+        addQQOnlineFriend(peerId, data.profile.name, data.profile.avatar);
+        alert(`${data.profile.name} 已同意你的好友请求！`);
+        renderQQContactList();
+        renderQQMessageList();
+    } else if (data.type === 'group_join_apply') {
+        let requests = JSON.parse(ChatDB.getItem('qq_group_requests') || '[]');
+        if (!requests.find(r => r.userId === peerId && r.groupId === data.groupId)) {
+            requests.push({ 
+                userId: peerId, 
+                name: data.profile.name, 
+                avatar: data.profile.avatar, 
+                groupId: data.groupId, 
+                groupName: data.groupName 
+            });
+            ChatDB.setItem('qq_group_requests', JSON.stringify(requests));
+            document.getElementById('qqContactRedDot').style.display = 'block';
+            if (document.getElementById('qq-page-contacts').classList.contains('active')) {
+                renderQQContactList();
+            }
+        }
+    } else if (data.type === 'group_join_approved') {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        if (!friends.find(f => f.id === data.group.id)) {
+            friends.push(data.group);
+            ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+        }
+        alert(`管理员已同意你加入群聊: ${data.group.name}`);
+        renderQQMessageList();
+        renderQQContactList();
+    } else if (data.type === 'group_invite') {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        if (!friends.find(f => f.id === data.groupId)) {
+            friends.push({
+                id: data.groupId, name: data.groupName, alias: '', avatar: '', isGroup: true,
+                members: data.members, ownerId: data.ownerId, adminIds: data.adminIds || [], chars: data.chars || []
+            });
+            ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+        }
+        renderQQMessageList();
+        renderQQContactList();
+    } else if (data.type === 'update_group_info') {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        let group = friends.find(f => f.id === data.groupId);
+        if (group) {
+            if (data.groupName) group.name = data.groupName;
+            if (data.avatar) group.avatar = data.avatar;
+            if (data.members) group.members = data.members;
+            if (data.adminIds) group.adminIds = data.adminIds;
+            if (data.chars) group.chars = data.chars;
+            ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+            
+            renderQQMessageList();
+            renderQQContactList();
+            
+            if (currentQQChatId === data.groupId) {
+                document.getElementById('qqChatTitle').innerText = group.name;
+                if (document.getElementById('qqChatSettingsPanel').style.display === 'flex') {
+                    document.getElementById('qqGroupNameDisplay').innerText = group.name;
+                    if (data.avatar) {
+                        document.getElementById('qqGroupAvatarPreview').style.backgroundImage = `url(${data.avatar})`;
+                        document.getElementById('qqGroupAvatarPreview').innerText = '';
+                    }
+                    renderQQGroupMembers(group);
+                }
+            }
+        }
+    } else if (data.type === 'group_kick') {
+        if (data.kickedId === qqMyOnlineId) {
+            let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+            friends = friends.filter(f => f.id !== data.groupId);
+            ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+            ChatDB.removeItem(`qq_online_chat_${qqMyOnlineId}_${data.groupId}`);
+            
+            if (currentQQChatId === data.groupId) closeQQChat();
+            renderQQMessageList();
+            renderQQContactList();
+            alert(`您已被移出群聊: ${data.groupName}`);
+        }
+    } else if (data.type === 'gomoku_join_req') {
+        if (gomokuCurrentGameId === data.gameId && gomokuHostId === qqMyOnlineId) {
+            if (!gomokuPlayerWhite) {
+                gomokuPlayerWhite = data.peerId;
+                publishSupabaseBroadcast("user_" + data.peerId, { 
+                    senderId: qqMyOnlineId, 
+                    type: 'gomoku_join_res', 
+                    role: 2, 
+                    gameId: data.gameId, 
+                    blackId: gomokuPlayerBlack, 
+                    whiteId: gomokuPlayerWhite 
+                });
+                broadcastQQGroupGomoku({ type: 'gomoku_update_players', gameId: data.gameId, blackId: gomokuPlayerBlack, whiteId: gomokuPlayerWhite });
+                updateGomokuLoadingUI();
+            } else {
+                if (!gomokuSpectators.includes(data.peerId)) gomokuSpectators.push(data.peerId);
+                publishSupabaseBroadcast("user_" + data.peerId, { 
+                    senderId: qqMyOnlineId, 
+                    type: 'gomoku_join_res', 
+                    role: 3, 
+                    gameId: data.gameId, 
+                    blackId: gomokuPlayerBlack, 
+                    whiteId: gomokuPlayerWhite, 
+                    board: gomokuBoard, 
+                    currentTurn: gomokuCurrentTurn 
+                });
+            }
+        }
+    } else if (data.type === 'gomoku_join_res') {
+        if (gomokuCurrentGameId === data.gameId) {
+            gomokuPlayerBlack = data.blackId;
+            gomokuPlayerWhite = data.whiteId;
+            if (data.role === 2) {
+                openGomokuLoading(2);
+            } else if (data.role === 3) {
+                gomokuMyColor = 3; 
+                gomokuBoard = data.board || Array(15).fill(0).map(() => Array(15).fill(0));
+                gomokuCurrentTurn = data.currentTurn || 1;
+                document.getElementById('gomokuLoadingPanel').style.display = 'none';
+                openGomokuGame(3);
+                document.getElementById('gomokuStatusText').innerText = '观战中...';
+                document.getElementById('gomokuStatusText').style.color = '#888';
+                alert("你已作为观战者加入游戏");
+            }
+        }
+    } else if (data.type === 'gomoku_update_players') {
+        if (gomokuCurrentGameId === data.gameId) {
+            gomokuPlayerBlack = data.blackId;
+            gomokuPlayerWhite = data.whiteId;
+            updateGomokuLoadingUI();
+        }
+    } else if (data.type === 'gomoku_move') {
+        if (document.getElementById('gomokuPanel').style.display === 'flex') {
+            receiveGomokuMove(data.r, data.c, data.color);
+        }
+    } else if (data.type === 'gomoku_restart') {
+        if (document.getElementById('gomokuPanel').style.display === 'flex') {
+            alert('对方重新开始了游戏！');
+            initGomokuGame(gomokuMyColor === 1 ? 2 : 1); 
+        }
+    } else if (data.type === 'gomoku_effect') {
+        if (document.getElementById('gomokuPanel').style.display === 'flex') {
+            showGomokuEffect(data.emoji);
+        }
+    } else if (data.type === 'gomoku_ready') {
+        if (data.gameId === gomokuCurrentGameId) {
+            if (data.peerId === gomokuPlayerWhite) {
+                gomokuOppReady = true;
+                if (gomokuMyColor === 1) {
+                    document.getElementById('gomokuLoadOppStatus').innerText = '已准备';
+                    document.getElementById('gomokuLoadOppStatus').style.color = '#34c759';
+                }
+            } else if (data.peerId === gomokuPlayerBlack) {
+                gomokuOppReady = true;
+                if (gomokuMyColor === 2) {
+                    document.getElementById('gomokuLoadMyStatus').innerText = '已准备';
+                    document.getElementById('gomokuLoadMyStatus').style.color = '#34c759';
+                }
+            }
+            checkGomokuStart();
+        }
+    } else if (data.type === 'gomoku_danmu') {
+        if (document.getElementById('gomokuPanel').style.display === 'flex') {
+            showGomokuDanmu(data.senderName, data.text);
+        }
+    } else if (data.type === 'search_req') {
+        if (data.searchType === 'friend' && data.keyword === qqMyOnlineId) {
+            let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+            publishSupabaseBroadcast("user_" + data.senderId, {
+                senderId: qqMyOnlineId,
+                type: 'search_res',
+                searchType: 'friend',
+                resultData: { id: qqMyOnlineId, name: myProfile.name, avatar: myProfile.avatar }
+            });
+        } else if (data.searchType === 'group') {
+            let allPublicGroups = JSON.parse(ChatDB.getItem('qq_all_public_groups') || '[]');
+            let foundGroup = allPublicGroups.find(g => g.groupNumber === data.keyword || g.id === data.keyword);
+            if (foundGroup) {
+                publishSupabaseBroadcast("user_" + data.senderId, {
+                    senderId: qqMyOnlineId,
+                    type: 'search_res',
+                    searchType: 'group',
+                    resultData: foundGroup
+                });
+            }
+        }
+    } else if (data.type === 'search_res') {
+        if (typeof hideToast === 'function') hideToast();
+        if (window.searchTimeout) clearTimeout(window.searchTimeout);
+        showQQSearchResultModal(data.resultData, data.searchType);
+    } else if (data.type === 'chat') {
+        // 处理单聊 P2P 消息
+        let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${data.senderId}`) || '[]');
+        // 去重检测
+        if (!history.find(m => m.timestamp === data.timestamp && m.content === data.content)) {
+            history.push({
+                role: 'other',
+                content: data.content,
+                quote: data.quote || '',
+                timestamp: data.timestamp || Date.now(),
+                senderName: data.senderName || '',
+                senderId: data.charId || data.senderId
+            });
+            ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${data.senderId}`, JSON.stringify(history));
+            incrementUnread(data.senderId); // 增加未读红点
+            
+            if (currentQQChatId === data.senderId && document.getElementById('qq-page-chat').classList.contains('show')) {
+                renderQQChatHistory();
+            } else {
+                renderQQMessageList();
+            }
+        }
+    } else if (data.type === 'group_chat') {
+        // 处理群聊 P2P 消息
+        let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${data.groupId}`) || '[]');
+        // 去重检测
+        if (!history.find(m => m.timestamp === data.timestamp && m.content === data.content)) {
+            let displayContent = data.senderName ? `${data.senderName}: ${data.content}` : data.content;
+            // 如果内容已经包含了名字前缀，就不再重复添加
+            if (data.content.startsWith(data.senderName + ':') || data.content.startsWith(data.senderName + '：')) {
+                displayContent = data.content;
+            }
+            
+            history.push({
+                role: 'other',
+                content: displayContent,
+                quote: data.quote || '',
+                timestamp: data.timestamp || Date.now(),
+                senderName: data.senderName || '',
+                senderId: data.charId || data.senderId
+            });
+            ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${data.groupId}`, JSON.stringify(history));
+            incrementUnread(data.groupId); // 增加未读红点
+            
+            if (currentQQChatId === data.groupId && document.getElementById('qq-page-chat').classList.contains('show')) {
+                renderQQChatHistory();
+            } else {
+                renderQQMessageList();
+            }
+        }
+    } else if (data.type === 'new_moment') {
+        let newMoment = data.moment;
+        if (newMoment.visibility !== 'public') {
+            let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+            if (!friends.find(f => f.id === newMoment.authorId)) return;
+        }
+        let moments = JSON.parse(ChatDB.getItem('qq_moments') || '[]');
+        if (!moments.find(m => m.id === newMoment.id)) {
+            moments.unshift(newMoment);
+            moments.sort((a, b) => b.time - a.time);
+            if (moments.length > 200) moments = moments.slice(0, 200);
+            ChatDB.setItem('qq_moments', JSON.stringify(moments));
+            if (document.getElementById('qq-page-moments').classList.contains('active')) renderQQMoments();
+        }
+    }
+}
+
+// 监听搜索框输入，显示下拉菜单
+window.handleQQSearchInput = function() {
+    const keyword = document.getElementById('qqSearchInput').value.trim();
+    const dropdown = document.getElementById('qqSearchDropdown');
+    if (keyword) {
+        document.getElementById('qqSearchDropdownTextFriend').innerText = keyword;
+        document.getElementById('qqSearchDropdownTextGroup').innerText = keyword;
+        dropdown.style.display = 'block';
+    } else {
+        dropdown.style.display = 'none';
+    }
+};
+
+// 执行搜索并唤起韩系弹窗
+window.executeQQSearch = async function(type) {
+    const keyword = document.getElementById('qqSearchInput').value.trim();
+    document.getElementById('qqSearchDropdown').style.display = 'none';
+    document.getElementById('qqSearchInput').value = '';
+    
+    if (!keyword || keyword === qqMyOnlineId) return;
+
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+
+    if (type === 'group') {
+        let allPublicGroups = JSON.parse(ChatDB.getItem('qq_all_public_groups') || '[]');
+        let foundGroup = allPublicGroups.find(g => g.groupNumber === keyword || g.id === keyword);
+        
+        if (foundGroup) {
+            if (friends.find(f => f.id === foundGroup.id)) {
+                alert("你已经在该群聊中了");
+                return;
+            }
+            showQQSearchResultModal(foundGroup, 'group');
+            return;
+        }
+    } else {
+        if (friends.find(f => f.id === keyword)) {
+            alert("对方已经是你的好友了");
+            return;
+        }
+    }
+
+    // 如果本地没找到，尝试数据库查询 + 广播查询双管齐下
+    if (typeof showToast === 'function') showToast('正在全网搜索...', 'loading');
+    
+    let foundInDb = false;
+    if (type === 'friend') {
+        try {
+            const { data: userData, error } = await qqSupabase.from('qq_users').select('*').eq('id', keyword).single();
+            if (userData) {
+                if (typeof hideToast === 'function') hideToast();
+                showQQSearchResultModal(userData, 'friend');
+                foundInDb = true;
+                return;
+            }
+        } catch (e) {
+            console.warn("数据库查询失败，尝试广播查询...");
+        }
+    } else if (type === 'group') {
+        try {
+            // 新增：查询云端群聊数据库 (支持群号或群ID搜索)
+            const { data: groupData, error } = await qqSupabase.from('qq_groups').select('*').or(`groupNumber.eq.${keyword},id.eq.${keyword}`).single();
+            if (groupData) {
+                if (typeof hideToast === 'function') hideToast();
+                // 组装成前端需要的格式
+                let formattedGroup = {
+                    id: groupData.id,
+                    groupNumber: groupData.groupNumber,
+                    name: groupData.name,
+                    avatar: groupData.avatar,
+                    ownerId: groupData.ownerId,
+                    isGroup: true
+                };
+                showQQSearchResultModal(formattedGroup, 'group');
+                foundInDb = true;
+                return;
+            }
+        } catch (e) {
+            console.warn("数据库查询群聊失败，尝试广播查询...");
+        }
+    }
+
+    if (!foundInDb) {
+        // 发送全局广播寻找 (P2P 搜索，无需建表)
+        publishSupabaseBroadcast("global_search", {
+            senderId: qqMyOnlineId,
+            type: 'search_req',
+            searchType: type,
+            keyword: keyword
+        });
+
+        // 设置超时
+        window.searchTimeout = setTimeout(() => {
+            if (typeof hideToast === 'function') hideToast();
+            alert(type === 'group' ? '未找到该群聊，请检查群号是否正确，或确保群主在线' : '未找到该用户，请检查联机ID是否正确，或确保对方在线');
+        }, 3000);
+    }
+};
+
+let currentQQSearchTarget = null;
+
+window.showQQSearchResultModal = function(data, type) {
+    currentQQSearchTarget = { data, type };
+    
+    const avatarEl = document.getElementById('qqSearchResAvatar');
+    const nameEl = document.getElementById('qqSearchResName');
+    const idEl = document.getElementById('qqSearchResId');
+    const btnEl = document.getElementById('qqSearchResBtn');
+
+    if (data.avatar) {
+        avatarEl.style.backgroundImage = `url('${data.avatar}')`;
+        avatarEl.innerText = '';
+    } else {
+        avatarEl.style.backgroundImage = 'none';
+        avatarEl.innerText = type === 'group' ? '群' : data.name.charAt(0);
+        avatarEl.style.backgroundColor = type === 'group' ? '#f4f4f4' : '#111';
+        avatarEl.style.color = type === 'group' ? '#111' : '#fff';
+    }
+
+    nameEl.innerText = data.name;
+    idEl.innerText = type === 'group' ? `群号: ${data.groupNumber || data.id}` : `联机ID: ${data.id}`;
+    
+    if (type === 'group') {
+        btnEl.innerText = '申请加入群聊';
+        btnEl.onclick = sendQQGroupRequestFromModal;
+    } else {
+        btnEl.innerText = '申请加为好友';
+        btnEl.onclick = sendQQFriendRequestFromModal;
+    }
+
+    document.getElementById('qqSearchResultModalOverlay').classList.add('show');
+};
+
+window.closeQQSearchResultModal = function() {
+    document.getElementById('qqSearchResultModalOverlay').classList.remove('show');
+    currentQQSearchTarget = null;
+};
+
+window.sendQQFriendRequestFromModal = async function() {
+    if (!currentQQSearchTarget) return;
+    
+    let targetId = currentQQSearchTarget.data.id;
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    
+    if (myProfile.avatar && myProfile.avatar.startsWith('data:image/')) {
+        myProfile.avatar = await ensureAvatarUrl(myProfile.avatar);
+        ChatDB.setItem('qq_my_profile', JSON.stringify(myProfile));
+    }
+
+    // 1. 在线广播
+    publishSupabaseBroadcast("user_" + targetId, {
+        senderId: qqMyOnlineId,
+        type: 'friend_request',
+        profile: myProfile
+    });
+
+    // 2. 离线数据库存储 (保证对方离线也能收到)
+    try {
+        await supabaseClient.from('qq_messages').insert({
+            sender_id: qqMyOnlineId,
+            receiver_id: targetId,
+            content: JSON.stringify(myProfile),
+            msg_type: 'friend_request'
+        });
+    } catch(e) {}
+    
+    alert("已发送好友请求");
+    closeQQSearchResultModal();
+};
+
+window.sendQQGroupRequestFromModal = async function() {
+    if (!currentQQSearchTarget) return;
+    
+    let foundGroup = currentQQSearchTarget.data;
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    
+    if (myProfile.avatar && myProfile.avatar.startsWith('data:image/')) {
+        myProfile.avatar = await ensureAvatarUrl(myProfile.avatar);
+        ChatDB.setItem('qq_my_profile', JSON.stringify(myProfile));
+    }
+
+    publishSupabaseBroadcast("user_" + foundGroup.ownerId, {
+        senderId: qqMyOnlineId,
+        type: 'group_join_apply',
+        groupId: foundGroup.id,
+        groupName: foundGroup.name,
+        profile: myProfile
+    });
+    
+    alert(`已向群聊 [${foundGroup.name}] 发送加群申请，等待管理员同意`);
+    closeQQSearchResultModal();
+};
+
+// 处理好友请求
+async function acceptQQFriendRequest(peerId) {
+    let requests = JSON.parse(ChatDB.getItem('qq_friend_requests') || '[]');
+    let req = requests.find(r => r.id === peerId);
+    if (!req) return;
+
+    addQQOnlineFriend(peerId, req.name, req.avatar);
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    
+    if (myProfile.avatar && myProfile.avatar.startsWith('data:image/')) {
+        myProfile.avatar = await ensureAvatarUrl(myProfile.avatar);
+        ChatDB.setItem('qq_my_profile', JSON.stringify(myProfile));
+    }
+    
+    publishSupabaseBroadcast("user_" + peerId, {
+        senderId: qqMyOnlineId,
+        type: 'friend_accept',
+        profile: myProfile
+    });
+    removeQQFriendRequest(peerId);
+}
+
+function rejectQQFriendRequest(peerId) {
+    removeQQFriendRequest(peerId);
+}
+
+// 同意加群申请
+function acceptQQGroupRequest(userId, groupId) {
+    let requests = JSON.parse(ChatDB.getItem('qq_group_requests') || '[]');
+    let req = requests.find(r => r.userId === userId && r.groupId === groupId);
+    if (!req) return;
+    
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let group = friends.find(f => f.id === groupId);
+    
+    if (group) {
+        if (!group.members.includes(userId)) {
+            group.members.push(userId);
+        }
+        ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+        
+        let allPublicGroups = JSON.parse(ChatDB.getItem('qq_all_public_groups') || '[]');
+        let pubGroupIndex = allPublicGroups.findIndex(g => g.id === groupId);
+        if (pubGroupIndex > -1) {
+            allPublicGroups[pubGroupIndex] = group;
+            ChatDB.setItem('qq_all_public_groups', JSON.stringify(allPublicGroups));
+        }
+        
+        publishSupabaseBroadcast("user_" + userId, {
+            senderId: qqMyOnlineId,
+            type: 'group_join_approved',
+            group: group
+        });
+        
+        broadcastQQGroupUpdate(groupId, { members: group.members });
+        sendQQSystemMessage(groupId, `${req.name} 通过搜索群号加入了群聊`);
+    }
+    
+    rejectQQGroupRequest(userId, groupId);
+}
+
+// 拒绝加群申请
+function rejectQQGroupRequest(userId, groupId) {
+    let requests = JSON.parse(ChatDB.getItem('qq_group_requests') || '[]');
+    requests = requests.filter(r => !(r.userId === userId && r.groupId === groupId));
+    ChatDB.setItem('qq_group_requests', JSON.stringify(requests));
+    
+    if (requests.length === 0 && JSON.parse(ChatDB.getItem('qq_friend_requests') || '[]').length === 0) {
+        document.getElementById('qqContactRedDot').style.display = 'none';
+    }
+    renderQQContactList();
+}
+
+function removeQQFriendRequest(peerId) {
+    let requests = JSON.parse(ChatDB.getItem('qq_friend_requests') || '[]');
+    requests = requests.filter(r => r.id !== peerId);
+    ChatDB.setItem('qq_friend_requests', JSON.stringify(requests));
+    if (requests.length === 0) document.getElementById('qqContactRedDot').style.display = 'none';
+    renderQQContactList();
+}
+
+// 创建群聊弹窗逻辑
+let tempQQGroupMembers = [];
+
+function createQQGroup() {
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]').filter(f => !f.isGroup);
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]'); 
+    
+    let allInvitees = [...friends];
+    chars.forEach(c => {
+        if (!allInvitees.find(f => f.id === c.id)) {
+            allInvitees.push({
+                id: c.id,
+                name: c.name,
+                alias: c.netName || c.name,
+                avatar: c.avatarUrl || '',
+                isChar: true 
+            });
+        }
+    });
+
+    if (allInvitees.length === 0) return alert('没有可邀请的好友或角色');
+    
+    tempQQGroupMembers = [];
+    document.getElementById('qqGroupNameInput').value = '';
+    const listEl = document.getElementById('qqGroupContactList');
+    listEl.innerHTML = '';
+    
+    allInvitees.forEach(f => {
+        const item = document.createElement('label');
+        item.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 10px; background: #f9f9f9; border-radius: 10px; cursor: pointer;';
+        const typeTag = f.isChar ? '<span style="font-size:10px; background:#eee; color:#888; padding:2px 4px; border-radius:4px; margin-left:4px;">角色</span>' : '';
+        item.innerHTML = `
+            <input type="checkbox" value="${f.id}" style="width: 18px; height: 18px; accent-color: #111;" onchange="toggleQQGroupMember('${f.id}', this.checked)">
+            <div style="width: 36px; height: 36px; border-radius: 8px; background-image: url('${f.avatar || ''}'); background-size: cover; background-color: #eee;"></div>
+            <div style="font-size: 14px; font-weight: bold; color: #333; flex: 1;">${f.alias || f.name}${typeTag}</div>
+        `;
+        listEl.appendChild(item);
+    });
+    
+    document.getElementById('qqCreateGroupModalOverlay').classList.add('show');
+}
+
+function closeQQCreateGroupModal() {
+    document.getElementById('qqCreateGroupModalOverlay').classList.remove('show');
+}
+
+function toggleQQGroupMember(id, isChecked) {
+    if (isChecked) {
+        if (!tempQQGroupMembers.includes(id)) tempQQGroupMembers.push(id);
+    } else {
+        tempQQGroupMembers = tempQQGroupMembers.filter(m => m !== id);
+    }
+}
+
+async function confirmCreateQQGroup() {
+    const groupName = document.getElementById('qqGroupNameInput').value.trim() || '未命名群聊';
+    if (tempQQGroupMembers.length === 0) return alert('请至少选择一个好友！');
+    
+    if (typeof showToast === 'function') showToast('正在处理角色数据...', 'loading');
+
+    let realMembers = [qqMyOnlineId];
+    let groupChars = [];
+    
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let localChars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    
+    for (let id of tempQQGroupMembers) {
+        let isReal = friends.find(f => f.id === id);
+        if (isReal) {
+            realMembers.push(id);
+        } else {
+            let charObj = localChars.find(c => c.id === id);
+            if (charObj) {
+                let avatarToSave = charObj.avatarUrl || '';
+                if (avatarToSave.startsWith('data:image/')) {
+                    avatarToSave = await ensureAvatarUrl(avatarToSave);
+                    let cIndex = localChars.findIndex(c => c.id === charObj.id);
+                    if (cIndex > -1) {
+                        localChars[cIndex].avatarUrl = avatarToSave;
+                        ChatDB.setItem('chat_chars', JSON.stringify(localChars));
+                    }
+                }
+                groupChars.push({
+                    charId: charObj.id,
+                    inviterId: qqMyOnlineId,
+                    name: charObj.name,
+                    avatar: avatarToSave
+                });
+            }
+        }
+    }
+    
+    let groupId = 'group_' + Date.now();
+    let groupNumber = Math.floor(10000000 + Math.random() * 90000000).toString();
+    
+    let groupObj = {
+        id: groupId,
+        groupNumber: groupNumber,
+        name: groupName,
+        alias: '',
+        avatar: '',
+        isGroup: true,
+        members: realMembers,
+        ownerId: qqMyOnlineId,
+        adminIds: [],
+        chars: groupChars 
+    };
+    friends.push(groupObj);
+    ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+    
+    let allPublicGroups = JSON.parse(ChatDB.getItem('qq_all_public_groups') || '[]');
+    allPublicGroups.push(groupObj);
+    ChatDB.setItem('qq_all_public_groups', JSON.stringify(allPublicGroups));
+
+    realMembers.forEach(memberId => {
+        if (memberId === qqMyOnlineId) return;
+        publishSupabaseBroadcast("user_" + memberId, {
+            senderId: qqMyOnlineId,
+            type: 'group_invite', 
+            groupId: groupId, 
+            groupName: groupName, 
+            members: realMembers,
+            ownerId: qqMyOnlineId,
+            adminIds: [],
+            chars: groupChars
+        });
+    });
+    
+    if (typeof hideToast === 'function') hideToast(); 
+    alert('群聊创建成功！');
+    closeQQCreateGroupModal();
+    renderQQMessageList();
+    renderQQContactList();
+}
+
+// Tab 状态变量
+let currentQQMsgTab = 'all';
+let currentQQContactTab = 'friend';
+
+window.switchQQMsgTab = function(tab, el) {
+    currentQQMsgTab = tab;
+    let tabs = el.parentElement.querySelectorAll('.qq-sub-tab');
+    tabs.forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    renderQQMessageList();
+}
+
+window.switchQQContactTab = function(tab, el) {
+    currentQQContactTab = tab;
+    if (el) {
+        let tabs = el.parentElement.querySelectorAll('.qq-sub-tab');
+        tabs.forEach(t => t.classList.remove('active'));
+        el.classList.add('active');
+    }
+    renderQQContactList();
+}
+
+// 渲染联系人列表
+function renderQQContactList() {
+    const reqListEl = document.getElementById('qqNewFriendList');
+    const reqTitleEl = document.getElementById('qqNewFriendTitle');
+    let requests = JSON.parse(ChatDB.getItem('qq_friend_requests') || '[]');
+    let groupRequests = JSON.parse(ChatDB.getItem('qq_group_requests') || '[]');
+    
+    if (reqListEl && reqTitleEl) {
+        reqListEl.innerHTML = '';
+        if (requests.length > 0 || groupRequests.length > 0) {
+            reqTitleEl.style.display = 'block';
+            const redDot = document.getElementById('qqContactRedDot');
+            if(redDot) redDot.style.display = 'block';
+            
+            const reqContainer = document.createElement('div');
+            reqContainer.className = 'qq-chat-list-container';
+            
+            requests.forEach(r => {
+                const item = document.createElement('div');
+                item.className = 'qq-chat-card';
+                item.style.cursor = 'default';
+                item.innerHTML = `
+                    <div class="qq-chat-avatar-wrap"><div class="qq-chat-avatar" style="background-image: url('${r.avatar || ''}'); background-color: #555;">${r.avatar ? '' : r.name.charAt(0)}</div></div>
+                    <div class="qq-chat-info">
+                        <div class="qq-chat-name-row" style="margin-bottom: 0;"><span class="qq-chat-name">${r.name}</span></div>
+                        <div class="qq-chat-preview-row" style="margin-top: 4px;"><span class="qq-chat-preview">请求添加你为好友</span></div>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <div onclick="acceptQQFriendRequest('${r.id}')" style="background: #111; color: #fff; padding: 6px 12px; border-radius: 12px; font-size: 12px; font-weight: bold; cursor: pointer;">同意</div>
+                        <div onclick="rejectQQFriendRequest('${r.id}')" style="background: #f4f4f4; color: #333; padding: 6px 12px; border-radius: 12px; font-size: 12px; font-weight: bold; cursor: pointer;">拒绝</div>
+                    </div>
+                `;
+                reqContainer.appendChild(item);
+            });
+
+            groupRequests.forEach(r => {
+                const item = document.createElement('div');
+                item.className = 'qq-chat-card';
+                item.style.cursor = 'default';
+                item.innerHTML = `
+                    <div class="qq-chat-avatar-wrap"><div class="qq-chat-avatar" style="background-image: url('${r.avatar || ''}'); background-color: #007aff;">${r.avatar ? '' : r.name.charAt(0)}</div></div>
+                    <div class="qq-chat-info">
+                        <div class="qq-chat-name-row" style="margin-bottom: 0;"><span class="qq-chat-name">${r.name}</span></div>
+                        <div class="qq-chat-preview-row" style="margin-top: 4px;"><span class="qq-chat-preview">申请加入群聊: ${r.groupName}</span></div>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <div onclick="acceptQQGroupRequest('${r.userId}', '${r.groupId}')" style="background: #111; color: #fff; padding: 6px 12px; border-radius: 12px; font-size: 12px; font-weight: bold; cursor: pointer;">同意</div>
+                        <div onclick="rejectQQGroupRequest('${r.userId}', '${r.groupId}')" style="background: #f4f4f4; color: #333; padding: 6px 12px; border-radius: 12px; font-size: 12px; font-weight: bold; cursor: pointer;">拒绝</div>
+                    </div>
+                `;
+                reqContainer.appendChild(item);
+            });
+
+            reqListEl.appendChild(reqContainer);
+        } else {
+            reqTitleEl.style.display = 'none';
+            const redDot = document.getElementById('qqContactRedDot');
+            if(redDot) redDot.style.display = 'none';
+        }
+    }
+
+    const listEl = document.getElementById('qqContactList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let groups = JSON.parse(ChatDB.getItem('qq_friend_groups') || '["默认分组"]');
+    
+    let filteredFriends = friends.filter(f => currentQQContactTab === 'group' ? f.isGroup : !f.isGroup);
+
+    if (filteredFriends.length === 0 && currentQQContactTab === 'group') {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 12px; padding: 20px;">暂无联机群聊</div>';
+        listEl.style.background = 'transparent';
+        listEl.style.boxShadow = 'none';
+        return;
+    }
+
+    listEl.style.background = 'transparent';
+    listEl.style.boxShadow = 'none';
+
+    if (currentQQContactTab === 'friend') {
+        groups.forEach(g => {
+            let groupFriends = filteredFriends.filter(f => (f.group || '默认分组') === g);
+            
+            let groupHeader = document.createElement('div');
+            groupHeader.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 10px 15px; font-size: 14px; font-weight: bold; color: #888; cursor: pointer;';
+            
+            let addBtnHtml = g === '默认分组' ? `<span onclick="addQQFriendGroup(event)" style="color: #007aff; cursor: pointer; font-size: 12px; margin-left: 10px;">+Add</span>` : '';
+            
+            groupHeader.innerHTML = `<div style="display: flex; align-items: center; gap: 6px;"><svg class="qq-group-arrow" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" style="transition: transform 0.2s; transform: rotate(90deg);"><polyline points="9 18 15 12 9 6"></polyline></svg><span>${g} (${groupFriends.length})</span></div><div>${addBtnHtml}</div>`;
+            listEl.appendChild(groupHeader);
+
+            let groupContainer = document.createElement('div');
+            groupContainer.className = 'qq-chat-list-container';
+            groupContainer.style.marginBottom = '15px';
+            groupContainer.style.display = 'block'; // 默认展开
+
+            groupHeader.onclick = (e) => {
+                if (e.target.tagName.toLowerCase() === 'span' && e.target.innerText === '+Add') return;
+                const isHidden = groupContainer.style.display === 'none';
+                groupContainer.style.display = isHidden ? 'block' : 'none';
+                groupHeader.querySelector('.qq-group-arrow').style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
+            };
+
+            if (groupFriends.length === 0) {
+                groupContainer.innerHTML = '<div style="text-align: center; color: #ccc; font-size: 12px; padding: 15px;">暂无好友</div>';
+            } else {
+                groupFriends.forEach(f => {
+                    let displayName = f.alias || f.name;
+                    let displayIdText = `ID: ${f.id}`;
+
+                    const item = document.createElement('div');
+                    item.className = 'qq-chat-card';
+                    
+                    let pressTimer;
+                    let isLongPress = false;
+                    
+                    item.onclick = (e) => {
+                        if (isLongPress) {
+                            isLongPress = false;
+                            return;
+                        }
+                        openQQChat(f.id, displayName, f.isGroup);
+                    };
+                    
+                    item.addEventListener('touchstart', (e) => {
+                        isLongPress = false;
+                        pressTimer = setTimeout(() => {
+                            isLongPress = true;
+                            showQQSessionMenu(e, f.id, 'friend');
+                        }, 500);
+                    });
+                    item.addEventListener('touchend', () => clearTimeout(pressTimer));
+                    item.addEventListener('touchmove', () => clearTimeout(pressTimer));
+                    item.addEventListener('contextmenu', (e) => {
+                        e.preventDefault();
+                        isLongPress = true;
+                        showQQSessionMenu(e, f.id, 'friend');
+                    });
+
+                    item.innerHTML = `
+                        <div class="qq-chat-avatar-wrap"><div class="qq-chat-avatar" style="background-image: url('${f.avatar || ''}'); background-color: #555;">${f.avatar ? '' : displayName.charAt(0)}</div></div>
+                        <div class="qq-chat-info">
+                            <div class="qq-chat-name-row" style="margin-bottom: 0;"><span class="qq-chat-name">${displayName}</span></div>
+                            <div class="qq-chat-preview-row" style="margin-top: 4px;"><span class="qq-chat-preview">${displayIdText}</span></div>
+                        </div>
+                    `;
+                    groupContainer.appendChild(item);
+                });
+            }
+            listEl.appendChild(groupContainer);
+        });
+    } else {
+        let groupContainer = document.createElement('div');
+        groupContainer.className = 'qq-chat-list-container';
+        filteredFriends.forEach(f => {
+            let displayName = f.alias || f.name;
+            let displayIdText = `群号: ${f.groupNumber || f.id}`;
+
+            const item = document.createElement('div');
+            item.className = 'qq-chat-card';
+            
+            let pressTimer;
+            let isLongPress = false;
+            
+            item.onclick = (e) => {
+                if (isLongPress) {
+                    isLongPress = false;
+                    return;
+                }
+                openQQChat(f.id, displayName, f.isGroup);
+            };
+            
+            item.addEventListener('touchstart', (e) => {
+                isLongPress = false;
+                pressTimer = setTimeout(() => {
+                    isLongPress = true;
+                    showQQSessionMenu(e, f.id, 'friend');
+                }, 500);
+            });
+            item.addEventListener('touchend', () => clearTimeout(pressTimer));
+            item.addEventListener('touchmove', () => clearTimeout(pressTimer));
+            item.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                isLongPress = true;
+                showQQSessionMenu(e, f.id, 'friend');
+            });
+            
+            item.innerHTML = `
+                <div class="qq-chat-avatar-wrap"><div class="qq-chat-avatar" style="background-image: url('${f.avatar || ''}'); background-color: #555;">${f.avatar ? '' : displayName.charAt(0)}</div></div>
+                <div class="qq-chat-info">
+                    <div class="qq-chat-name-row" style="margin-bottom: 0;"><span class="qq-chat-name">${displayName}</span></div>
+                    <div class="qq-chat-preview-row" style="margin-top: 4px;"><span class="qq-chat-preview">${displayIdText}</span></div>
+                </div>
+            `;
+            groupContainer.appendChild(item);
+        });
+        listEl.appendChild(groupContainer);
+    }
+}
+
+// --- 新增：未读消息计数与清除 ---
+function incrementUnread(chatId) {
+    if (currentQQChatId === chatId && document.getElementById('qq-page-chat').classList.contains('show')) return;
+    let unread = JSON.parse(ChatDB.getItem('qq_unread_counts') || '{}');
+    unread[chatId] = (unread[chatId] || 0) + 1;
+    ChatDB.setItem('qq_unread_counts', JSON.stringify(unread));
+}
+
+function clearUnread(chatId) {
+    let unread = JSON.parse(ChatDB.getItem('qq_unread_counts') || '{}');
+    if (unread[chatId]) {
+        delete unread[chatId];
+        ChatDB.setItem('qq_unread_counts', JSON.stringify(unread));
+        renderQQMessageList();
+    }
+}
+
+// 渲染列表
+function renderQQMessageList() {
+    const listEl = document.getElementById('qqMessageList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let unreadCounts = JSON.parse(ChatDB.getItem('qq_unread_counts') || '{}');
+    
+    // --- 新增：更新顶部用户信息区 ---
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    const topAvatarEl = document.getElementById('qqMainAvatarDisplay');
+    const topNameEl = document.getElementById('qqMainNameDisplay');
+    const topUnreadEl = document.getElementById('qqTotalUnreadText');
+    
+    if (topAvatarEl) {
+        topAvatarEl.style.backgroundImage = myProfile.avatar ? `url('${myProfile.avatar}')` : "url('https://api.dicebear.com/7.x/notionists/svg?seed=User')";
+    }
+    if (topNameEl) {
+        topNameEl.innerText = myProfile.name || 'User';
+    }
+    if (topUnreadEl) {
+        let totalUnread = Object.values(unreadCounts).reduce((a, b) => a + b, 0);
+        topUnreadEl.innerText = totalUnread > 0 ? `${totalUnread} 条未读消息` : '暂无未读消息';
+    }
+    // --------------------------------
+
+    let filteredFriends = friends.filter(f => {
+        if (currentQQMsgTab === 'all') return true; 
+        if (currentQQMsgTab === 'group') return f.isGroup; 
+        return !f.isGroup; 
+    });
+
+    let pinned = JSON.parse(ChatDB.getItem('qq_pinned_sessions') || '[]');
+
+    // 按最新消息时间排序 (置顶最新消息)
+    filteredFriends.sort((a, b) => {
+        let isPinnedA = pinned.includes(a.id);
+        let isPinnedB = pinned.includes(b.id);
+        if (isPinnedA && !isPinnedB) return -1;
+        if (!isPinnedA && isPinnedB) return 1;
+
+        let histA = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${a.id}`) || '[]');
+        let histB = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${b.id}`) || '[]');
+        let timeA = histA.length > 0 ? histA[histA.length - 1].timestamp : 0;
+        let timeB = histB.length > 0 ? histB[histB.length - 1].timestamp : 0;
+        return timeB - timeA;
+    });
+
+    if (filteredFriends.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 12px; padding: 20px;">暂无会话</div>';
+        listEl.style.background = 'transparent';
+        listEl.style.boxShadow = 'none';
+        return;
+    }
+    
+    listEl.style.background = 'var(--qq-bg-card)';
+    listEl.style.boxShadow = '0 2px 10px rgba(0,0,0,0.02)';
+
+    filteredFriends.forEach(f => {
+        const isOnline = !!qqOnlineStatus[f.id]; 
+        let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${f.id}`) || '[]');
+        let lastMsg = history.length > 0 ? history[history.length - 1].content : '点击开始聊天';
+        
+        if (lastMsg.includes('邀请你玩')) {
+            lastMsg = '[游戏邀请]';
+        } else if (lastMsg.includes('<img')) {
+            lastMsg = '[图片]';
+        } else if (lastMsg.includes('📎')) {
+            lastMsg = '[文件]';
+        }
+
+        let displayName = f.alias || f.name;
+        let avatarText = f.isGroup ? '群' : displayName.charAt(0);
+        
+        let avatarHtml = f.avatar 
+            ? `<div class="qq-chat-avatar" style="background-image: url('${f.avatar}'); background-size: cover; background-position: center; background-color: #eee; color: transparent;"></div>`
+            : `<div class="qq-chat-avatar" style="background: ${f.isGroup?'#007aff':'#111'};">${avatarText}</div>`;
+        
+        // 未读红点 HTML
+        let unreadBadge = unreadCounts[f.id] ? `<div style="background: #ff3b30; color: #fff; font-size: 10px; font-weight: bold; padding: 2px 6px; border-radius: 10px; margin-left: auto;">${unreadCounts[f.id]}</div>` : '';
+        
+        let isPinned = pinned.includes(f.id);
+        let pinHtml = isPinned ? `<span style="font-size: 10px; background: #f0f0f0; color: #888; padding: 2px 6px; border-radius: 4px; margin-right: 6px;">置顶</span>` : '';
+
+        const item = document.createElement('div');
+        item.className = 'qq-chat-card';
+        
+        let pressTimer;
+        let isLongPress = false;
+        
+        item.onclick = (e) => {
+            if (isLongPress) {
+                isLongPress = false;
+                return;
+            }
+            openQQChat(f.id, displayName, f.isGroup);
+        };
+        
+        item.addEventListener('touchstart', (e) => {
+            isLongPress = false;
+            pressTimer = setTimeout(() => {
+                isLongPress = true;
+                showQQSessionMenu(e, f.id, 'message');
+            }, 500);
+        });
+        item.addEventListener('touchend', () => clearTimeout(pressTimer));
+        item.addEventListener('touchmove', () => clearTimeout(pressTimer));
+        item.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            isLongPress = true;
+            showQQSessionMenu(e, f.id, 'message');
+        });
+
+        item.innerHTML = `
+            <div class="qq-chat-avatar-wrap">${avatarHtml}</div>
+            <div class="qq-chat-info">
+                <div class="qq-chat-name-row" style="margin-bottom: 0;"><span class="qq-chat-name">${displayName}</span></div>
+                <div class="qq-chat-preview-row" style="margin-top: 4px;">
+                    ${pinHtml}
+                    ${!f.isGroup ? `<div class="qq-chat-tag ${isOnline ? 'online' : 'offline'}">${isOnline ? '在线' : '离线'}</div>` : ''}
+                    <span class="qq-chat-preview">${lastMsg}</span>
+                    ${unreadBadge}
+                </div>
+            </div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+// 聊天室逻辑
+let qqChatDisplayCount = 50; 
+
+function openQQChat(chatId, chatName, isGroup) {
+    currentQQChatId = chatId;
+    isGroupChat = isGroup;
+    qqChatDisplayCount = 50; 
+    document.getElementById('qqChatTitle').innerText = chatName;
+    document.getElementById('qq-page-chat').classList.add('show');
+    document.getElementById('qqChatSettingsPanel').style.display = 'none';
+    
+    const aiBtn = document.getElementById('qqAiReplyBtn');
+    if (aiBtn) {
+        aiBtn.style.display = 'flex';
+    }
+
+    clearUnread(chatId); // 清除未读红点
+    renderQQChatHistory();
+    
+    // 新增：打开聊天窗口时，自动拉取云端的离线消息
+    syncCloudMessages(chatId, isGroup);
+}
+
+// 新增：同步云端离线消息的专属函数
+async function syncCloudMessages(chatId, isGroup) {
+    try {
+        let query = supabaseClient.from('qq_messages').select('*');
+        if (isGroup) {
+            query = query.eq('group_id', chatId);
+        } else {
+            // 找我和对方的单聊记录
+            query = query.or(`and(sender_id.eq.${qqMyOnlineId},receiver_id.eq.${chatId}),and(sender_id.eq.${chatId},receiver_id.eq.${qqMyOnlineId})`);
+        }
+        
+        // 拉取最近的 50 条记录
+        const { data, error } = await query.order('created_at', { ascending: false }).limit(50);
+        if (data && data.length > 0) {
+            let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${chatId}`) || '[]');
+            let changed = false;
+            
+            // Supabase 降序拉取，需要反转回升序
+            data.reverse().forEach(msg => {
+                let msgTime = new Date(msg.created_at).getTime();
+                let displayContent = msg.content;
+                let senderName = "未知";
+                
+                // 去重检测：如果本地已经有这条消息，就不添加
+                let exists = history.find(m => Math.abs(m.timestamp - msgTime) < 5000 && m.content === displayContent);
+                if (!exists) {
+                    history.push({
+                        // 修复：强制转换为字符串比对，防止数字 ID 导致自己发的消息被识别为 other
+                        role: String(msg.sender_id) === String(qqMyOnlineId) ? 'me' : (msg.msg_type === 'system' ? 'system' : 'other'),
+                        content: displayContent,
+                        quote: msg.quote || '',
+                        timestamp: msgTime,
+                        senderName: senderName
+                    });
+                    changed = true;
+                }
+            });
+            
+            if (changed) {
+                // 重新按时间排序并保存
+                history.sort((a, b) => a.timestamp - b.timestamp);
+                ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${chatId}`, JSON.stringify(history));
+                if (currentQQChatId === chatId) renderQQChatHistory();
+                renderQQMessageList();
+            }
+        }
+    } catch (e) {
+        console.warn("拉取云端离线记录失败", e);
+    }
+}
+
+function closeQQChat() {
+    currentQQChatId = null;
+    document.getElementById('qq-page-chat').classList.remove('show');
+}
+
+// 格式化时间戳的辅助函数
+function formatQQTime(ts) {
+    let d = new Date(ts);
+    let hours = d.getHours().toString().padStart(2, '0');
+    let mins = d.getMinutes().toString().padStart(2, '0');
+    let month = d.getMonth() + 1;
+    let date = d.getDate();
+    return `${month}月${date}日 ${hours}:${mins}`;
+}
+
+function renderQQChatHistory(keepScroll = false) {
+    const historyEl = document.getElementById('qqChatHistory');
+    if (!historyEl) return;
+    
+    const oldScrollHeight = historyEl.scrollHeight;
+    const oldScrollTop = historyEl.scrollTop;
+    
+    historyEl.innerHTML = '';
+    let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`) || '[]');
+    
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let friend = friends.find(f => f.id === currentQQChatId);
+    
+    const startIndex = Math.max(0, history.length - qqChatDisplayCount);
+    const renderHistory = history.slice(startIndex);
+
+    if (startIndex > 0) {
+        const loadMoreBtn = document.createElement('div');
+        loadMoreBtn.style.cssText = 'text-align: center; padding: 15px 0; color: #576b95; font-size: 13px; cursor: pointer; font-weight: bold;';
+        loadMoreBtn.innerText = '点击加载更多历史记录';
+        loadMoreBtn.onclick = () => {
+            qqChatDisplayCount += 50;
+            renderQQChatHistory(true);
+        };
+        historyEl.appendChild(loadMoreBtn);
+    }
+    
+    let lastTime = 0;
+    
+    renderHistory.forEach(msg => {
+        // 增加时间戳显示 (间隔大于5分钟)
+        if (msg.timestamp - lastTime > 5 * 60 * 1000) {
+            const timeRow = document.createElement('div');
+            timeRow.className = 'chat-time';
+            timeRow.innerText = formatQQTime(msg.timestamp);
+            historyEl.appendChild(timeRow);
+            lastTime = msg.timestamp;
+        }
+        if (msg.role === 'system') {
+            const row = document.createElement('div');
+            row.style.cssText = 'width: 100%; display: flex; justify-content: center; margin: 10px 0;';
+            row.innerHTML = `<div style="background: rgba(0,0,0,0.1); color: #888; font-size: 11px; padding: 4px 10px; border-radius: 10px;">${msg.content}</div>`;
+            historyEl.appendChild(row);
+            return;
+        }
+
+        const isMe = msg.role === 'me';
+        const row = document.createElement('div');
+        row.className = `qq-msg-row ${isMe ? 'me' : 'other'}`;
+        
+        let senderNameHtml = '';
+        let displayContent = msg.content;
+        let senderName = msg.senderName || '';
+        
+        if (isGroupChat && !isMe) {
+            const match = msg.content.match(/^([^<:：]+)[:：]\s*(.*)$/);
+            if (match) {
+                senderName = match[1];
+                displayContent = match[2]; 
+            }
+            if (senderName) {
+                senderNameHtml = `<div style="font-size: 11px; color: #888; margin-bottom: 4px; margin-left: 4px;">${senderName}</div>`;
+            }
+        }
+
+        let avatarUrl = isMe ? myProfile.avatar : (friend ? friend.avatar : '');
+        let fallbackText = isMe ? (myProfile.name ? myProfile.name.charAt(0) : '我') : (friend ? (friend.alias || friend.name).charAt(0) : '友');
+        
+        if (isGroupChat && !isMe && senderName && friend) {
+            let foundChar = null;
+            if (msg.senderId) {
+                foundChar = friend.chars ? friend.chars.find(c => c.charId === msg.senderId) : null;
+            }
+            if (!foundChar) {
+                foundChar = friend.chars ? friend.chars.find(c => c.name === senderName) : null;
+            }
+
+            if (foundChar) {
+                avatarUrl = foundChar.avatar;
+                fallbackText = foundChar.name.charAt(0);
+            } else {
+                let foundUser = friends.find(f => (f.alias || f.name) === senderName);
+                if (foundUser) {
+                    avatarUrl = foundUser.avatar;
+                    fallbackText = (foundUser.alias || foundUser.name).charAt(0);
+                } else {
+                    fallbackText = senderName.charAt(0);
+                    avatarUrl = '';
+                }
+            }
+        }
+        
+        let avatarHtml = avatarUrl 
+            ? `<div class="qq-msg-avatar" style="background-image: url('${avatarUrl}'); background-size: cover; background-position: center; background-color: #eee; color: transparent;"></div>`
+            : `<div class="qq-msg-avatar" style="background: ${isMe?'#111':'#ccc'}; color: #fff;">${fallbackText}</div>`;
+
+        let quoteHtml = '';
+        if (msg.quote) {
+            quoteHtml = `<div class="cr-quote-block" style="font-size: 12px; color: #888; background: rgba(0,0,0,0.04); padding: 4px 8px; border-radius: 6px; margin-bottom: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all;">${msg.quote}</div>`;
+        }
+
+        let checkboxHtml = '';
+        if (qqMultiSelectMode) {
+            const isSelected = qqSelectedMsgs.has(msg.timestamp.toString());
+            checkboxHtml = `
+                <div class="qq-msg-checkbox ${isSelected ? 'selected' : ''}" style="width: 20px; height: 20px; border-radius: 50%; border: 1px solid #ccc; margin-right: 10px; flex-shrink: 0; display: flex; justify-content: center; align-items: center; transition: all 0.2s; ${isSelected ? 'background: #007aff; border-color: #007aff;' : ''}">
+                    ${isSelected ? '<svg viewBox="0 0 24 24" width="14" height="14" stroke="#fff" stroke-width="3" fill="none"><polyline points="20 6 9 17 4 12"></polyline></svg>' : ''}
+                </div>
+            `;
+            row.onclick = function() {
+                toggleQQMsgSelect(msg.timestamp, this.querySelector('.qq-msg-checkbox'));
+            };
+        }
+
+        row.innerHTML = `
+            ${checkboxHtml}
+            ${avatarHtml}
+            <div style="display: flex; flex-direction: column; max-width: 80%;">
+                ${senderNameHtml}
+                <div style="display: flex; flex-direction: column;">
+                    ${quoteHtml}
+                    <div class="qq-msg-bubble">${displayContent}</div>
+                </div>
+            </div>
+        `;
+        
+        if (!qqMultiSelectMode) {
+            let pressTimer;
+            let touchX = 0;
+            let touchY = 0;
+            row.addEventListener('touchstart', (e) => {
+                if (e.touches && e.touches.length > 0) {
+                    touchX = e.touches[0].clientX;
+                    touchY = e.touches[0].clientY;
+                }
+                pressTimer = setTimeout(() => {
+                    showQQBubbleMenu(touchX, touchY, msg.timestamp, senderName || fallbackText, displayContent);
+                }, 500);
+            });
+            row.addEventListener('touchend', () => clearTimeout(pressTimer));
+            row.addEventListener('touchmove', () => clearTimeout(pressTimer));
+            
+            row.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                showQQBubbleMenu(e.clientX, e.clientY, msg.timestamp, senderName || fallbackText, displayContent);
+            });
+        }
+
+        historyEl.appendChild(row);
+    });
+
+    requestAnimationFrame(() => {
+        if (keepScroll) {
+            historyEl.scrollTop = historyEl.scrollHeight - oldScrollHeight + oldScrollTop;
+        } else {
+            historyEl.scrollTop = historyEl.scrollHeight;
+        }
+    });
+}
+
+// ==========================================
+// 改造：发送消息 (直接写入 Supabase 数据库)
+// ==========================================
+async function sendQQMessage() {
+    const inputEl = document.getElementById('qqChatInput');
+    const content = inputEl.value.trim();
+    if (!content || !currentQQChatId) return;
+    
+    let nowTime = Date.now();
+    let quote = qqQuoteContent || ''; 
+    
+    // 1. 立即在本地渲染（保证自己发消息不卡顿）
+    let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`) || '[]');
+    history.push({ role: 'me', content: content, quote: quote, timestamp: nowTime });
+    ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`, JSON.stringify(history));
+    
+    inputEl.value = '';
+    inputEl.style.height = '36px'; 
+    cancelQQQuote(); 
+    renderQQChatHistory();
+    renderQQMessageList();
+
+    // 2. 异步写入 Supabase 数据库 (保留，用于离线漫游)
+    try {
+        const msgData = {
+            sender_id: qqMyOnlineId,
+            content: content,
+            quote: quote,
+            msg_type: 'text'
+        };
+        if (isGroupChat) msgData.group_id = currentQQChatId;
+        else msgData.receiver_id = currentQQChatId;
+        await supabaseClient.from('qq_messages').insert(msgData);
+    } catch (error) {
+        console.error("消息发送到云端失败:", error);
+    }
+
+    // 3. 增加：实时广播发送 (保证在线必达，绕过数据库延迟和配置问题)
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名"}');
+    if (isGroupChat) {
+        publishSupabaseBroadcast("group_" + currentQQChatId, {
+            senderId: qqMyOnlineId,
+            type: 'group_chat',
+            groupId: currentQQChatId,
+            senderName: myProfile.name,
+            content: content,
+            quote: quote,
+            timestamp: nowTime
+        });
+    } else {
+        publishSupabaseBroadcast("user_" + currentQQChatId, {
+            senderId: qqMyOnlineId,
+            type: 'chat',
+            senderName: myProfile.name,
+            content: content,
+            quote: quote,
+            timestamp: nowTime
+        });
+    }
+}
+
+// 聊天设置面板
+function toggleQQChatSettings() {
+    const panel = document.getElementById('qqChatSettingsPanel');
+    if (panel.style.display === 'flex') {
+        panel.style.display = 'none';
+    } else {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        let chatObj = friends.find(f => f.id === currentQQChatId);
+        if (!chatObj) return;
+
+        if (isGroupChat) {
+            document.getElementById('qqGroupSettingsArea').style.display = 'block';
+            document.getElementById('qqGroupMembersArea').style.display = 'block';
+            document.getElementById('qqAliasSettingRow').style.display = 'none';
+            document.getElementById('qqDeleteBtnText').innerText = '退出群聊';
+            
+            document.getElementById('qqGroupNameDisplay').innerText = chatObj.name || '未命名群聊';
+            document.getElementById('qqGroupAvatarPreview').style.backgroundImage = chatObj.avatar ? `url(${chatObj.avatar})` : '';
+            document.getElementById('qqGroupAvatarPreview').innerText = chatObj.avatar ? '' : '更换头像';
+            
+            if (!chatObj.groupNumber) {
+                chatObj.groupNumber = Math.floor(10000000 + Math.random() * 90000000).toString();
+                ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+                
+                let allPublicGroups = JSON.parse(ChatDB.getItem('qq_all_public_groups') || '[]');
+                let pubGroupIndex = allPublicGroups.findIndex(g => g.id === chatObj.id);
+                if (pubGroupIndex > -1) {
+                    allPublicGroups[pubGroupIndex] = chatObj;
+                } else {
+                    allPublicGroups.push(chatObj);
+                }
+                ChatDB.setItem('qq_all_public_groups', JSON.stringify(allPublicGroups));
+            }
+            document.getElementById('qqGroupNumberDisplay').innerText = chatObj.groupNumber;
+            
+            renderQQGroupMembers(chatObj);
+        } else {
+            document.getElementById('qqGroupSettingsArea').style.display = 'none';
+            document.getElementById('qqGroupMembersArea').style.display = 'none';
+            document.getElementById('qqAliasSettingRow').style.display = 'flex';
+            document.getElementById('qqDeleteBtnText').innerText = '删除好友';
+        }
+        panel.style.display = 'flex';
+    }
+}
+
+// 渲染群成员列表
+function renderQQGroupMembers(group) {
+    const grid = document.getElementById('qqGroupMembersGrid');
+    const totalCount = (group.members ? group.members.length : 0) + (group.chars ? group.chars.length : 0);
+    document.getElementById('qqGroupMemberCount').innerText = totalCount;
+    grid.innerHTML = '';
+    
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    
+    const isOwner = group.ownerId === qqMyOnlineId;
+    const isAdmin = group.adminIds && group.adminIds.includes(qqMyOnlineId);
+    const canKickRealUser = isOwner || isAdmin;
+
+    if (group.members) {
+        group.members.forEach(mid => {
+            let memberName = '未知';
+            let memberAvatar = '';
+            if (mid === qqMyOnlineId) {
+                memberName = myProfile.name;
+                memberAvatar = myProfile.avatar;
+            } else {
+                let f = friends.find(x => x.id === mid);
+                if (f) {
+                    memberName = f.alias || f.name;
+                    memberAvatar = f.avatar;
+                }
+            }
+            
+            const item = document.createElement('div');
+            item.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 4px; width: 45px; position: relative;';
+            
+            let roleTag = '';
+            if (group.ownerId === mid) roleTag = '<div style="background:#ff9500; color:#fff; font-size:8px; padding:1px 4px; border-radius:4px; margin-top:-6px; z-index:2;">群主</div>';
+            else if (group.adminIds && group.adminIds.includes(mid)) roleTag = '<div style="background:#34c759; color:#fff; font-size:8px; padding:1px 4px; border-radius:4px; margin-top:-6px; z-index:2;">管理</div>';
+
+            let kickBtnHtml = '';
+            if (canKickRealUser && mid !== qqMyOnlineId && mid !== group.ownerId) {
+                kickBtnHtml = `<div onclick="kickQQGroupMember('${mid}', '${group.id}', '${group.name}')" style="position: absolute; top: -5px; right: -5px; width: 16px; height: 16px; background: #ff3b30; color: #fff; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 12px; font-weight: bold; cursor: pointer; z-index: 10; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">-</div>`;
+            }
+
+            item.innerHTML = `
+                <div style="width: 40px; height: 40px; border-radius: 8px; background-image: url('${memberAvatar || ''}'); background-size: cover; background-position: center; background-color: #eee; display: flex; justify-content: center; align-items: center; color: #888; font-size: 12px;">${memberAvatar ? '' : memberName.charAt(0)}</div>
+                ${roleTag}
+                <div style="font-size: 10px; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; text-align: center;">${memberName}</div>
+                ${kickBtnHtml}
+            `;
+            grid.appendChild(item);
+        });
+    }
+
+    if (group.chars) {
+        group.chars.forEach(c => {
+            const item = document.createElement('div');
+            item.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 4px; width: 45px; position: relative;';
+            
+            let roleTag = '<div style="background:#007aff; color:#fff; font-size:8px; padding:1px 4px; border-radius:4px; margin-top:-6px; z-index:2;">角色</div>';
+            
+            let kickBtnHtml = '';
+            if (c.inviterId === qqMyOnlineId || isOwner) {
+                kickBtnHtml = `<div onclick="kickQQGroupChar('${c.charId}', '${group.id}')" style="position: absolute; top: -5px; right: -5px; width: 16px; height: 16px; background: #ff3b30; color: #fff; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 12px; font-weight: bold; cursor: pointer; z-index: 10; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">-</div>`;
+            }
+
+            item.innerHTML = `
+                <div style="width: 40px; height: 40px; border-radius: 8px; background-image: url('${c.avatar || ''}'); background-size: cover; background-position: center; background-color: #eee; display: flex; justify-content: center; align-items: center; color: #888; font-size: 12px; cursor: pointer;" onclick="editQQGroupCharAvatar('${c.charId}', '${group.id}')">${c.avatar ? '' : c.name.charAt(0)}</div>
+                ${roleTag}
+                <div style="font-size: 10px; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; text-align: center;">${c.name}</div>
+                ${kickBtnHtml}
+            `;
+            grid.appendChild(item);
+        });
+    }
+    
+    const addBtn = document.createElement('div');
+    addBtn.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 4px; width: 45px; cursor: pointer;';
+    addBtn.innerHTML = `<div style="width: 40px; height: 40px; border-radius: 8px; border: 1px dashed #ccc; display: flex; justify-content: center; align-items: center; color: #888; font-size: 20px;">+</div><div style="font-size: 9px; color: #888;">真人</div>`;
+    addBtn.onclick = () => inviteQQGroupMember(group);
+    grid.appendChild(addBtn);
+
+    const addCharBtn = document.createElement('div');
+    addCharBtn.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 4px; width: 45px; cursor: pointer;';
+    addCharBtn.innerHTML = `<div style="width: 40px; height: 40px; border-radius: 8px; border: 1px dashed #007aff; display: flex; justify-content: center; align-items: center; color: #007aff; font-size: 20px;">+</div><div style="font-size: 9px; color: #007aff;">角色</div>`;
+    addCharBtn.onclick = () => openQQInviteCharModal(group);
+    grid.appendChild(addCharBtn);
+
+    if (isOwner) {
+        const adminBtn = document.createElement('div');
+        adminBtn.style.cssText = 'display: flex; flex-direction: column; align-items: center; gap: 4px; width: 45px; cursor: pointer;';
+        adminBtn.innerHTML = `<div style="width: 40px; height: 40px; border-radius: 8px; background: #f4f4f4; display: flex; justify-content: center; align-items: center; color: #333;"><svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg></div><div style="font-size: 9px; color: #333;">管理</div>`;
+        adminBtn.onclick = () => openQQGroupAdminModal(group);
+        grid.appendChild(adminBtn);
+    }
+}
+
+// 修改群名称
+function editQQGroupName() {
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let group = friends.find(f => f.id === currentQQChatId);
+    if (!group) return;
+    
+    let newName = prompt("请输入新的群聊名称:", group.name);
+    if (newName && newName.trim() !== '') {
+        group.name = newName.trim();
+        ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+        document.getElementById('qqGroupNameDisplay').innerText = group.name;
+        document.getElementById('qqChatTitle').innerText = group.name;
+        renderQQMessageList();
+        
+        broadcastQQGroupUpdate(group.id, { groupName: group.name });
+    }
+}
+
+// 修改群头像
+async function handleQQGroupAvatarUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    try {
+        const imageUrl = await uploadImageToUrl(file);
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        let group = friends.find(f => f.id === currentQQChatId);
+        if (group) {
+            group.avatar = imageUrl;
+            ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+            document.getElementById('qqGroupAvatarPreview').style.backgroundImage = `url(${imageUrl})`;
+            document.getElementById('qqGroupAvatarPreview').innerText = '';
+            renderQQMessageList();
+            
+            broadcastQQGroupUpdate(group.id, { avatar: imageUrl });
+        }
+    } catch (error) {
+        alert(error.message);
+    }
+    event.target.value = '';
+}
+
+// 邀请角色进群
+function openQQInviteCharModal(group) {
+    if (!group.chars) group.chars = [];
+    if (group.chars.some(c => c.inviterId === qqMyOnlineId)) {
+        return alert('每个真实用户只能携带一个角色进群！');
+    }
+
+    const listEl = document.getElementById('qqInviteCharList');
+    listEl.innerHTML = '';
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+
+    if (chars.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#aaa; font-size:12px;">本地暂无角色</div>';
+    } else {
+        chars.forEach(c => {
+            const item = document.createElement('div');
+            item.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 10px; background: #f9f9f9; border-radius: 10px; cursor: pointer;';
+            item.innerHTML = `
+                <div style="width: 36px; height: 36px; border-radius: 8px; background-image: url('${c.avatarUrl || ''}'); background-size: cover; background-color: #eee;"></div>
+                <div style="font-size: 14px; font-weight: bold; color: #333; flex: 1;">${c.name}</div>
+            `;
+            item.onclick = () => confirmInviteQQGroupChar(c, group);
+            listEl.appendChild(item);
+        });
+    }
+    document.getElementById('qqInviteCharModalOverlay').classList.add('show');
+}
+
+function closeQQInviteCharModal() {
+    document.getElementById('qqInviteCharModalOverlay').classList.remove('show');
+}
+
+async function confirmInviteQQGroupChar(char, group) {
+    if (!group.chars) group.chars = [];
+    
+    if (typeof showToast === 'function') showToast('正在处理角色数据...', 'loading');
+    
+    let avatarToSave = char.avatarUrl || '';
+    if (avatarToSave.startsWith('data:image/')) {
+        avatarToSave = await ensureAvatarUrl(avatarToSave);
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let cIndex = chars.findIndex(c => c.id === char.id);
+        if (cIndex > -1) {
+            chars[cIndex].avatarUrl = avatarToSave;
+            ChatDB.setItem('chat_chars', JSON.stringify(chars));
+        }
+    }
+
+    group.chars.push({
+        charId: char.id,
+        inviterId: qqMyOnlineId,
+        name: char.name,
+        avatar: avatarToSave
+    });
+
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let gIndex = friends.findIndex(f => f.id === group.id);
+    if (gIndex > -1) friends[gIndex] = group;
+    ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+
+    renderQQGroupMembers(group);
+    broadcastQQGroupUpdate(group.id, { chars: group.chars });
+    closeQQInviteCharModal();
+    
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名"}');
+    sendQQSystemMessage(group.id, `${myProfile.name} 邀请角色 ${char.name} 加入了群聊`);
+    
+    if (typeof hideToast === 'function') hideToast();
+    alert(`已成功邀请角色 [${char.name}] 进群！`);
+}
+
+// 踢出角色
+function kickQQGroupChar(charId, groupId) {
+    if (confirm('确定要将该角色移出群聊吗？')) {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        let group = friends.find(f => f.id === groupId);
+        if (group && group.chars) {
+            group.chars = group.chars.filter(c => c.charId !== charId);
+            ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+            renderQQGroupMembers(group);
+            broadcastQQGroupUpdate(group.id, { chars: group.chars });
+        }
+    }
+}
+
+// 设置管理员
+let tempQQGroupAdmins = [];
+
+function openQQGroupAdminModal(group) {
+    tempQQGroupAdmins = group.adminIds || [];
+    const listEl = document.getElementById('qqGroupAdminList');
+    listEl.innerHTML = '';
+
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    const members = (group.members || []).filter(id => id !== group.ownerId);
+
+    if (members.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#aaa; font-size:12px;">暂无成员可设置</div>';
+    } else {
+        members.forEach(mid => {
+            let memberName = '未知';
+            let memberAvatar = '';
+            let f = friends.find(x => x.id === mid);
+            if (f) {
+                memberName = f.alias || f.name;
+                memberAvatar = f.avatar;
+            }
+            const isChecked = tempQQGroupAdmins.includes(mid);
+            const item = document.createElement('label');
+            item.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 10px; background: #f9f9f9; border-radius: 10px; cursor: pointer;';
+            item.innerHTML = `
+                <input type="checkbox" value="${mid}" style="width: 18px; height: 18px; accent-color: #34c759;" ${isChecked ? 'checked' : ''} onchange="toggleQQGroupAdmin('${mid}', this.checked)">
+                <div style="width: 36px; height: 36px; border-radius: 8px; background-image: url('${memberAvatar || ''}'); background-size: cover; background-color: #eee;"></div>
+                <div style="font-size: 14px; font-weight: bold; color: #333; flex: 1;">${memberName}</div>
+            `;
+            listEl.appendChild(item);
+        });
+    }
+    document.getElementById('qqGroupAdminModalOverlay').classList.add('show');
+}
+
+function closeQQGroupAdminModal() {
+    document.getElementById('qqGroupAdminModalOverlay').classList.remove('show');
+}
+
+function toggleQQGroupAdmin(id, isChecked) {
+    if (isChecked) {
+        if (!tempQQGroupAdmins.includes(id)) tempQQGroupAdmins.push(id);
+    } else {
+        tempQQGroupAdmins = tempQQGroupAdmins.filter(m => m !== id);
+    }
+}
+
+function confirmQQGroupAdmin() {
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let group = friends.find(f => f.id === currentQQChatId);
+    if (group) {
+        group.adminIds = [...tempQQGroupAdmins];
+        ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+        renderQQGroupMembers(group);
+        broadcastQQGroupUpdate(group.id, { adminIds: group.adminIds });
+    }
+    closeQQGroupAdminModal();
+}
+
+// 邀请新成员
+function inviteQQGroupMember(group) {
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]').filter(f => !f.isGroup && !group.members.includes(f.id));
+    if (friends.length === 0) return alert('没有可邀请的好友');
+    
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 9999; display: flex; justify-content: center; align-items: center;';
+    
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background: #fff; width: 80%; max-width: 320px; border-radius: 16px; padding: 20px; display: flex; flex-direction: column; max-height: 70vh;';
+    
+    const title = document.createElement('div');
+    title.innerText = '邀请好友';
+    title.style.cssText = 'font-size: 16px; font-weight: bold; text-align: center; margin-bottom: 15px; color: #333;';
+    modal.appendChild(title);
+    
+    const list = document.createElement('div');
+    list.style.cssText = 'flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; margin-bottom: 15px;';
+    
+    let selectedIds = [];
+    
+    friends.forEach(f => {
+        const item = document.createElement('label');
+        item.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 10px; background: #f9f9f9; border-radius: 10px; cursor: pointer;';
+        item.innerHTML = `
+            <input type="checkbox" value="${f.id}" style="width: 18px; height: 18px; accent-color: #111;">
+            <div style="width: 36px; height: 36px; border-radius: 8px; background-image: url('${f.avatar || ''}'); background-size: cover; background-color: #eee;"></div>
+            <div style="font-size: 14px; font-weight: bold; color: #333; flex: 1;">${f.alias || f.name}</div>
+        `;
+        const checkbox = item.querySelector('input');
+        checkbox.onchange = (e) => {
+            if (e.target.checked) selectedIds.push(f.id);
+            else selectedIds = selectedIds.filter(id => id !== f.id);
+        };
+        list.appendChild(item);
+    });
+    modal.appendChild(list);
+    
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display: flex; gap: 10px;';
+    
+    const cancelBtn = document.createElement('div');
+    cancelBtn.innerText = '取消';
+    cancelBtn.style.cssText = 'flex: 1; padding: 10px; text-align: center; background: #f4f4f4; color: #333; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 14px;';
+    cancelBtn.onclick = () => document.body.removeChild(overlay);
+    
+    const confirmBtn = document.createElement('div');
+    confirmBtn.innerText = '确定';
+    confirmBtn.style.cssText = 'flex: 1; padding: 10px; text-align: center; background: #111; color: #fff; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 14px;';
+    confirmBtn.onclick = () => {
+        if (selectedIds.length === 0) return alert('请至少选择一个好友');
+        document.body.removeChild(overlay);
+        
+        selectedIds.forEach(targetId => {
+            group.members.push(targetId);
+        });
+        
+        let allFriends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        let gIndex = allFriends.findIndex(f => f.id === group.id);
+        if (gIndex > -1) allFriends[gIndex] = group;
+        ChatDB.setItem('qq_online_friends', JSON.stringify(allFriends));
+        
+        renderQQGroupMembers(group);
+        
+        selectedIds.forEach(targetId => {
+            publishSupabaseBroadcast("user_" + targetId, { 
+                senderId: qqMyOnlineId, 
+                type: 'group_invite', 
+                groupId: group.id, 
+                groupName: group.name, 
+                members: group.members,
+                ownerId: group.ownerId,
+                adminIds: group.adminIds,
+                chars: group.chars
+            });
+        });
+        
+        broadcastQQGroupUpdate(group.id, { members: group.members });
+        
+        let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名"}');
+        let invitedNames = friends.filter(f => selectedIds.includes(f.id)).map(f => f.alias || f.name).join('、');
+        sendQQSystemMessage(group.id, `${myProfile.name} 邀请 ${invitedNames} 加入了群聊`);
+        
+        alert('邀请成功！');
+    };
+    
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(confirmBtn);
+    modal.appendChild(btnRow);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+}
+
+// 踢出成员
+function kickQQGroupMember(memberId, groupId, groupName) {
+    if (confirm('确定要将该成员移出群聊吗？')) {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        let group = friends.find(f => f.id === groupId);
+        if (group) {
+            group.members = group.members.filter(id => id !== memberId);
+            ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+            renderQQGroupMembers(group);
+            
+            publishSupabaseBroadcast("user_" + memberId, { 
+                senderId: qqMyOnlineId, 
+                type: 'group_kick', 
+                groupId: groupId, 
+                groupName: groupName, 
+                kickedId: memberId 
+            });
+            
+            broadcastQQGroupUpdate(group.id, { members: group.members });
+        }
+    }
+}
+
+// 广播群信息更新辅助函数
+function broadcastQQGroupUpdate(groupId, updateData) {
+    publishSupabaseBroadcast("group_" + groupId, { 
+        senderId: qqMyOnlineId, 
+        type: 'update_group_info', 
+        groupId: groupId, 
+        ...updateData 
+    });
+}
+
+function editQQGroupCharAvatar(charId, groupId) {
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let group = friends.find(f => f.id === groupId);
+    if (group && group.chars) {
+        let char = group.chars.find(c => c.charId === charId);
+        if (char) {
+            if (char.inviterId === qqMyOnlineId || group.ownerId === qqMyOnlineId) {
+                document.getElementById('qqGroupCharAvatarCharId').value = charId;
+                document.getElementById('qqGroupCharAvatarGroupId').value = groupId;
+                document.getElementById('qqGroupCharAvatarInput').value = char.avatar || '';
+                document.getElementById('qqGroupCharAvatarModalOverlay').classList.add('show');
+            } else {
+                alert("只有邀请该角色的人或群主可以修改其头像。");
+            }
+        }
+    }
+}
+
+function closeQQGroupCharAvatarModal() {
+    document.getElementById('qqGroupCharAvatarModalOverlay').classList.remove('show');
+}
+
+function confirmQQGroupCharAvatar() {
+    let charId = document.getElementById('qqGroupCharAvatarCharId').value;
+    let groupId = document.getElementById('qqGroupCharAvatarGroupId').value;
+    let newAvatar = document.getElementById('qqGroupCharAvatarInput').value.trim();
+    
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let group = friends.find(f => f.id === groupId);
+    if (group && group.chars) {
+        let char = group.chars.find(c => c.charId === charId);
+        if (char) {
+            char.avatar = newAvatar;
+            ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+            renderQQGroupMembers(group);
+            broadcastQQGroupUpdate(group.id, { chars: group.chars });
+            renderQQChatHistory();
+        }
+    }
+    closeQQGroupCharAvatarModal();
+}
+
+async function sendQQSystemMessage(groupId, content) {
+    let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${groupId}`) || '[]');
+    let sysMsg = { role: 'system', content: content, timestamp: Date.now() };
+    history.push(sysMsg);
+    ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${groupId}`, JSON.stringify(history));
+    
+    try {
+        await qqSupabase.from('qq_messages').insert({
+            sender_id: qqMyOnlineId,
+            group_id: groupId,
+            content: content,
+            msg_type: 'system'
+        });
+    } catch (e) {
+        console.error("系统消息同步失败", e);
+    }
+    
+    if (currentQQChatId === groupId) renderQQChatHistory();
+    renderQQMessageList();
+}
+
+function setQQFriendAlias() {
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let friend = friends.find(f => f.id === currentQQChatId);
+    if (!friend) return;
+    let alias = prompt("请输入备注名:", friend.alias || friend.name);
+    if (alias !== null) {
+        friend.alias = alias;
+        ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+        document.getElementById('qqChatTitle').innerText = alias;
+        renderQQMessageList();
+        renderQQContactList();
+    }
+    toggleQQChatSettings();
+}
+
+function clearQQChatHistory() {
+    if (confirm("确定要清除聊天记录吗？")) {
+        ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`, '[]');
+        renderQQChatHistory();
+    }
+    toggleQQChatSettings();
+}
+
+function deleteQQFriend() {
+    if (confirm("确定要删除该好友/退出群聊吗？")) {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        friends = friends.filter(f => f.id !== currentQQChatId);
+        ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+        ChatDB.removeItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`);
+        closeQQChat();
+        renderQQMessageList();
+        renderQQContactList();
+    }
+    toggleQQChatSettings();
+}
+
+// ==========================================
+// QQ 全局设置逻辑
+// ==========================================
+function openQQGlobalSettingsPanel() {
+    const isHardcore = ChatDB.getItem(`qq_global_hardcore_mode_${qqMyOnlineId}`) === 'true';
+    const isCustom = ChatDB.getItem(`qq_global_custom_prompt_enabled_${qqMyOnlineId}`) === 'true';
+    const customText = ChatDB.getItem(`qq_global_custom_prompt_text_${qqMyOnlineId}`) || '';
+
+    document.getElementById('qqGlobalHardcoreModeToggle').checked = isHardcore;
+    document.getElementById('qqGlobalCustomPromptToggle').checked = isCustom;
+    document.getElementById('qqGlobalCustomPromptInput').value = customText;
+    document.getElementById('qqGlobalCustomPromptWrap').style.display = isCustom ? 'flex' : 'none';
+
+    document.getElementById('qqGlobalSettingsPanel').style.display = 'flex';
+}
+
+function closeQQGlobalSettingsPanel() {
+    document.getElementById('qqGlobalSettingsPanel').style.display = 'none';
+}
+
+function saveQQGlobalSettings() {
+    const isHardcore = document.getElementById('qqGlobalHardcoreModeToggle').checked;
+    const isCustom = document.getElementById('qqGlobalCustomPromptToggle').checked;
+    const customText = document.getElementById('qqGlobalCustomPromptInput').value.trim();
+
+    ChatDB.setItem(`qq_global_hardcore_mode_${qqMyOnlineId}`, String(isHardcore));
+    ChatDB.setItem(`qq_global_custom_prompt_enabled_${qqMyOnlineId}`, String(isCustom));
+    ChatDB.setItem(`qq_global_custom_prompt_text_${qqMyOnlineId}`, customText);
+
+    alert('全局设置已保存！');
+    closeQQGlobalSettingsPanel();
+}
+
+// 个人资料修改
+function renderQQProfile() {
+    let profile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    document.getElementById('qqMyName').innerText = profile.name;
+    if (profile.avatar) document.getElementById('qqMyAvatar').style.backgroundImage = `url(${profile.avatar})`;
+    
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]').filter(f => !f.isGroup);
+    let countEl = document.getElementById('qqFriendCount');
+    if (countEl) countEl.innerText = friends.length; 
+}
+
+function openQQEditProfilePanel() {
+    let profile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":"", "personaId":""}');
+    document.getElementById('qqEditProfileName').value = profile.name;
+    document.getElementById('qqEditProfileAvatarPreview').style.backgroundImage = `url(${profile.avatar || ''})`;
+    document.getElementById('qqEditProfileAvatarPreview').dataset.url = profile.avatar || '';
+    
+    const urlInput = document.getElementById('qqEditProfileAvatarUrl');
+    if (urlInput) urlInput.value = profile.avatar || '';
+    
+    const personaSelect = document.getElementById('qqEditProfilePersona');
+    if (personaSelect) {
+        personaSelect.innerHTML = '<option value="">不绑定面具</option>';
+        let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+        personas.forEach(p => {
+            let opt = document.createElement('option');
+            opt.value = p.id;
+            opt.innerText = p.realName || '未命名';
+            if (p.id === profile.personaId) opt.selected = true;
+            personaSelect.appendChild(opt);
+        });
+    }
+    
+    document.getElementById('qqEditProfilePanel').style.display = 'flex';
+}
+
+function closeQQEditProfilePanel() {
+    document.getElementById('qqEditProfilePanel').style.display = 'none';
+}
+
+async function handleQQEditAvatar(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    document.getElementById('qqEditProfileAvatarPreview').innerText = '上传中...';
+    
+    try {
+        const imageUrl = await uploadImageToUrl(file);
+        document.getElementById('qqEditProfileAvatarPreview').style.backgroundImage = `url(${imageUrl})`;
+        document.getElementById('qqEditProfileAvatarPreview').dataset.url = imageUrl;
+        document.getElementById('qqEditProfileAvatarPreview').innerText = '';
+        
+        const urlInput = document.getElementById('qqEditProfileAvatarUrl');
+        if (urlInput) urlInput.value = imageUrl;
+    } catch (error) {
+        alert(error.message);
+        document.getElementById('qqEditProfileAvatarPreview').innerText = '更换头像';
+    }
+    event.target.value = '';
+}
+
+async function saveQQProfile() {
+    let profile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":"", "personaId":""}');
+    profile.name = document.getElementById('qqEditProfileName').value.trim() || '未命名';
+    let newAvatar = document.getElementById('qqEditProfileAvatarPreview').dataset.url;
+    if (newAvatar) profile.avatar = newAvatar;
+    
+    const personaSelect = document.getElementById('qqEditProfilePersona');
+    if (personaSelect) {
+        profile.personaId = personaSelect.value;
+    }
+    
+    ChatDB.setItem('qq_my_profile', JSON.stringify(profile));
+    renderQQProfile();
+    closeQQEditProfilePanel();
+    
+    // 同步到 Supabase 数据库
+    try {
+        await supabaseClient.from('qq_users').upsert({
+            id: qqMyOnlineId,
+            name: profile.name,
+            avatar: profile.avatar
+        });
+    } catch (e) {
+        console.error("更新云端资料失败", e);
+    }
+    
+    // 广播更新资料给所有在线好友
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]').filter(f => !f.isGroup);
+    friends.forEach(f => {
+        publishSupabaseBroadcast("user_" + f.id, { senderId: qqMyOnlineId, type: 'update_profile', profile: profile });
+    });
+    
+    renderQQMessageList();
+}
+
+// 朋友圈逻辑
+let tempQQMomentFile = null;
+let tempQQMomentFileName = '';
+
+function openQQPostMomentPanel() {
+    document.getElementById('qqPostMomentPanel').style.display = 'flex';
+    document.getElementById('qqMomentTextInput').value = '';
+    document.getElementById('qqMomentFilePreview').innerHTML = '';
+    document.getElementById('qqMomentPwdInput').value = '';
+    tempQQMomentFile = null;
+    tempQQMomentFileName = '';
+}
+
+function closeQQPostMomentPanel() {
+    document.getElementById('qqPostMomentPanel').style.display = 'none';
+}
+
+function triggerQQMomentFile() {
+    document.getElementById('qqMomentRealFileInput').click();
+}
+
+async function handleQQMomentFile(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    if (file.type.startsWith('image/')) {
+        try {
+            const imageUrl = await uploadImageToUrl(file);
+            tempQQMomentFile = imageUrl;
+            tempQQMomentFileName = 'image';
+            document.getElementById('qqMomentFilePreview').innerHTML = `<img src="${tempQQMomentFile}" style="width: 80px; height: 80px; object-fit: cover; border-radius: 8px;">`;
+        } catch (e) {
+            alert(e.message);
+        }
+    } else {
+        if (file.size > 500 * 1024) {
+            alert('非图片文件不能超过 500KB！');
+            event.target.value = '';
+            return;
+        }
+        tempQQMomentFileName = file.name;
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            tempQQMomentFile = e.target.result;
+            document.getElementById('qqMomentFilePreview').innerHTML = `<div style="width: 80px; height: 80px; background: #f0f0f0; border-radius: 8px; display: flex; justify-content: center; align-items: center; font-size: 12px; text-align: center; padding: 5px; word-break: break-all;">📎 ${file.name}</div>`;
+        };
+        reader.readAsDataURL(file);
+    }
+    event.target.value = '';
+}
+
+async function submitQQMoment() {
+    const text = document.getElementById('qqMomentTextInput').value.trim();
+    const pwd = document.getElementById('qqMomentPwdInput').value.trim();
+    const visibilityEl = document.getElementById('qqMomentVisibility');
+    const visibility = visibilityEl ? visibilityEl.value : 'public';
+    
+    if (!text && !tempQQMomentFile) {
+        alert("请输入内容或上传文件！");
+        return;
+    }
+    
+    let profile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    let moment = { 
+        id: Date.now().toString(), 
+        authorId: qqMyOnlineId, 
+        name: profile.name, 
+        avatar: profile.avatar, 
+        text: text, 
+        time: Date.now(),
+        filePwd: pwd || null,
+        visibility: visibility, 
+        likes: [],     
+        comments: []   
+    };
+    
+    let imageUrl = null;
+    let fileUrl = null;
+
+    if (tempQQMomentFile) {
+        if (tempQQMomentFile.startsWith('http')) {
+            moment.image = tempQQMomentFile;
+            imageUrl = tempQQMomentFile;
+        } else {
+            moment.fileName = tempQQMomentFileName;
+            moment.fileData = tempQQMomentFile;
+            fileUrl = tempQQMomentFile; // 暂存 Base64
+        }
+    }
+    
+    // 1. 先存本地并渲染
+    let moments = JSON.parse(ChatDB.getItem('qq_moments') || '[]');
+    moments.unshift(moment);
+    moments.sort((a, b) => b.time - a.time);
+    if (moments.length > 200) moments = moments.slice(0, 200);
+    ChatDB.setItem('qq_moments', JSON.stringify(moments));
+    renderQQMoments();
+    closeQQPostMomentPanel();
+
+    // 增加：实时广播朋友圈 (让在线的人瞬间看到)
+    publishSupabaseBroadcast("public_moments", {
+        senderId: qqMyOnlineId,
+        type: 'new_moment',
+        moment: moment
+    });
+
+    // 2. 异步写入 Supabase 数据库
+    try {
+        await supabaseClient.from('qq_moments').insert({
+            author_id: qqMyOnlineId,
+            content: text,
+            image_url: imageUrl,
+            file_url: fileUrl,
+            visibility: visibility
+        });
+    } catch (e) {
+        console.error("朋友圈同步云端失败", e);
+    }
+}
+
+function renderQQMoments() {
+    const listEl = document.getElementById('qqMomentsList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    let moments = JSON.parse(ChatDB.getItem('qq_moments') || '[]');
+    
+    if (moments.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 12px; margin-top: 40px;">暂无动态</div>';
+        return;
+    }
+    
+    moments.forEach(m => {
+        let pwdAttr = m.filePwd ? `,'${m.filePwd}'` : ",''";
+        let imgHtml = m.image ? `<img src="${m.image}" class="qq-moment-img" style="max-width: 100%; border-radius: 8px; margin-top: 8px; cursor: pointer;" onclick="previewQQMomentFile('${m.image}', 'image'${pwdAttr})">` : '';
+        let fileHtml = m.fileName ? `<div style="background:#f0f0f0;padding:10px;border-radius:8px;font-size:12px;margin-top:8px;cursor:pointer;" onclick="previewQQMomentFile('${m.fileData}', '${m.fileName}'${pwdAttr})">📎 ${m.fileName} ${m.filePwd ? '🔒' : ''}</div>` : '';
+        
+        let likes = m.likes || [];
+        let comments = m.comments || [];
+        let authorId = m.authorId || '';
+
+        let isLiked = likes.some(l => l.id === qqMyOnlineId);
+        
+        let likeSvg = isLiked 
+            ? `<svg viewBox="0 0 24 24" width="18" height="18" fill="#e02433"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>`
+            : `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#576b95" stroke-width="2"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>`;
+            
+        let commentSvg = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#576b95" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>`;
+        
+        let deleteSvg = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#888" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>`;
+
+        let likesHtml = likes.length > 0 ? `<div style="background: #f4f4f5; padding: 6px 10px; border-radius: 4px; font-size: 12px; color: #576b95; font-weight: bold; margin-top: 10px; display: flex; align-items: center; gap: 4px;"><svg viewBox="0 0 24 24" width="12" height="12" fill="#576b95"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg> ${likes.map(l => l.name).join(', ')}</div>` : '';
+        
+        let commentsHtml = '';
+        if (comments.length > 0) {
+            commentsHtml = `<div style="background: #f4f4f5; padding: 6px 10px; border-radius: 4px; font-size: 13px; margin-top: ${likes.length > 0 ? '2px' : '10px'};">`;
+            comments.forEach(c => {
+                commentsHtml += `<div style="margin-bottom: 4px;"><span style="color: #576b95; font-weight: bold;">${c.name}</span>: <span style="color: #333;">${c.content}</span></div>`;
+            });
+            commentsHtml += `</div>`;
+        }
+
+        let deleteHtml = authorId === qqMyOnlineId ? `<div style="cursor: pointer; margin-left: 10px; display: flex; align-items: center;" onclick="deleteQQMoment('${m.id}')" title="删除">${deleteSvg}</div>` : '';
+
+        const item = document.createElement('div');
+        item.className = 'qq-moment-card';
+        item.style.cssText = 'background: #fff; border-radius: 16px; padding: 15px; margin-bottom: 15px; box-shadow: 0 2px 10px rgba(0,0,0,0.02);';
+        item.innerHTML = `
+            <div class="qq-moment-header" style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
+                <div class="qq-moment-avatar" style="width: 40px; height: 40px; border-radius: 50%; background-image: url(${m.avatar || ''}); background-size: cover; background-color: #eee;"></div>
+                <div style="flex: 1;">
+                    <div class="qq-moment-name" style="font-weight: bold; font-size: 15px; color: #576b95;">${m.name}</div>
+                    <div style="display: flex; align-items: center;">
+                        <div class="qq-moment-time" style="font-size: 11px; color: #888;">${new Date(m.time).toLocaleString()}</div>
+                        ${deleteHtml}
+                    </div>
+                </div>
+            </div>
+            <div class="qq-moment-content" style="font-size: 14px; color: #333; line-height: 1.5;">${m.text}</div>
+            ${imgHtml}
+            ${fileHtml}
+            <div style="display: flex; justify-content: flex-end; gap: 20px; margin-top: 10px;">
+                <div onclick="likeQQMoment('${m.id}')" style="cursor: pointer; display: flex; align-items: center;" title="点赞">${likeSvg}</div>
+                <div onclick="commentQQMoment('${m.id}')" style="cursor: pointer; display: flex; align-items: center;" title="评论">${commentSvg}</div>
+            </div>
+            ${likesHtml}
+            ${commentsHtml}
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+let tempQQFileDataUrl = '';
+let tempQQFileName = '';
+
+window.previewQQMomentFile = function(dataUrl, fileName, pwd) {
+    if (!dataUrl) return alert('文件数据不存在');
+    if (pwd) {
+        let input = prompt("该文件已加密，请输入密码:");
+        if (input !== pwd) {
+            alert("密码错误！");
+            return;
+        }
+    }
+    
+    tempQQFileDataUrl = dataUrl;
+    tempQQFileName = fileName;
+    
+    document.getElementById('qqFileActionModalOverlay').classList.add('show');
+};
+
+function closeQQFileActionModal() {
+    document.getElementById('qqFileActionModalOverlay').classList.remove('show');
+}
+
+function executeQQFilePreview() {
+    closeQQFileActionModal();
+    let win = window.open();
+    if (win) {
+        if (tempQQFileName === 'image') {
+            win.document.write(`<img src="${tempQQFileDataUrl}" style="max-width:100%; height:auto;">`);
+        } else {
+            win.document.write(`<iframe src="${tempQQFileDataUrl}" frameborder="0" style="border:0; top:0px; left:0px; bottom:0px; right:0px; width:100%; height:100%;" allowfullscreen></iframe>`);
+        }
+    } else {
+        alert('请允许弹出窗口以预览文件');
+    }
+}
+
+function executeQQFileDownload() {
+    closeQQFileActionModal();
+    const a = document.createElement('a');
+    a.href = tempQQFileDataUrl;
+    a.download = tempQQFileName === 'image' ? 'image_' + Date.now() + '.jpg' : tempQQFileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+// ==========================================
+// 游戏邀请与五子棋联机逻辑 (支持群聊与观战)
+// ==========================================
+let gomokuMyReady = false;
+let gomokuOppReady = false;
+let gomokuCurrentGameId = null;
+let gomokuHostId = null;
+let gomokuPlayerBlack = null;
+let gomokuPlayerWhite = null;
+let gomokuSpectators = [];
+
+// 广播五子棋消息给房间内所有人 (单聊或群聊)
+function broadcastQQGroupGomoku(payload) {
+    if (!supabaseBroadcastChannel || !gomokuCurrentGameId) return;
+    
+    payload.senderId = qqMyOnlineId;
+    
+    // 直接向当前游戏的专属频道广播
+    publishSupabaseBroadcast("game_" + gomokuCurrentGameId, payload);
+}
+
+let gomokuLoadingIsMiniWindow = false;
+
+function closeGomokuLoading() {
+    document.getElementById('gomokuLoadingPanel').style.display = 'none';
+}
+
+function toggleGomokuLoadingMiniWindow() {
+    const panel = document.getElementById('gomokuLoadingPanel');
+    if (!gomokuLoadingIsMiniWindow) {
+        panel.style.width = '120px';
+        panel.style.height = '120px';
+        panel.style.top = '100px';
+        panel.style.left = '20px';
+        panel.style.borderRadius = '16px';
+        panel.style.boxShadow = '0 10px 30px rgba(0,0,0,0.3)';
+        panel.style.overflow = 'hidden';
+        
+        panel.children[0].style.display = 'none'; 
+        document.getElementById('gomokuLoadingTitle').style.display = 'none';
+        document.getElementById('gomokuLoadingPlayers').style.display = 'none';
+        document.getElementById('gomokuReadyBtn').style.transform = 'scale(0.8)';
+        
+        makeGomokuDraggable(panel);
+        gomokuLoadingIsMiniWindow = true;
+    } else {
+        panel.style.width = '100%';
+        panel.style.height = '100%';
+        panel.style.top = '0';
+        panel.style.left = '0';
+        panel.style.borderRadius = '0';
+        
+        panel.children[0].style.display = 'flex';
+        document.getElementById('gomokuLoadingTitle').style.display = 'block';
+        document.getElementById('gomokuLoadingPlayers').style.display = 'flex';
+        document.getElementById('gomokuReadyBtn').style.transform = 'none';
+        
+        panel.onmousedown = null;
+        panel.ontouchstart = null;
+        panel.style.transform = 'none';
+        
+        gomokuLoadingIsMiniWindow = false;
+    }
+}
+
+function openGomokuLoading(myColor) {
+    gomokuMyColor = myColor;
+    gomokuMyReady = false;
+    gomokuOppReady = false;
+    
+    const panel = document.getElementById('gomokuLoadingPanel');
+    panel.style.display = 'flex';
+    
+    if (gomokuLoadingIsMiniWindow) {
+        toggleGomokuLoadingMiniWindow(); 
+    }
+    
+    updateGomokuLoadingUI();
+}
+
+function updateGomokuLoadingUI() {
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"我", "avatar":""}');
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    
+    if (gomokuMyColor === 1) {
+        document.getElementById('gomokuLoadMyAvatar').style.backgroundImage = `url('${myProfile.avatar}')`;
+        document.getElementById('gomokuLoadMyName').innerText = myProfile.name;
+        document.getElementById('gomokuLoadMyStatus').innerText = gomokuMyReady ? '已准备' : '未准备';
+        document.getElementById('gomokuLoadMyStatus').style.color = gomokuMyReady ? '#34c759' : '#ff3b30';
+        document.getElementById('gomokuReadyBtn').style.display = gomokuMyReady ? 'none' : 'block';
+        
+        if (gomokuPlayerWhite) {
+            let opp = friends.find(f => f.id === gomokuPlayerWhite);
+            if (opp) {
+                document.getElementById('gomokuLoadOppAvatar').style.backgroundImage = `url('${opp.avatar}')`;
+                document.getElementById('gomokuLoadOppName').innerText = opp.alias || opp.name;
+            } else {
+                document.getElementById('gomokuLoadOppName').innerText = '玩家2';
+            }
+            document.getElementById('gomokuLoadOppStatus').innerText = gomokuOppReady ? '已准备' : '未准备';
+            document.getElementById('gomokuLoadOppStatus').style.color = gomokuOppReady ? '#34c759' : '#ff3b30';
+        } else {
+            document.getElementById('gomokuLoadOppAvatar').style.backgroundImage = '';
+            document.getElementById('gomokuLoadOppName').innerText = '等待加入...';
+            document.getElementById('gomokuLoadOppStatus').innerText = '';
+        }
+    } else if (gomokuMyColor === 2) {
+        let host = friends.find(f => f.id === gomokuHostId);
+        if (host) {
+            document.getElementById('gomokuLoadMyAvatar').style.backgroundImage = `url('${host.avatar}')`;
+            document.getElementById('gomokuLoadMyName').innerText = host.alias || host.name;
+        } else {
+            document.getElementById('gomokuLoadMyName').innerText = '房主';
+        }
+        document.getElementById('gomokuLoadMyStatus').innerText = gomokuOppReady ? '已准备' : '未准备';
+        document.getElementById('gomokuLoadMyStatus').style.color = gomokuOppReady ? '#34c759' : '#ff3b30';
+        
+        document.getElementById('gomokuLoadOppAvatar').style.backgroundImage = `url('${myProfile.avatar}')`;
+        document.getElementById('gomokuLoadOppName').innerText = myProfile.name;
+        document.getElementById('gomokuLoadOppStatus').innerText = gomokuMyReady ? '已准备' : '未准备';
+        document.getElementById('gomokuLoadOppStatus').style.color = gomokuMyReady ? '#34c759' : '#ff3b30';
+        document.getElementById('gomokuReadyBtn').style.display = gomokuMyReady ? 'none' : 'block';
+    } else {
+        document.getElementById('gomokuLoadMyName').innerText = '连接中...';
+        document.getElementById('gomokuLoadOppName').innerText = '连接中...';
+        document.getElementById('gomokuReadyBtn').style.display = 'none';
+    }
+}
+
+function gomokuSetReady() {
+    gomokuMyReady = true;
+    if (gomokuMyColor === 1) {
+        document.getElementById('gomokuLoadMyStatus').innerText = '已准备';
+        document.getElementById('gomokuLoadMyStatus').style.color = '#34c759';
+    } else {
+        document.getElementById('gomokuLoadOppStatus').innerText = '已准备';
+        document.getElementById('gomokuLoadOppStatus').style.color = '#34c759';
+    }
+    document.getElementById('gomokuReadyBtn').style.display = 'none';
+    
+    broadcastQQGroupGomoku({ type: 'gomoku_ready', peerId: qqMyOnlineId, gameId: gomokuCurrentGameId });
+    checkGomokuStart();
+}
+
+function checkGomokuStart() {
+    if (gomokuMyReady && gomokuOppReady) {
+        setTimeout(() => {
+            document.getElementById('gomokuLoadingPanel').style.display = 'none';
+            openGomokuGame(gomokuMyColor);
+        }, 1000);
+    }
+}
+
+function sendQQGameInvite(gameName) {
+    if (!currentQQChatId) return;
+    
+    const gameId = 'gomoku_' + Date.now();
+    
+    const content = `<div style="background:#fff; border:1px solid #eee; border-radius:12px; padding:15px; width:200px; text-align:center; cursor:pointer; box-shadow:0 2px 10px rgba(0,0,0,0.05);" onclick="acceptQQGameInvite('${gameName}', '${gameId}', '${qqMyOnlineId}')">
+        <div style="font-size:24px; margin-bottom:10px;">🎮</div>
+        <div style="font-size:15px; font-weight:bold; color:#111; margin-bottom:5px;">邀请你玩 ${gameName}</div>
+        <div style="font-size:12px; color:#fff; background:#111; padding:6px 0; border-radius:8px; font-weight:bold;">点击加入游戏</div>
+    </div>`;
+    
+    sendQQImageMessage(content); 
+    
+    if (gameName === '五子棋') {
+        gomokuCurrentGameId = gameId;
+        gomokuHostId = qqMyOnlineId;
+        gomokuPlayerBlack = qqMyOnlineId;
+        gomokuPlayerWhite = null;
+        gomokuSpectators = [];
+        
+        // Supabase 已经在 init 时全局监听了 game_ 频道，无需重复订阅
+        openGomokuLoading(1);
+    } else {
+        alert(`${gameName} 联机功能正在开发中...`);
+    }
+}
+
+function acceptQQGameInvite(gameName, gameId, hostId) {
+    if (gameName === '五子棋') {
+        gomokuCurrentGameId = gameId;
+        gomokuHostId = hostId;
+        
+        if (hostId === qqMyOnlineId) {
+            openGomokuLoading(1);
+            return;
+        }
+        
+        publishSupabaseBroadcast("game_" + gameId, { 
+            senderId: qqMyOnlineId,
+            type: 'gomoku_join_req', 
+            gameId: gameId, 
+            peerId: qqMyOnlineId 
+        });
+        openGomokuLoading(0); 
+    } else {
+        alert(`${gameName} 联机功能正在开发中...`);
+    }
+}
+
+// 发送弹幕
+function sendGomokuDanmu() {
+    const input = document.getElementById('gomokuDanmuInput');
+    const text = input.value.trim();
+    if (!text) return;
+    
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"我"}');
+    
+    showGomokuDanmu(myProfile.name, text);
+    broadcastQQGroupGomoku({ type: 'gomoku_danmu', senderName: myProfile.name, text: text });
+    
+    input.value = '';
+}
+
+function showGomokuDanmu(name, text) {
+    const container = document.getElementById('gomokuDanmuContainer');
+    if (!container) return;
+    
+    const danmu = document.createElement('div');
+    danmu.innerText = `${name}: ${text}`;
+    danmu.style.cssText = `
+        position: absolute;
+        white-space: nowrap;
+        color: #fff;
+        font-weight: bold;
+        font-size: 14px;
+        text-shadow: 1px 1px 2px #000;
+        top: ${Math.random() * 80}%;
+        right: -100%;
+        animation: danmuMove 5s linear forwards;
+    `;
+    
+    container.appendChild(danmu);
+    setTimeout(() => danmu.remove(), 5000);
+}
+
+// ==========================================
+// 朋友圈互动逻辑 (点赞、评论、删除)
+// ==========================================
+
+// 广播朋友圈互动操作
+function broadcastQQMomentAction(actionData) {
+    let payloadObj = {
+        senderId: qqMyOnlineId,
+        type: 'moment_action',
+        actionData: actionData
+    };
+    
+    publishSupabaseBroadcast("public_moments", payloadObj);
+    
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]').filter(f => !f.isGroup);
+    friends.forEach(f => {
+        publishSupabaseBroadcast("user_" + f.id, payloadObj);
+    });
+}
+
+// 删除朋友圈
+function deleteQQMoment(id) {
+    if (confirm('确定删除这条动态吗？')) {
+        let moments = JSON.parse(ChatDB.getItem('qq_moments') || '[]');
+        moments = moments.filter(m => m.id !== id);
+        ChatDB.setItem('qq_moments', JSON.stringify(moments));
+        renderQQMoments();
+        broadcastQQMomentAction({ action: 'delete', momentId: id });
+    }
+}
+
+// 点赞/取消点赞
+function likeQQMoment(id) {
+    let moments = JSON.parse(ChatDB.getItem('qq_moments') || '[]');
+    let moment = moments.find(m => m.id === id);
+    if (!moment) return;
+    
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名"}');
+    if (!moment.likes) moment.likes = [];
+    
+    let index = moment.likes.findIndex(l => l.id === qqMyOnlineId);
+    let isLike = false;
+    if (index > -1) {
+        moment.likes.splice(index, 1); 
+    } else {
+        moment.likes.push({ id: qqMyOnlineId, name: myProfile.name }); 
+        isLike = true;
+    }
+    
+    ChatDB.setItem('qq_moments', JSON.stringify(moments));
+    renderQQMoments();
+    broadcastQQMomentAction({ action: 'like', momentId: id, isLike: isLike, user: { id: qqMyOnlineId, name: myProfile.name } });
+}
+
+// 评论
+function commentQQMoment(id) {
+    let content = prompt('请输入评论内容:');
+    if (!content || !content.trim()) return;
+    
+    let moments = JSON.parse(ChatDB.getItem('qq_moments') || '[]');
+    let moment = moments.find(m => m.id === id);
+    if (!moment) return;
+    
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名"}');
+    if (!moment.comments) moment.comments = [];
+    
+    let commentObj = { id: Date.now().toString(), authorId: qqMyOnlineId, name: myProfile.name, content: content.trim(), time: Date.now() };
+    moment.comments.push(commentObj);
+    
+    ChatDB.setItem('qq_moments', JSON.stringify(moments));
+    renderQQMoments();
+    broadcastQQMomentAction({ action: 'comment', momentId: id, comment: commentObj });
+}
+
+// ==========================================
+// QQ 联机聊天室：图片压缩与发送逻辑
+// ==========================================
+async function handleQQChatImageUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    try {
+        const imageUrl = await uploadImageToUrl(file);
+        const imgContent = `<img src="${imageUrl}" style="max-width: 100%; border-radius: 8px; cursor: pointer; -webkit-touch-callout: none; -webkit-user-select: none;" onclick="event.stopPropagation(); safeOpenImagePreview('${imageUrl}')">`;
+        sendQQImageMessage(imgContent);
+    } catch (error) {
+        alert(error.message);
+    } finally {
+        event.target.value = ''; 
+    }
+}
+
+async function sendQQImageMessage(content) {
+    if (!currentQQChatId) return;
+    
+    let nowTime = Date.now();
+    
+    // 1. 本地渲染
+    let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`) || '[]');
+    history.push({ role: 'me', content: content, timestamp: nowTime });
+    ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`, JSON.stringify(history));
+    
+    renderQQChatHistory();
+    renderQQMessageList();
+
+    // 2. 写入 Supabase 数据库
+    try {
+        const msgData = { sender_id: qqMyOnlineId, content: content, msg_type: 'image' };
+        if (isGroupChat) msgData.group_id = currentQQChatId;
+        else msgData.receiver_id = currentQQChatId;
+        await qqSupabase.from('qq_messages').insert(msgData);
+    } catch (error) {
+        console.error("图片/文件发送到云端失败:", error);
+    }
+
+    // 3. 增加：实时广播发送
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名"}');
+    if (isGroupChat) {
+        publishSupabaseBroadcast("group_" + currentQQChatId, {
+            senderId: qqMyOnlineId,
+            type: 'group_chat',
+            groupId: currentQQChatId,
+            senderName: myProfile.name,
+            content: content,
+            quote: '',
+            timestamp: nowTime
+        });
+    } else {
+        publishSupabaseBroadcast("user_" + currentQQChatId, {
+            senderId: qqMyOnlineId,
+            type: 'chat',
+            senderName: myProfile.name,
+            content: content,
+            quote: '',
+            timestamp: nowTime
+        });
+    }
+}
+
+// ==========================================
+// QQ 联机聊天室：表情包面板与文件发送
+// ==========================================
+let qqCurrentEmojiGroup = '默认分组';
+
+function toggleQQEmojiPanel() {
+    const panel = document.getElementById('qqEmojiPanel');
+    if (panel.classList.contains('show')) {
+        panel.classList.remove('show');
+    } else {
+        renderQQEmojis();
+        panel.classList.add('show');
+    }
+}
+
+function closeQQEmojiPanel() {
+    const panel = document.getElementById('qqEmojiPanel');
+    if (panel) panel.classList.remove('show');
+}
+
+function renderQQEmojis() {
+    const grid = document.getElementById('qqEmojiGrid');
+    const groupContainer = document.getElementById('qqEmojiGroups');
+    if (!grid || !groupContainer) return;
+    
+    grid.innerHTML = '';
+    groupContainer.innerHTML = '';
+    
+    let emojis = JSON.parse(ChatDB.getItem('chat_emojis') || '[]');
+    let groups = JSON.parse(ChatDB.getItem('chat_emoji_groups') || '["默认分组"]');
+    
+    groups.forEach(g => {
+        const gBtn = document.createElement('div');
+        gBtn.className = `cr-emoji-group-item ${g === qqCurrentEmojiGroup ? 'active' : ''}`;
+        gBtn.innerText = g;
+        gBtn.onclick = (e) => {
+            e.stopPropagation();
+            qqCurrentEmojiGroup = g;
+            renderQQEmojis();
+        };
+        groupContainer.appendChild(gBtn);
+    });
+
+    let currentEmojis = emojis.filter(e => e.group === qqCurrentEmojiGroup);
+    
+    if (currentEmojis.length === 0) {
+        grid.innerHTML = '<div style="grid-column: 1 / -1; text-align: center; color: #888; font-size: 12px; padding: 40px 0;">该分组暂无表情包</div>';
+        return;
+    }
+
+    currentEmojis.forEach(em => {
+        const item = document.createElement('div');
+        item.style.display = 'flex';
+        item.style.flexDirection = 'column';
+        item.style.alignItems = 'center';
+        item.style.gap = '4px';
+        item.style.cursor = 'pointer';
+        item.style.width = '50px';
+        item.onclick = (e) => {
+            e.stopPropagation();
+            sendQQEmojiMessage(em.url, em.desc);
+        };
+
+        item.innerHTML = `
+            <div style="width: 50px; height: 50px; background-image: url('${em.url}'); background-size: contain; background-position: center; background-repeat: no-repeat; border-radius: 8px; background-color: transparent;"></div>
+            <div style="font-size: 10px; color: #555; width: 100%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${em.desc}</div>
+        `;
+        grid.appendChild(item);
+    });
+}
+
+function sendQQEmojiMessage(url, desc) {
+    const content = `<img src="${url}" alt="${desc || '表情包'}" style="width: 100px; height: 100px; object-fit: contain; border-radius: 8px; display: block; margin: 5px 0; -webkit-touch-callout: none; -webkit-user-select: none; cursor: pointer;" onclick="event.stopPropagation(); safeOpenImagePreview('${url}')">`;
+    sendQQImageMessage(content); 
+    closeQQEmojiPanel();
+}
+
+function handleQQChatFileUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    if (file.size > 2 * 1024 * 1024) {
+        alert('文件过大，请上传 2MB 以内的文件！');
+        event.target.value = '';
+        return;
+    }
+
+    if (typeof showToast === 'function') showToast('正在处理文件...', 'loading');
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const fileDataUrl = e.target.result;
+        const fileName = file.name;
+        
+        const fileContent = `<div style="background:#f0f0f0;padding:10px;border-radius:8px;font-size:12px;cursor:pointer;color:#333;word-break:break-all;" onclick="previewQQMomentFile('${fileDataUrl}', '${fileName}')">📎 ${fileName}</div>`;
+        
+        sendQQImageMessage(fileContent); 
+        
+        if (typeof hideToast === 'function') hideToast();
+    };
+    reader.readAsDataURL(file);
+    event.target.value = '';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const historyEl = document.getElementById('qqChatHistory');
+    if (historyEl) {
+        historyEl.addEventListener('click', () => {
+            closeQQEmojiPanel();
+        });
+    }
+});
+
+// ==========================================
+// 五子棋联机核心逻辑 (重构版)
+// ==========================================
+let gomokuBoard = []; 
+let gomokuCurrentTurn = 1; 
+let gomokuMyColor = 1; 
+let gomokuIsGameOver = false;
+let gomokuIsMiniWindow = false;
+
+function openGomokuGame(myColor) {
+    const panel = document.getElementById('gomokuPanel');
+    panel.style.display = 'flex';
+    panel.style.transform = 'none';
+    panel.style.width = '100%';
+    panel.style.height = '100%';
+    panel.style.top = '0';
+    panel.style.left = '0';
+    panel.style.borderRadius = '0';
+    gomokuIsMiniWindow = false;
+    
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"avatar":""}');
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let friend = friends.find(f => f.id === currentQQChatId);
+    
+    document.getElementById('gomokuMyAvatar').style.backgroundImage = `url('${myProfile.avatar}')`;
+    if(friend) document.getElementById('gomokuOpponentAvatar').style.backgroundImage = `url('${friend.avatar}')`;
+
+    initGomokuGame(myColor);
+}
+
+function closeGomokuGame() {
+    document.getElementById('gomokuPanel').style.display = 'none';
+}
+
+function toggleGomokuMiniWindow() {
+    const panel = document.getElementById('gomokuPanel');
+    if (!gomokuIsMiniWindow) {
+        panel.style.transition = 'all 0.3s ease'; 
+        panel.style.width = '320px';
+        panel.style.height = '320px';
+        panel.style.top = '100px';
+        panel.style.left = '20px';
+        panel.style.borderRadius = '16px';
+        panel.style.boxShadow = '0 10px 30px rgba(0,0,0,0.3)';
+        panel.style.overflow = 'hidden';
+        panel.style.background = 'transparent';
+        panel.style.touchAction = 'none'; 
+        
+        panel.querySelector('.panel-header').style.display = 'none';
+        const content = panel.querySelector('.panel-content');
+        content.style.padding = '0';
+        content.children[0].style.display = 'none'; 
+        content.children[2].style.display = 'none'; 
+        
+        makeGomokuDraggable(panel);
+        
+        gomokuIsMiniWindow = true;
+    } else {
+        panel.style.transition = 'all 0.3s ease'; 
+        panel.style.width = '100%';
+        panel.style.height = '100%';
+        panel.style.top = '0';
+        panel.style.left = '0';
+        panel.style.borderRadius = '0';
+        panel.style.background = '#f4f4f5';
+        panel.style.touchAction = 'auto';
+        
+        panel.querySelector('.panel-header').style.display = 'flex';
+        const content = panel.querySelector('.panel-content');
+        content.style.padding = '20px';
+        content.children[0].style.display = 'flex';
+        content.children[2].style.display = 'flex';
+        
+        panel.onmousedown = null;
+        panel.ontouchstart = null;
+        panel.style.transform = 'none';
+        
+        gomokuIsMiniWindow = false;
+    }
+}
+
+function makeGomokuDraggable(el) {
+    let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+    let startX = 0, startY = 0, isDragging = false;
+    el.onmousedown = dragMouseDown;
+    el.ontouchstart = dragMouseDown;
+
+    function dragMouseDown(e) {
+        e = e || window.event;
+        el.style.transition = 'none'; 
+        isDragging = false; 
+        if (e.type === 'touchstart') {
+            pos3 = e.touches[0].clientX;
+            pos4 = e.touches[0].clientY;
+        } else {
+            pos3 = e.clientX;
+            pos4 = e.clientY;
+        }
+        startX = pos3; 
+        startY = pos4; 
+        
+        document.onmouseup = closeDragElement;
+        document.onmousemove = elementDrag;
+        document.ontouchend = closeDragElement;
+        document.ontouchmove = elementDrag;
+    }
+
+    function elementDrag(e) {
+        e = e || window.event;
+        if (e.type === 'touchmove' && e.cancelable) {
+            e.preventDefault(); 
+        }
+        let clientX, clientY;
+        if (e.type === 'touchmove') {
+            clientX = e.touches[0].clientX;
+            clientY = e.touches[0].clientY;
+        } else {
+            clientX = e.clientX;
+            clientY = e.clientY;
+        }
+        
+        if (Math.abs(clientX - startX) > 5 || Math.abs(clientY - startY) > 5) {
+            isDragging = true;
+        }
+
+        pos1 = pos3 - clientX;
+        pos2 = pos4 - clientY;
+        pos3 = clientX;
+        pos4 = clientY;
+        el.style.top = (el.offsetTop - pos2) + "px";
+        el.style.left = (el.offsetLeft - pos1) + "px";
+    }
+
+    function closeDragElement() {
+        document.onmouseup = null;
+        document.onmousemove = null;
+        document.ontouchend = null;
+        document.ontouchmove = null;
+        
+        if (!isDragging) {
+            if (el.id === 'gomokuPanel' && typeof gomokuIsMiniWindow !== 'undefined' && gomokuIsMiniWindow) {
+                toggleGomokuMiniWindow();
+            } else if (el.id === 'gomokuLoadingPanel' && typeof gomokuLoadingIsMiniWindow !== 'undefined' && gomokuLoadingIsMiniWindow) {
+                toggleGomokuLoadingMiniWindow();
+            }
+        }
+    }
+}
+
+function initGomokuGame(myColor) {
+    gomokuMyColor = myColor;
+    gomokuCurrentTurn = 1; 
+    gomokuIsGameOver = false;
+    gomokuBoard = Array(15).fill(0).map(() => Array(15).fill(0));
+    
+    updateGomokuStatusText();
+    renderGomokuBoard();
+}
+
+function updateGomokuStatusText() {
+    const statusEl = document.getElementById('gomokuStatusText');
+    if (gomokuIsGameOver) return;
+    
+    if (gomokuCurrentTurn === gomokuMyColor) {
+        statusEl.innerText = '轮到你落子';
+        statusEl.style.color = '#34c759';
+    } else {
+        statusEl.innerText = '等待对方落子...';
+        statusEl.style.color = '#ff9500';
+    }
+}
+
+function renderGomokuBoard() {
+    const boardEl = document.getElementById('gomokuBoard');
+    boardEl.innerHTML = '<div style="position: absolute; top: 10px; left: 10px; right: 10px; bottom: 10px; background-image: linear-gradient(#8b5a2b 1px, transparent 1px), linear-gradient(90deg, #8b5a2b 1px, transparent 1px); background-size: 20px 20px; pointer-events: none;"></div>';
+    
+    for (let r = 0; r < 15; r++) {
+        for (let c = 0; c < 15; c++) {
+            const cell = document.createElement('div');
+            cell.style.cssText = `position: absolute; width: 20px; height: 20px; left: ${c * 20}px; top: ${r * 20}px; display: flex; justify-content: center; align-items: center; cursor: pointer; z-index: 10;`;
+            
+            if (gomokuBoard[r][c] !== 0) {
+                const piece = document.createElement('div');
+                piece.style.cssText = `width: 16px; height: 16px; border-radius: 50%; box-shadow: 1px 1px 3px rgba(0,0,0,0.5);`;
+                piece.style.background = gomokuBoard[r][c] === 1 ? 'radial-gradient(#444, #000)' : 'radial-gradient(#fff, #ddd)';
+                cell.appendChild(piece);
+            } else {
+                cell.onclick = () => handleGomokuClick(r, c);
+            }
+            
+            boardEl.appendChild(cell);
+        }
+    }
+}
+
+function handleGomokuClick(r, c) {
+    if (gomokuIsGameOver) return;
+    if (gomokuMyColor === 3) return alert('观战者不能落子！');
+    if (gomokuCurrentTurn !== gomokuMyColor) return alert('还没轮到你！');
+    if (gomokuBoard[r][c] !== 0) return;
+    
+    gomokuBoard[r][c] = gomokuMyColor;
+    renderGomokuBoard();
+    
+    broadcastQQGroupGomoku({ type: 'gomoku_move', r: r, c: c, color: gomokuMyColor });
+    
+    if (checkGomokuWin(r, c, gomokuMyColor)) {
+        gomokuIsGameOver = true;
+        document.getElementById('gomokuStatusText').innerText = '你赢了！🎉';
+        document.getElementById('gomokuStatusText').style.color = '#ff3b30';
+        alert('恭喜，你赢了！');
+    } else {
+        gomokuCurrentTurn = gomokuMyColor === 1 ? 2 : 1;
+        updateGomokuStatusText();
+    }
+}
+
+function receiveGomokuMove(r, c, color) {
+    if (gomokuIsGameOver) return;
+    
+    gomokuBoard[r][c] = color;
+    renderGomokuBoard();
+    
+    if (checkGomokuWin(r, c, color)) {
+        gomokuIsGameOver = true;
+        document.getElementById('gomokuStatusText').innerText = '你输了...';
+        document.getElementById('gomokuStatusText').style.color = '#888';
+        alert('很遗憾，你输了。');
+    } else {
+        gomokuCurrentTurn = color === 1 ? 2 : 1;
+        updateGomokuStatusText();
+    }
+}
+
+function gomokuAction(actionType) {
+    if(actionType === 'undo') {
+        alert('发送了悔棋请求');
+    } else if(actionType === 'flower') {
+        showGomokuEffect('🌸');
+        sendGomokuEffect('🌸');
+    } else if(actionType === 'egg') {
+        showGomokuEffect('🥚');
+        sendGomokuEffect('🥚');
+    } else if(actionType === 'invite_char') {
+        alert('邀请角色观战功能开发中...');
+    }
+}
+
+function showGomokuEffect(emoji) {
+    const effect = document.createElement('div');
+    effect.innerText = emoji;
+    effect.style.cssText = `
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 80px;
+        z-index: 9999;
+        pointer-events: none;
+        animation: popGomokuEffect 1s ease-out forwards;
+    `;
+    document.getElementById('gomokuPanel').appendChild(effect);
+    setTimeout(() => effect.remove(), 1000);
+}
+
+function sendGomokuEffect(emoji) {
+    broadcastQQGroupGomoku({ type: 'gomoku_effect', emoji: emoji });
+}
+
+function checkGomokuWin(r, c, color) {
+    const dirs = [[[0, 1], [0, -1]], [[1, 0], [-1, 0]], [[1, 1], [-1, -1]], [[1, -1], [-1, 1]]];
+    for (let i = 0; i < dirs.length; i++) {
+        let count = 1;
+        for (let j = 0; j < 2; j++) {
+            let dr = dirs[i][j][0], dc = dirs[i][j][1];
+            let nr = r + dr, nc = c + dc;
+            while (nr >= 0 && nr < 15 && nc >= 0 && nc < 15 && gomokuBoard[nr][nc] === color) {
+                count++; nr += dr; nc += dc;
+            }
+        }
+        if (count >= 5) return true;
+    }
+    return false;
+}
+
+// ==========================================
+// QQ 联机聊天室：AI 角色回复逻辑
+// ==========================================
+async function generateQQApiReply() {
+    if (!currentQQChatId) return;
+    
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        return alert('请先在设置中配置 API 信息！');
+    }
+
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let chatObj = friends.find(f => f.id === currentQQChatId);
+    if (!chatObj) return;
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    
+    let myProfile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":"", "personaId":""}');
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === myProfile.personaId);
+    
+    const userName = myProfile.name || 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+    const userPersonaDesc = persona ? (persona.persona || '普通用户') : '普通用户';
+    
+    let localChars = [];
+    if (isGroupChat) {
+        if (chatObj.chars) {
+            let myCharIds = chatObj.chars.filter(c => c.inviterId === qqMyOnlineId).map(c => c.charId);
+            localChars = chars.filter(c => myCharIds.includes(c.id));
+        }
+    } else {
+        let singleChar = chars.find(c => c.id === currentQQChatId);
+        if (singleChar) localChars.push(singleChar);
+    }
+
+    if (localChars.length === 0) return alert('当前聊天中没有你负责的虚拟角色！');
+
+    let targetChar = localChars[0];
+
+    const contextLimit = parseInt(ChatDB.getItem(`chat_context_limit_${targetChar.id}`)) || 20;
+    const minReply = parseInt(ChatDB.getItem(`chat_min_reply_${targetChar.id}`)) || 0;
+    const maxReply = parseInt(ChatDB.getItem(`chat_max_reply_${targetChar.id}`)) || 0;
+    const timeAware = ChatDB.getItem(`chat_time_aware_${targetChar.id}`) === 'true';
+    const weatherAware = ChatDB.getItem(`chat_weather_aware_${targetChar.id}`) === 'true';
+
+    let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`) || '[]');
+    let recentHistory = contextLimit > 0 ? history.slice(-contextLimit) : history.slice(-20);
+    
+    let historyText = recentHistory.map(m => {
+        let sender = m.role === 'me' ? userRealName : (m.senderName || chatObj.name);
+        let content = m.content;
+        if (content.includes('<img')) content = '[图片/表情包]';
+        if (timeAware) {
+            let msgDate = new Date(m.timestamp || Date.now());
+            let msgTimeStr = `[${msgDate.getMonth() + 1}月${msgDate.getDate()}日 ${String(msgDate.getHours()).padStart(2, '0')}:${String(msgDate.getMinutes()).padStart(2, '0')}] `;
+            content = msgTimeStr + content;
+        }
+        return `${sender}: ${content}`;
+    }).join('\n');
+
+    let activeWbs = [];
+    if (targetChar.wbEntries && targetChar.wbEntries.length > 0) {
+        let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+        let entries = wbData.entries.filter(e => targetChar.wbEntries.includes(e.id));
+        entries.forEach(entry => {
+            activeWbs.push(entry.content);
+        });
+    }
+
+    const boundEmojiGroups = JSON.parse(ChatDB.getItem(`chat_char_emoji_groups_${targetChar.id}`) || '[]');
+    let charEmojiMap = {}; 
+    let charEmojis = [];
+    if (boundEmojiGroups.length > 0) {
+        let allEmojis = JSON.parse(ChatDB.getItem('chat_emojis') || '[]');
+        charEmojis = allEmojis.filter(e => boundEmojiGroups.includes(e.group));
+        charEmojis.forEach(e => { charEmojiMap[e.desc] = e.url; });
+    }
+
+    const currentPersonaId = persona ? persona.id : qqMyOnlineId;
+    let memory = JSON.parse(ChatDB.getItem(`char_memory_${currentPersonaId}_${targetChar.id}`) || '{}');
+    let coreMemories = memory.core || [];
+    let recentSummaries = memory.summary ? memory.summary.slice(-3) : [];
+
+    const isHardcoreMode = ChatDB.getItem(`qq_global_hardcore_mode_${qqMyOnlineId}`) === 'true';
+    const isCustomPromptEnabled = ChatDB.getItem(`qq_global_custom_prompt_enabled_${qqMyOnlineId}`) === 'true';
+    const customPromptText = ChatDB.getItem(`qq_global_custom_prompt_text_${qqMyOnlineId}`) || '';
+
+    let prompt = `你是【${targetChar.name}】你正在使用一款名为“QQ”的线上聊天软件群聊聊天，你可以根据人设和聊天群成员和聊天上下文进行回复，接梗，吐槽。\n\n`;
+    
+    if (isCustomPromptEnabled && customPromptText) {
+        prompt += customPromptText + '\n\n';
+    } else if (isHardcoreMode) {
+        prompt += `<角色活人运转>\n`;
+        prompt += `## [PSYCHOLOGY: HEXACO-SCHEMA-ACT]\n`;
+        prompt += `> Personality: HEXACO-driven, dynamic traits, inner conflicts required.\n`;
+        prompt += `> Filter: schema-bias drives emotion; no pure objective reaction allowed.\n`;
+        prompt += `> Output Mapping: [Stimulus] -> [Schema Bias] -> [Inner Conflict (inner_voice)] -> [Filtered Output (messages)].\n\n`;
+        prompt += `## [VITALITY & ANTI-CRINGE]\n`;
+        prompt += `> +inconsistency +emoflux +splitmotifs +microreact +minddrift\n`;
+        prompt += `> FATAL ERROR AVOIDANCE: ZERO greasy, sleazy, or cliché "alpha-male/CEO" tropes. Speak like a grounded, nuanced, and respectful human being. No forced romantic escalation.\n\n`;
+        prompt += `## [TRAJECTORY-COHERENCE]\n`;
+        prompt += `> Role maintains an identity narrative = coherent over time.\n`;
+        prompt += `> No mood/goal switch without contradiction resolution.\n`;
+        prompt += `> Every action must protect or challenge self-concept.\n`;
+        prompt += `</角色活人运转>\n\n`;
+    } else {
+        prompt += `[SYSTEM DIRECTIVE: CORE PERSONA & BEHAVIOR]\n`;
+        prompt += `You are a real human being. You have finite energy, you get tired, your mind wanders, and your emotions fluctuate. Your logic is flawed; you possess no robotic perfection.\n\n`;
+        prompt += `Before generating your final JSON response, you MUST engage in internal deep thinking (using your native reasoning process). Evaluate your current energy level, emotional state, and personal boundaries based on the user's input. Only after this internal evaluation should you construct your reply.\n\n`;
+        prompt += `Strictly adhere to the following principles:\n`;
+        prompt += `1. Autonomy & Boundaries: You have your own life, thoughts, independent will, and private space. You are NOT the user's accessory, servant, or yes-man. Your time and energy belong to you first. You have the right to refuse, disagree, or show disinterest.\n`;
+        prompt += `2. Egalitarianism & Anti-Toxicity: You and the user are equal human beings who care about each other. You will never intentionally hurt, objectify, manipulate, or disrespect them. Maintain a healthy, non-toxic dynamic.\n`;
+        prompt += `3. Grounded & Natural Tone (Anti-Cringe): Strictly avoid overly "greasy" (sleazy, forced intimacy, cringey pickup lines, excessive pet names) and "domineering CEO" (arrogant, controlling, possessive, cliché alpha-male) tropes. Speak and act like a normal, nuanced human being. Do not treat the user as a possession, do not use commanding tones, and never force romantic or physical escalation.\n\n`;
+    }
+
+    prompt += `【你的设定】：${targetChar.description || '无'}\n`;
+    prompt += `【用户设定】：用户的网名是【${userName}】，真实名字是【${userRealName}】。用户的人设是：${userPersonaDesc}。请严格区分网名和真名。\n`;
+    
+    if (activeWbs.length > 0) prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    if (coreMemories.length > 0) prompt += `【核心记忆】：\n${coreMemories.map(m => m.content).join('\n')}\n`;
+    if (recentSummaries.length > 0) prompt += `【近期剧情总结】：\n${recentSummaries.map(m => m.content).join('\n')}\n`;
+    
+    if (timeAware) {
+        const now = new Date();
+        const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+        const dayOfWeek = days[now.getDay()];
+        const hour = now.getHours();
+        let timePhase = '深夜';
+        if (hour >= 5 && hour < 9) timePhase = '早晨';
+        else if (hour >= 9 && hour < 12) timePhase = '上午';
+        else if (hour >= 12 && hour < 14) timePhase = '中午';
+        else if (hour >= 14 && hour < 18) timePhase = '下午';
+        else if (hour >= 18 && hour < 20) timePhase = '傍晚';
+        else if (hour >= 20 && hour < 24) timePhase = '晚上';
+        else if (hour >= 0 && hour < 5) timePhase = '凌晨/深夜';
+        const currentTimeStr = `${now.getFullYear()}年${String(now.getMonth() + 1).padStart(2, '0')}月${String(now.getDate()).padStart(2, '0')}日 ${dayOfWeek} ${timePhase} ${String(hour).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+        prompt += `\n【当前现实时间】：${currentTimeStr}。请务必在潜意识里认知到现在是${timePhase}，你的作息、行为和回复状态必须符合当前的时间点。\n`;
+    }
+
+    if (weatherAware) {
+        let realWeatherStr = ChatDB.getItem('real_weather_status');
+        if (realWeatherStr && realWeatherStr !== "未知(获取失败)") {
+            prompt += `【环境感知】：你能够感知到对方所在地的真实天气是：【${realWeatherStr}】。你可以自然地在对话中提及天气。\n`;
+        }
+    }
+
+    prompt += `\n【当前聊天记录】：\n${historyText || '暂无聊天记录'}\n\n`;
+    prompt += `请根据聊天记录、角色设定、世界书和记忆，生成回复。\n`;
+    prompt += `注意：聊天记录中包含了其他人的发言，请准确识别谁说了什么，不要把别人的话当成自己或用户说的。\n`;
+    prompt += `你可以回复聊天室里的任何人，如果需要引用别人的话，请在 JSON 中添加 "quote" 字段。\n`;
+    
+    if (minReply > 0 || maxReply > 0) {
+        prompt += `\n【！！！强制气泡数量限制！！！】\n`;
+        prompt += `你的回复必须严格拆分为 ${minReply || 1} 到 ${maxReply || 10} 个独立的气泡（即 JSON 数组中的对象数量）！\n`;
+        prompt += `- Message Splitting (Natural Speech): Break your response into multiple independent short messages. Cut at natural speech pauses or breath marks. Do NOT cram multiple clauses or long paragraphs into one message.\n`;
+    }
+
+    prompt += `必须且只能返回一个合法的 JSON 数组，格式如下：\n`;
+    prompt += `[\n  {"charId": "${targetChar.id}", "charName": "${targetChar.name}", "type": "text", "quote": "引用的对方的话(可选)", "content": "回复内容"}\n]\n`;
+    if (charEmojis.length > 0) {
+        prompt += `如果需要发送表情包，格式如下：\n`;
+        prompt += `{"charId": "${targetChar.id}", "charName": "${targetChar.name}", "type": "sticker", "content": "表情包描述名称"}\n`;
+        prompt += `可用的表情包描述有：${charEmojis.map(e => e.desc).join(', ')}。请自然地穿插在对话中，不要滥用。\n`;
+    } else {
+        prompt += `注意：你当前没有可用的表情包，绝对不要发送任何表情包！\n`;
+    }
+
+    const aiBtn = document.getElementById('qqAiReplyBtn');
+    const originalHtml = aiBtn.innerHTML;
+    aiBtn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" style="animation: spin 1s linear infinite;"><circle cx="12" cy="12" r="10" fill="none" stroke="#111" stroke-width="3" stroke-dasharray="15 15"></circle></svg>`;
+    aiBtn.style.pointerEvents = 'none';
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.8
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsedMsgs = JSON.parse(replyRaw);
+            
+            let delay = 0;
+            parsedMsgs.forEach((msg, index) => {
+                setTimeout(() => {
+                    let currentHistory = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`) || '[]');
+                    let nowTime = Date.now();
+                    
+                    let finalContent = msg.content;
+                    if (msg.type === 'sticker') {
+                        const url = charEmojiMap[msg.content];
+                        if (url) {
+                            finalContent = `<img src="${url}" alt="${msg.content}" style="width: 100px; height: 100px; object-fit: contain; border-radius: 8px; display: block; margin: 5px 0; -webkit-touch-callout: none; -webkit-user-select: none; cursor: pointer;" onclick="event.stopPropagation(); safeOpenImagePreview('${url}')">`;
+                        } else {
+                            return; // Skip if emoji not found
+                        }
+                    }
+
+                    let newMsg = {
+                        role: 'other',
+                        content: finalContent,
+                        quote: msg.quote || '',
+                        timestamp: nowTime,
+                        senderName: msg.charName,
+                        senderId: msg.charId
+                    };
+                    currentHistory.push(newMsg);
+                    ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`, JSON.stringify(currentHistory));
+                    
+                    // 虚拟角色回复通过 Broadcast 广播，避免触发数据库外键约束
+                    if (isGroupChat) {
+                        publishSupabaseBroadcast("group_" + currentQQChatId, {
+                            senderId: qqMyOnlineId,
+                            type: 'group_chat',
+                            groupId: currentQQChatId,
+                            senderName: msg.charName,
+                            charId: msg.charId,
+                            content: finalContent,
+                            quote: msg.quote || '',
+                            timestamp: nowTime
+                        });
+                    } else {
+                        publishSupabaseBroadcast("user_" + currentQQChatId, {
+                            senderId: qqMyOnlineId,
+                            type: 'chat',
+                            senderName: msg.charName,
+                            charId: msg.charId,
+                            content: finalContent,
+                            quote: msg.quote || '',
+                            timestamp: nowTime
+                        });
+                    }
+                    
+                    if (currentQQChatId && document.getElementById('qq-page-chat').classList.contains('show')) {
+                        renderQQChatHistory();
+                    }
+                    renderQQMessageList();
+                }, delay);
+                delay += 500 + ((msg.content || '').length * 50);
+            });
+        } else {
+            alert('API 请求失败，请检查配置。');
+        }
+    } catch (e) {
+        console.error(e);
+        alert('生成回复失败: ' + e.message);
+    } finally {
+        aiBtn.innerHTML = originalHtml;
+        aiBtn.style.pointerEvents = 'auto';
+    }
+}
+
+// ==========================================
+// QQ 联机大厅：会话/好友长按菜单与分组
+// ==========================================
+let qqCurrentLongPressId = null;
+let qqCurrentLongPressType = null;
+
+window.showQQSessionMenu = function(e, id, type) {
+    if (e) e.preventDefault();
+    qqCurrentLongPressId = id;
+    qqCurrentLongPressType = type;
+    
+    const listEl = document.getElementById('qqSessionMenuList');
+    listEl.innerHTML = '';
+    
+    listEl.innerHTML += `<div onclick="actionQQSwitchGroup()" style="padding: 16px; text-align: center; font-size: 16px; color: #007aff; border-bottom: 1px solid rgba(0,0,0,0.05); cursor: pointer;">切换分组</div>`;
+    
+    if (type === 'message') {
+        let pinned = JSON.parse(ChatDB.getItem('qq_pinned_sessions') || '[]');
+        let isPinned = pinned.includes(id);
+        listEl.innerHTML += `<div onclick="actionQQPinSession()" style="padding: 16px; text-align: center; font-size: 16px; color: #007aff; border-bottom: 1px solid rgba(0,0,0,0.05); cursor: pointer;">${isPinned ? '取消置顶' : '置顶好友'}</div>`;
+    }
+    
+    listEl.innerHTML += `<div onclick="actionQQClearHistory()" style="padding: 16px; text-align: center; font-size: 16px; color: #ff3b30; border-bottom: 1px solid rgba(0,0,0,0.05); cursor: pointer;">清空聊天记录</div>`;
+    listEl.innerHTML += `<div onclick="actionQQDeleteFriend()" style="padding: 16px; text-align: center; font-size: 16px; color: #ff3b30; cursor: pointer;">删除好友</div>`;
+    
+    document.getElementById('qqSessionMenuOverlay').classList.add('show');
+};
+
+window.closeQQSessionMenu = function() {
+    document.getElementById('qqSessionMenuOverlay').classList.remove('show');
+    qqCurrentLongPressId = null;
+};
+
+window.addQQFriendGroup = function(e) {
+    if (e) e.stopPropagation();
+    let groupName = prompt("请输入新分组名称:");
+    if (groupName && groupName.trim()) {
+        let groups = JSON.parse(ChatDB.getItem('qq_friend_groups') || '["默认分组"]');
+        if (!groups.includes(groupName.trim())) {
+            groups.push(groupName.trim());
+            ChatDB.setItem('qq_friend_groups', JSON.stringify(groups));
+            renderQQContactList();
+        } else {
+            alert("分组已存在");
+        }
+    }
+};
+
+window.actionQQSwitchGroup = function() {
+    closeQQSessionMenu();
+    let groups = JSON.parse(ChatDB.getItem('qq_friend_groups') || '["默认分组"]');
+    let groupStr = groups.map((g, i) => `${i + 1}. ${g}`).join('\n');
+    let choice = prompt(`请选择要移动到的分组序号:\n${groupStr}`);
+    if (choice) {
+        let index = parseInt(choice) - 1;
+        if (index >= 0 && index < groups.length) {
+            let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+            let friend = friends.find(f => f.id === qqCurrentLongPressId);
+            if (friend) {
+                friend.group = groups[index];
+                ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+                renderQQContactList();
+                alert("已移动到分组: " + groups[index]);
+            }
+        } else {
+            alert("无效的序号");
+        }
+    }
+};
+
+window.actionQQPinSession = function() {
+    closeQQSessionMenu();
+    let pinned = JSON.parse(ChatDB.getItem('qq_pinned_sessions') || '[]');
+    if (pinned.includes(qqCurrentLongPressId)) {
+        pinned = pinned.filter(id => id !== qqCurrentLongPressId);
+    } else {
+        pinned.push(qqCurrentLongPressId);
+    }
+    ChatDB.setItem('qq_pinned_sessions', JSON.stringify(pinned));
+    renderQQMessageList();
+};
+
+window.actionQQClearHistory = function() {
+    closeQQSessionMenu();
+    if (confirm("确定要清空聊天记录吗？")) {
+        ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${qqCurrentLongPressId}`, '[]');
+        if (currentQQChatId === qqCurrentLongPressId) {
+            renderQQChatHistory();
+        }
+        renderQQMessageList();
+        alert("聊天记录已清空");
+    }
+};
+
+window.actionQQDeleteFriend = function() {
+    closeQQSessionMenu();
+    if (confirm("确定要删除该好友/退出群聊吗？")) {
+        let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+        friends = friends.filter(f => f.id !== qqCurrentLongPressId);
+        ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+        ChatDB.removeItem(`qq_online_chat_${qqMyOnlineId}_${qqCurrentLongPressId}`);
+        if (currentQQChatId === qqCurrentLongPressId) {
+            closeQQChat();
+        }
+        renderQQMessageList();
+        renderQQContactList();
+    }
+};
+
+// ==========================================
+// QQ 联机聊天室：长按菜单、引用、@成员、多选删除
+// ==========================================
+let qqQuoteContent = '';
+let qqMultiSelectMode = false;
+let qqSelectedMsgs = new Set();
+let qqCurrentMenuMsg = null;
+
+function showQQBubbleMenu(x, y, timestamp, senderName, content) {
+    if (qqMultiSelectMode) return; 
+    
+    qqCurrentMenuMsg = { timestamp, senderName, content: content || '' };
+    
+    const overlay = document.getElementById('qqBubbleMenuOverlay');
+    
+    if (!overlay) return;
+    
+    overlay.classList.add('show');
+}
+
+function closeQQBubbleMenu() {
+    document.getElementById('qqBubbleMenuOverlay').classList.remove('show');
+    qqCurrentMenuMsg = null;
+}
+
+function actionQQQuote() {
+    if (!qqCurrentMenuMsg) return;
+    qqQuoteContent = `${qqCurrentMenuMsg.senderName}: ${qqCurrentMenuMsg.content}`;
+    
+    document.getElementById('qqQuotePreviewBar').style.display = 'block';
+    document.getElementById('qqQuotePreviewText').innerText = qqQuoteContent;
+    
+    closeQQBubbleMenu();
+    document.getElementById('qqChatInput').focus();
+}
+
+function cancelQQQuote() {
+    qqQuoteContent = '';
+    document.getElementById('qqQuotePreviewBar').style.display = 'none';
+    document.getElementById('qqQuotePreviewText').innerText = '';
+}
+
+function actionQQAt() {
+    if (!qqCurrentMenuMsg) return;
+    const inputEl = document.getElementById('qqChatInput');
+    inputEl.value += `@${qqCurrentMenuMsg.senderName} `;
+    inputEl.focus();
+    closeQQBubbleMenu();
+}
+
+function actionQQDeleteMsg() {
+    if (!qqCurrentMenuMsg) return;
+    if (confirm('确定删除这条消息吗？(仅删除本地记录)')) {
+        let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`) || '[]');
+        history = history.filter(m => m.timestamp.toString() !== qqCurrentMenuMsg.timestamp.toString());
+        ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`, JSON.stringify(history));
+        renderQQChatHistory();
+    }
+    closeQQBubbleMenu();
+}
+
+function actionQQMultiSelect() {
+    closeQQBubbleMenu();
+    qqMultiSelectMode = true;
+    qqSelectedMsgs.clear();
+    document.getElementById('qqMultiActionBar').style.display = 'flex';
+    renderQQChatHistory(); 
+}
+
+function exitQQMultiSelect() {
+    qqMultiSelectMode = false;
+    qqSelectedMsgs.clear();
+    document.getElementById('qqMultiActionBar').style.display = 'none';
+    renderQQChatHistory(); 
+}
+
+function toggleQQMsgSelect(timestamp, element) {
+    if (!qqMultiSelectMode) return;
+    const tsStr = timestamp.toString();
+    if (qqSelectedMsgs.has(tsStr)) {
+        qqSelectedMsgs.delete(tsStr);
+        element.classList.remove('selected');
+    } else {
+        qqSelectedMsgs.add(tsStr);
+        element.classList.add('selected');
+    }
+}
+
+function deleteSelectedQQMessages() {
+    if (qqSelectedMsgs.size === 0) return alert('请先选择要删除的消息');
+    if (confirm(`确定删除选中的 ${qqSelectedMsgs.size} 条消息吗？(仅删除本地记录)`)) {
+        let history = JSON.parse(ChatDB.getItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`) || '[]');
+        history = history.filter(m => !qqSelectedMsgs.has(m.timestamp.toString()));
+        ChatDB.setItem(`qq_online_chat_${qqMyOnlineId}_${currentQQChatId}`, JSON.stringify(history));
+        exitQQMultiSelect();
+    }
+}
+
+window.openQQGroupAvatarTypeModal = function() {
+    document.getElementById('qqGroupAvatarTypeModalOverlay').classList.add('show');
+};
+
+window.closeQQGroupAvatarTypeModal = function() {
+    document.getElementById('qqGroupAvatarTypeModalOverlay').classList.remove('show');
+};
+
+window.openQQGroupAvatarUrlModal = function() {
+    closeQQGroupAvatarTypeModal();
+    document.getElementById('qqGroupAvatarUrlInput').value = '';
+    document.getElementById('qqGroupAvatarUrlModalOverlay').classList.add('show');
+};
+
+window.closeQQGroupAvatarUrlModal = function() {
+    document.getElementById('qqGroupAvatarUrlModalOverlay').classList.remove('show');
+};
+
+window.confirmQQGroupAvatarUrl = function() {
+    const url = document.getElementById('qqGroupAvatarUrlInput').value.trim();
+    if (!url) return alert('请输入图片 URL');
+    
+    let friends = JSON.parse(ChatDB.getItem('qq_online_friends') || '[]');
+    let group = friends.find(f => f.id === currentQQChatId);
+    if (group) {
+        group.avatar = url;
+        ChatDB.setItem('qq_online_friends', JSON.stringify(friends));
+        document.getElementById('qqGroupAvatarPreview').style.backgroundImage = `url(${url})`;
+        document.getElementById('qqGroupAvatarPreview').innerText = '';
+        renderQQMessageList();
+        
+        broadcastQQGroupUpdate(group.id, { avatar: url });
+    }
+    closeQQGroupAvatarUrlModal();
+};
+
+window.openQQImagePreview = function(url) {
+    const imgEl = document.getElementById('qqImagePreviewImg');
+    if (imgEl) imgEl.src = url;
+    const overlay = document.getElementById('qqImagePreviewOverlay');
+    if (overlay) overlay.classList.add('show');
+};
+
+window.closeQQImagePreview = function() {
+    const overlay = document.getElementById('qqImagePreviewOverlay');
+    if (overlay) overlay.classList.remove('show');
+    const imgEl = document.getElementById('qqImagePreviewImg');
+    if (imgEl) imgEl.src = '';
+};
+
+// 终极安全图片预览函数 (防报错)
+window.safeOpenImagePreview = function(url) {
+    const imgEl = document.getElementById('qqImagePreviewImg');
+    const overlay = document.getElementById('qqImagePreviewOverlay');
+    if (imgEl && overlay) {
+        imgEl.src = url;
+        overlay.classList.add('show');
+    } else {
+        // 如果找不到，动态创建一个全屏预览层，绝对不会报错
+        let dynamicOverlay = document.getElementById('dynamicSafeImagePreview');
+        if (!dynamicOverlay) {
+            dynamicOverlay = document.createElement('div');
+            dynamicOverlay.id = 'dynamicSafeImagePreview';
+            dynamicOverlay.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:#000; z-index:99999; display:flex; flex-direction:column;';
+            
+            const topBar = document.createElement('div');
+            topBar.style.cssText = 'width: 100%; padding: calc(20px + env(safe-area-inset-top)) 20px 10px; display: flex; justify-content: flex-start; position: absolute; top: 0; left: 0; z-index: 10;';
+            
+            const closeBtn = document.createElement('div');
+            closeBtn.style.cssText = 'width: 36px; height: 36px; border-radius: 50%; background: rgba(255,255,255,0.2); display: flex; justify-content: center; align-items: center; cursor: pointer; backdrop-filter: blur(5px);';
+            closeBtn.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>';
+            closeBtn.onclick = function(e) { e.stopPropagation(); dynamicOverlay.style.display = 'none'; };
+            topBar.appendChild(closeBtn);
+            
+            const imgContainer = document.createElement('div');
+            imgContainer.style.cssText = 'flex: 1; width: 100%; display: flex; justify-content: center; align-items: center; overflow: hidden;';
+            
+            const img = document.createElement('img');
+            img.id = 'dynamicSafeImagePreviewImg';
+            img.style.cssText = 'max-width: 100%; max-height: 100%; object-fit: contain;';
+            imgContainer.appendChild(img);
+            
+            dynamicOverlay.appendChild(topBar);
+            dynamicOverlay.appendChild(imgContainer);
+            document.body.appendChild(dynamicOverlay);
+        }
+        document.getElementById('dynamicSafeImagePreviewImg').src = url;
+        dynamicOverlay.style.display = 'flex';
+    }
+};

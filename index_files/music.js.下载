@@ -1,0 +1,4607 @@
+// ==========================================
+// Music 模块专属逻辑 (music.js)
+// ==========================================
+
+const musicPanel = document.getElementById('musicPanel');
+const musicLoginPanel = document.getElementById('musicLoginPanel');
+
+// 音乐播放器核心实例
+const audioPlayer = new Audio();
+audioPlayer.autoplay = true;
+audioPlayer.preload = 'auto';
+// 自动播放下一首
+audioPlayer.addEventListener('ended', () => {
+    if (currentPlayMode === 'single') {
+        audioPlayer.currentTime = 0;
+        audioPlayer.play();
+    } else if (currentPlayMode === 'random') {
+        playRandomMusicSong(true);
+    } else {
+        playNextMusicSong(true); // 传入 true 表示自动切歌
+    }
+});
+
+function playRandomMusicSong(isAuto = false) {
+    if (!window.currentPlaylistTracks || window.currentPlaylistTracks.length === 0) return;
+    let nextIndex = Math.floor(Math.random() * window.currentPlaylistTracks.length);
+    const nextSong = window.currentPlaylistTracks[nextIndex];
+    executePlaySongObj(nextSong);
+    if (window.currentListenTogetherCharId) {
+        addMusicSystemMessage(isAuto ? `自动随机切换到了下一首` : `我 随机切到了下一首`);
+    }
+}
+
+// 👇 新增：监听元数据加载完毕，恢复刷新页面前的播放进度
+audioPlayer.addEventListener('loadedmetadata', () => {
+    if (window.pendingRestoreTime && isFinite(window.pendingRestoreTime)) {
+        audioPlayer.currentTime = window.pendingRestoreTime;
+        window.pendingRestoreTime = null;
+    }
+});
+// 👆 新增结束
+
+
+let currentPlayingSong = null;
+
+// ==========================================
+// 👇 新增：系统级后台播放保活与锁屏控制逻辑 👇
+// ==========================================
+function updateSystemMediaSession() {
+    if ('mediaSession' in navigator && currentPlayingSong) {
+        // 处理封面 URL，确保获取高清大图以供锁屏显示
+        let coverUrl = currentPlayingSong.cover || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg';
+        if (coverUrl.includes('?param=')) {
+            coverUrl = coverUrl.replace(/\?param=\d+y\d+/, '?param=512y512');
+        } else if (coverUrl.includes('music.126.net')) {
+            coverUrl += '?param=512y512';
+        }
+
+        // 1. 将当前歌曲信息推送到手机锁屏界面
+        navigator.mediaSession.metadata = new MediaMetadata({
+            title: currentPlayingSong.title || '未知歌曲',
+            artist: currentPlayingSong.artist || '未知歌手',
+            album: '溪玉机 Music',
+            artwork: [
+                { src: coverUrl, sizes: '96x96', type: 'image/jpeg' },
+                { src: coverUrl, sizes: '128x128', type: 'image/jpeg' },
+                { src: coverUrl, sizes: '192x192', type: 'image/jpeg' },
+                { src: coverUrl, sizes: '256x256', type: 'image/jpeg' },
+                { src: coverUrl, sizes: '384x384', type: 'image/jpeg' },
+                { src: coverUrl, sizes: '512x512', type: 'image/jpeg' }
+            ]
+        });
+
+        // 2. 接管锁屏界面的播放控制按键，确保后台能切歌
+        navigator.mediaSession.setActionHandler('play', () => {
+            if (audioPlayer.src && audioPlayer.src !== window.location.href) {
+                audioPlayer.play().catch(e => console.warn("后台播放失败:", e));
+                const disc = document.querySelector('.mp-disc-outer');
+                if (disc) disc.style.animationPlayState = 'running';
+            }
+        });
+        
+        navigator.mediaSession.setActionHandler('pause', () => {
+            audioPlayer.pause();
+            const disc = document.querySelector('.mp-disc-outer');
+            if (disc) disc.style.animationPlayState = 'paused';
+        });
+        
+        navigator.mediaSession.setActionHandler('previoustrack', () => {
+            if (typeof playPrevMusicSong === 'function') playPrevMusicSong();
+        });
+        
+        navigator.mediaSession.setActionHandler('nexttrack', () => {
+            if (typeof playNextMusicSong === 'function') playNextMusicSong();
+        });
+    }
+}
+
+// 监听音频被系统强行打断（如来电话），防止状态错乱
+audioPlayer.addEventListener('pause', () => {
+    const disc = document.querySelector('.mp-disc-outer');
+    if (disc) disc.style.animationPlayState = 'paused';
+});
+// 👆 新增结束 👆
+
+// 音乐 API 配置 (完全还原 script.js 逻辑)
+let currentMusicSearchApi = localStorage.getItem('music_search_api') || 'primary';
+let currentMusicPlayApi = localStorage.getItem('music_play_api') || 'miemie';
+
+function getMusicSearchApiUrl() {
+    const customApi = localStorage.getItem('music_custom_api');
+    if (customApi) return customApi.replace(/\/$/, ''); // 如果配置了专属API，强制使用
+
+    if (currentMusicSearchApi === 'secondary') return 'https://ncmapi.btwoa.com';
+    if (currentMusicSearchApi === 'tertiary') return 'https://music163.xuanmou.com.cn'; 
+    if (currentMusicSearchApi === 'api4') return 'https://api-music.kingcola-icg.cn'; 
+    if (currentMusicSearchApi === 'api5') return 'https://neteaseapi.gksm.store'; 
+    return 'https://zm.wwoyun.cn'; // primary
+}
+
+function getMusicPlayApiUrl() {
+    const customApi = localStorage.getItem('music_custom_api');
+    if (customApi) return customApi.replace(/\/$/, ''); // 如果配置了专属API，强制使用
+
+    if (currentMusicPlayApi === 'zhizhi') return 'https://api.msls1441.com';
+    return 'https://api.qijieya.cn/meting'; // miemie
+}
+
+function saveMusicCustomApi(val) {
+    if (val.trim() === '') {
+        localStorage.removeItem('music_custom_api');
+        alert('已清除专属 API，恢复使用内置接口。');
+    } else {
+        localStorage.setItem('music_custom_api', val.trim());
+        alert('专属 API 设置成功！');
+    }
+}
+
+// 初始化时读取自定义 API
+window.addEventListener('DOMContentLoaded', () => {
+    const customApi = localStorage.getItem('music_custom_api');
+    const inputEl = document.getElementById('musicCustomApiInput');
+    if (customApi && inputEl) {
+        inputEl.value = customApi;
+    }
+});
+
+// ==========================================
+// 1. 登录与基础面板逻辑
+// ==========================================
+function openMusicApp() {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (musicLoginId) {
+        // 核心修复：从所有实体中检查登录状态，防止 Char 刷新后被踢出
+        let allEntities = getAllEntities();
+        if (allEntities.some(a => a.id === musicLoginId)) {
+            enterMusicMain();
+            return;
+        } else {
+            // 账号已失效，清理残留状态
+            ChatDB.removeItem('music_current_login_account');
+            audioPlayer.pause();
+            audioPlayer.src = '';
+            currentPlayingSong = null;
+            window.currentPlaylistTracks = [];
+            const capsuleContainer = document.getElementById('globalMusicCapsuleContainer');
+            if (capsuleContainer) capsuleContainer.style.display = 'none';
+            isCapsuleVisible = false;
+            localStorage.setItem('music_capsule_visible', 'false');
+        }
+    }
+    renderMusicAccountList();
+    musicLoginPanel.style.display = 'flex';
+}
+
+// 【新增】：应用装扮设置的核心函数
+function applyMusicMeDressUp(musicLoginId) {
+    if (!musicLoginId) return;
+
+    const pageMe = document.getElementById('music-page-me');
+    const bgLayer = document.getElementById('musicMeBgLayer');
+    const sigEl = document.getElementById('musicMeSignature');
+    const bottomNav = document.querySelector('.music-bottom-nav');
+    
+    if (!pageMe || !bgLayer) return;
+
+    // 应用签名
+    const savedSig = ChatDB.getItem(`music_me_signature_${musicLoginId}`);
+    if (sigEl) sigEl.innerText = savedSig || '这个人很懒，什么都没写~';
+
+    // 应用颜色变量 (同步到底栏)
+    const textColor = ChatDB.getItem(`music_me_text_color_${musicLoginId}`) || '#111111'; // 默认黑色
+    const iconColor = ChatDB.getItem(`music_me_icon_color_${musicLoginId}`) || '#111111';
+    pageMe.style.setProperty('--me-text-color', textColor);
+    pageMe.style.setProperty('--me-icon-color', iconColor);
+    if (bottomNav) {
+        bottomNav.style.setProperty('--me-text-color', textColor);
+        bottomNav.style.setProperty('--me-icon-color', iconColor);
+    }
+
+    // 应用背景模式与遮罩度
+    const bgMode = ChatDB.getItem(`music_me_bg_mode_${musicLoginId}`) || 'half';
+    const bgMaskValue = ChatDB.getItem(`music_me_bg_mask_${musicLoginId}`) || '0.3';
+    const savedBg = ChatDB.getItem(`music_me_bg_${musicLoginId}`);
+    const bgMask = document.getElementById('musicMeBgMask');
+
+    // 恢复背景层本身的不透明度
+    bgLayer.style.opacity = '1';
+
+    if (savedBg) {
+        bgLayer.style.backgroundImage = `url('${savedBg}')`;
+        if (bgMask) bgMask.style.backgroundColor = `rgba(0, 0, 0, ${bgMaskValue})`;
+    } else {
+        bgLayer.style.backgroundImage = 'none';
+        bgLayer.style.backgroundColor = '#ccc';
+        if (bgMask) bgMask.style.backgroundColor = 'rgba(0, 0, 0, 0)';
+    }
+
+    if (bgMode === 'full') {
+        pageMe.classList.add('is-fullscreen-bg');
+        if (pageMe.classList.contains('active') && bottomNav) {
+            bottomNav.classList.add('is-transparent');
+        }
+    } else {
+        pageMe.classList.remove('is-fullscreen-bg');
+        if (bottomNav) {
+            bottomNav.classList.remove('is-transparent');
+        }
+    }
+}
+
+// 处理个人主页背景上传
+function handleMusicMeBgUpload(event) {
+    const file = event.target.files[0];
+    if (file) {
+        window.globalCompressImage(file, 1080, function(compressedUrl) {
+            const musicLoginId = ChatDB.getItem('music_current_login_account');
+            if (musicLoginId) {
+                try {
+                    ChatDB.setItem(`music_me_bg_${musicLoginId}`, compressedUrl);
+                    applyMusicMeDressUp(musicLoginId); // 重新应用以刷新背景
+                } catch (err) {
+                    console.warn("图片过大，无法持久化保存", err);
+                    alert("图片体积过大，本次已应用，但可能无法永久保存。");
+                }
+            }
+        });
+    }
+    event.target.value = '';
+}
+
+// 打开装扮弹窗
+function openMusicDressUpModal() {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (!musicLoginId) return;
+
+    // 读取签名
+    const savedSig = ChatDB.getItem(`music_me_signature_${musicLoginId}`);
+    const inputEl = document.getElementById('musicSignatureInput');
+    if (inputEl) inputEl.value = savedSig || '';
+
+    // 读取背景模式与遮罩度
+    const bgMode = ChatDB.getItem(`music_me_bg_mode_${musicLoginId}`) || 'half';
+    const bgMaskValue = ChatDB.getItem(`music_me_bg_mask_${musicLoginId}`) || '0.3';
+    document.getElementById('musicBgModeSelect').value = bgMode;
+    const maskInput = document.getElementById('musicBgMaskInput');
+    if (maskInput) maskInput.value = bgMaskValue;
+
+    // 读取颜色
+    const textColor = ChatDB.getItem(`music_me_text_color_${musicLoginId}`) || '#111111';
+    const iconColor = ChatDB.getItem(`music_me_icon_color_${musicLoginId}`) || '#111111';
+    document.getElementById('musicTextColorInput').value = textColor;
+    document.getElementById('musicIconColorInput').value = iconColor;
+
+    document.getElementById('musicDressUpModal').classList.add('show');
+}
+
+// 保存装扮设置
+function saveMusicDressUp() {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (!musicLoginId) return;
+
+    const sigVal = document.getElementById('musicSignatureInput').value.trim();
+    const bgMode = document.getElementById('musicBgModeSelect').value;
+    const bgMaskValue = document.getElementById('musicBgMaskInput') ? document.getElementById('musicBgMaskInput').value : '0.3';
+    const textColor = document.getElementById('musicTextColorInput').value;
+    const iconColor = document.getElementById('musicIconColorInput').value;
+
+    ChatDB.setItem(`music_me_signature_${musicLoginId}`, sigVal);
+    ChatDB.setItem(`music_me_bg_mode_${musicLoginId}`, bgMode);
+    ChatDB.setItem(`music_me_bg_mask_${musicLoginId}`, bgMaskValue);
+    ChatDB.setItem(`music_me_text_color_${musicLoginId}`, textColor);
+    ChatDB.setItem(`music_me_icon_color_${musicLoginId}`, iconColor);
+
+    applyMusicMeDressUp(musicLoginId);
+    document.getElementById('musicDressUpModal').classList.remove('show');
+}
+
+// 页面加载时不再单独恢复签名，统一由 renderMusicMePage 处理
+// window.addEventListener('DOMContentLoaded', () => { ... });
+
+function renderMusicAccountList() {
+    const listEl = document.getElementById('musicAccountSelectList');
+    if (listEl) listEl.innerHTML = '';
+    
+    let allEntities = getAllEntities();
+    let displayList = [];
+
+    // 核心修改：只要是真实用户，或者是有账号密码的角色，都可以登录
+    allEntities.forEach(entity => {
+        if (entity.isAccount || (entity.account && entity.password)) {
+            displayList.push(entity);
+        }
+    });
+
+    if (displayList.length === 0) {
+        if (listEl) listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 13px; margin-top: 20px;">暂无可用账号，请先在 Chat 中注册或为角色生成私密账号</div>';
+        return;
+    }
+    
+    displayList.forEach(acc => {
+        const isChar = !acc.isAccount;
+        const typeTag = isChar ? '<span style="font-size:10px; background:#eee; color:#888; padding:2px 4px; border-radius:4px; margin-left:6px;">角色</span>' : '';
+        
+        if (listEl) {
+            const card = document.createElement('div');
+            card.className = 'music-account-card';
+            card.onclick = () => {
+                ChatDB.setItem('music_current_login_account', acc.id);
+                musicLoginPanel.style.display = 'none';
+                enterMusicMain();
+            };
+            card.innerHTML = `
+                <div class="music-account-avatar" style="background-image: url('${acc.avatarUrl || ''}')"></div>
+                <div class="music-account-info">
+                    <div class="music-account-name">${acc.netName || acc.name || '未命名'}${typeTag}</div>
+                    <div class="music-account-id">${isChar ? 'Char Account: ' + acc.account : 'Account: ' + acc.account}</div>
+                </div>
+            `;
+            listEl.appendChild(card);
+        }
+    });
+
+    // 新增：渲染侧边栏的横向账号列表
+    const sidebarListEl = document.getElementById('musicSidebarAccountList');
+    if (sidebarListEl) {
+        sidebarListEl.innerHTML = '';
+        const currentLoginId = ChatDB.getItem('music_current_login_account');
+        
+        displayList.forEach(acc => {
+            const isActive = acc.id === currentLoginId;
+            const item = document.createElement('div');
+            item.className = `music-sb-account-item ${isActive ? 'active' : ''}`;
+            item.onclick = () => {
+                if (isActive) return;
+                ChatDB.setItem('music_current_login_account', acc.id);
+                closeMusicSettingsSidebar();
+                // 重新加载主页数据
+                renderMusicMePage();
+                initMusicHomeData();
+            };
+            // 核心修复：强制内联 background 属性，防止被其他全局样式污染导致平铺重复，并限制背景不延伸到边框下
+            item.innerHTML = `
+                <div class="music-sb-account-avatar" style="background-image: url('${acc.avatarUrl || ''}'); background-size: cover !important; background-position: center !important; background-repeat: no-repeat !important; background-clip: padding-box;"></div>
+                <div class="music-sb-account-name">${acc.netName || acc.name || '未命名'}</div>
+            `;
+            sidebarListEl.appendChild(item);
+        });
+    }
+}
+
+function closeMusicLoginPanel() { musicLoginPanel.style.display = 'none'; }
+
+function enterMusicMain() {
+    musicPanel.style.display = 'flex';
+    // 核心修复：每次进入 Music App 时，强制切换到主页 (home)，这会自动触发 initMusicHomeData() 加载排行榜和一起听歌记录
+    switchMusicTab('home'); 
+}
+
+function closeMusicPanel() { musicPanel.style.display = 'none'; }
+
+function switchMusicTab(tabName) {
+    document.querySelectorAll('.music-tab-page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.music-nav-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('music-page-' + tabName).classList.add('active');
+    
+    const btns = document.querySelectorAll('.music-nav-btn');
+    const bottomNav = document.querySelector('.music-bottom-nav');
+    if (bottomNav) bottomNav.classList.remove('is-transparent'); // 默认移除透明
+
+    if(tabName === 'home') {
+        btns[0].classList.add('active');
+        // 初始化主页真实数据
+        initMusicHomeData();
+    }
+    if(tabName === 'friends') { 
+        btns[1].classList.add('active'); 
+        renderMusicFriends(); 
+    }
+    if(tabName === 'me') { 
+        btns[2].classList.add('active'); 
+        renderMusicMePage(); 
+        // 检查是否是全屏模式
+        const pageMe = document.getElementById('music-page-me');
+        if (pageMe && pageMe.classList.contains('is-fullscreen-bg') && bottomNav) {
+            bottomNav.classList.add('is-transparent');
+        }
+    }
+}
+
+
+// ==========================================
+// 2. 个人主页与设置面板
+// ==========================================
+// 修改后 (music.js 约 130 行)
+function renderMusicMePage() {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (!musicLoginId) return;
+    
+    let allEntities = getAllEntities();
+    const account = allEntities.find(a => a.id === musicLoginId);
+    if (!account) return;
+
+    document.getElementById('musicMeName').innerText = account.netName || account.name || '未命名';
+    document.getElementById('musicMeAvatar').style.backgroundImage = account.avatarUrl ? `url(${account.avatarUrl})` : 'none';
+    
+    // 【核心修改】：调用统一的装扮应用函数
+    applyMusicMeDressUp(musicLoginId);
+
+    // 动态计算关注、粉丝、时长
+    let friends = JSON.parse(ChatDB.getItem(`music_friends_${musicLoginId}`) || '[]');
+    let friendCount = friends.length;
+    
+    let listenTime = parseInt(ChatDB.getItem(`music_listen_time_${musicLoginId}`) || '0');
+    if (listenTime === 0) {
+        listenTime = Math.floor(Math.random() * 100) + 10; 
+        ChatDB.setItem(`music_listen_time_${musicLoginId}`, listenTime);
+    }
+    
+    let level = Math.floor(listenTime / 20) + 1;
+    if (level > 10) level = 10;
+
+    const statsContainer = document.getElementById('musicMeStats');
+    if (statsContainer) {
+        statsContainer.innerHTML = `
+            <div><span style="color: inherit; font-size: 14px;">${friendCount}</span> 关注</div>
+            <div><span style="color: inherit; font-size: 14px;">${friendCount}</span> 粉丝</div>
+            <div>Lv.${level}</div>
+            <div><span style="color: inherit; font-size: 14px;">${listenTime}</span> 小时</div>
+        `;
+    }
+    
+    const localBtn = document.getElementById('musicMeLocalBtn');
+    if (localBtn) {
+        if (account.isAccount) {
+            localBtn.innerHTML = `<svg style="stroke: var(--me-icon-color);" viewBox="0 0 24 24" width="14" height="14" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg> 本地`;
+            localBtn.onclick = openLocalImportModal;
+        } else {
+            localBtn.innerHTML = `<svg style="stroke: var(--me-icon-color);" viewBox="0 0 24 24" width="14" height="14" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg> 最近`;
+            localBtn.onclick = () => openCharRecentMusic(musicLoginId);
+        }
+    }
+    
+    renderMyPlaylists();
+}
+
+function updateMusicApiUI() {
+    // 搜索接口更新
+    ['primary', 'secondary', 'tertiary', 'api4', 'api5'].forEach(api => {
+        const el = document.getElementById(`api-search-${api}`);
+        if (el) {
+            // 如果是当前选中的接口，显示一个勾选的 SVG 图标，否则清空
+            el.innerHTML = currentMusicSearchApi === api ? '<svg viewBox="0 0 24 24" width="16" height="16" stroke="#111" stroke-width="2" fill="none"><polyline points="20 6 9 17 4 12"></polyline></svg>' : '';
+        }
+    });
+    
+    // 播放接口更新
+    ['miemie', 'zhizhi'].forEach(api => {
+        const el = document.getElementById(`api-play-${api}`);
+        if (el) {
+            // 如果是当前选中的接口，显示一个勾选的 SVG 图标，否则清空
+            el.innerHTML = currentMusicPlayApi === api ? '<svg viewBox="0 0 24 24" width="16" height="16" stroke="#111" stroke-width="2" fill="none"><polyline points="20 6 9 17 4 12"></polyline></svg>' : '';
+        }
+    });
+}
+
+function openMusicSettingsSidebar() {
+    updateMusicApiUI();
+    renderMusicAccountList(); // 渲染侧边栏账号列表
+    
+    // 更新侧边栏顶部当前用户信息
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (musicLoginId) {
+        let allEntities = getAllEntities();
+        const account = allEntities.find(a => a.id === musicLoginId);
+        if (account) {
+            const avatarEl = document.getElementById('musicSidebarCurrentAvatar');
+            const nameEl = document.getElementById('musicSidebarCurrentName');
+            if (avatarEl) avatarEl.style.backgroundImage = `url('${account.avatarUrl || ''}')`;
+            if (nameEl) nameEl.innerText = account.netName || account.name || '未命名';
+        }
+    }
+    
+    updateWyySidebarUI(); // 【新增】：初始化网易云 UI 状态
+    document.getElementById('musicSettingsSidebarOverlay').classList.add('show');
+}
+
+function closeMusicSettingsSidebar() {
+    document.getElementById('musicSettingsSidebarOverlay').classList.remove('show');
+}
+
+function logoutMusicApp() {
+    if (confirm('确定要退出当前音乐账号吗？')) {
+        ChatDB.removeItem('music_current_login_account');
+        
+        // 1. 彻底清空播放状态与内存数据
+        audioPlayer.pause();
+        audioPlayer.src = '';
+        currentPlayingSong = null;
+        window.currentPlaylistTracks = [];
+        window.parsedLyrics = [];
+        window.currentPlayingLyric = "";
+        
+        // 👇 新增：清空本地缓存的播放状态，防止换号后幽灵播放
+        ChatDB.removeItem('music_current_song');
+        ChatDB.removeItem('music_song_url');
+        ChatDB.removeItem('music_parsed_lyrics');
+        ChatDB.removeItem('music_current_time');
+        ChatDB.removeItem('music_duration');
+        ChatDB.removeItem('music_current_playlist');
+        // 👆 新增结束
+        
+        // 2. 隐藏并重置悬浮胶囊和迷你播放器
+        const capsuleContainer = document.getElementById('globalMusicCapsuleContainer');
+        if (capsuleContainer) capsuleContainer.style.display = 'none';
+        isCapsuleVisible = false;
+        localStorage.setItem('music_capsule_visible', 'false');
+        
+        const miniPlayer = document.getElementById('miniMusicPlayer');
+        if (miniPlayer) miniPlayer.style.display = 'none';
+        isMiniPlayerExpanded = false;
+        
+        // 3. 结束一起听歌状态
+        const statusEl = document.getElementById('mpListenTogetherStatus');
+        if (statusEl) statusEl.style.display = 'none';
+        if (typeof listenTogetherTimer !== 'undefined') {
+            clearInterval(listenTogetherTimer);
+            listenTogetherTimer = null; 
+        }
+        window.currentListenTogetherCharId = null;
+        
+        // 4. 恢复播放器默认 UI
+        document.querySelector('.music-player-title').innerText = 'Not Playing';
+        document.querySelector('.music-player-sub').innerText = 'Music App';
+        document.querySelector('.music-player-disc-inner').style.backgroundImage = '';
+        
+        closeMusicSettingsSidebar();
+        musicPanel.style.display = 'none';
+        openMusicApp(); 
+    }
+}
+
+function musicSetSearchApi(api) {
+    currentMusicSearchApi = api;
+    localStorage.setItem('music_search_api', api);
+    updateMusicApiUI(); 
+}
+
+function musicSetPlayApi(api) {
+    currentMusicPlayApi = api;
+    localStorage.setItem('music_play_api', api);
+    updateMusicApiUI(); 
+}
+
+// ==========================================
+// 3. 在线搜索与播放逻辑 (纯净原生 Fetch)
+// ==========================================
+function musicHandleSearchEnter(e) {
+    if (e.key === 'Enter') {
+        musicPerformSearch();
+    }
+}
+
+async function musicPerformSearch() {
+    const kw = document.getElementById('music-search-input').value.trim();
+    const resultsContainer = document.getElementById('music-search-results');
+    const banner = document.getElementById('music-home-banner');
+    
+    // 新增：控制取消按钮的显示
+    const cancelBtn = document.getElementById('music-search-cancel');
+    if (cancelBtn) {
+        cancelBtn.style.display = kw ? 'block' : 'none';
+    }
+    
+    // 隐藏其他区域，实现全屏搜索
+    const ipodPlayer = document.getElementById('music-home-ipod');
+    const leaderboard = document.getElementById('music-home-leaderboard');
+    
+    if (ipodPlayer) ipodPlayer.style.display = kw ? 'none' : 'flex';
+    if (leaderboard) leaderboard.style.display = kw ? 'none' : 'block';
+    
+    if (!kw) {
+        resultsContainer.innerHTML = '';
+        return;
+    }
+
+    resultsContainer.innerHTML = '<div style="text-align:center; padding:20px; color:#888; font-size:13px;">正在搜索...</div>';
+
+    try {
+        const baseUrl = getMusicSearchApiUrl();
+        const res = await fetch(`${baseUrl}/cloudsearch?keywords=${encodeURIComponent(kw)}&timestamp=${Date.now()}`);
+        const data = await res.json();
+        
+        console.log("搜索结果:", data); 
+        
+        if (data.code === 200 && data.result && data.result.songs && data.result.songs.length > 0) {
+            resultsContainer.innerHTML = '';
+            data.result.songs.forEach(song => {
+                const title = song.name;
+                const artist = song.ar ? song.ar.map(a => a.name).join(', ') : '未知歌手';
+                const cover = (song.al && song.al.picUrl) ? song.al.picUrl + '?param=100y100' : 'https://p2.music.126.net/6y-7YvS_G8V8.jpg?param=100y100';
+                
+                const item = document.createElement('div');
+                item.className = 'music-song-item';
+                item.onclick = () => musicPlaySong(song.id, title, artist, cover);
+                // 【修改】：增加一个加号按钮用于添加到歌单
+                item.innerHTML = `
+                    <img src="${cover}" class="music-song-cover">
+                    <div class="music-song-info">
+                        <div class="music-song-title">${title}</div>
+                        <div class="music-song-artist">${artist}</div>
+                    </div>
+                    <div class="music-song-action" onclick="event.stopPropagation(); openAddToPlaylistModal('${song.id}', '${title.replace(/'/g, "\\'")}', '${artist.replace(/'/g, "\\'")}', '${cover}')" style="background: #f0f0f0; color: #333; margin-right: 5px; padding: 6px 10px;">+</div>
+                    <div class="music-song-action">播放</div>
+                `;
+                resultsContainer.appendChild(item);
+            });
+        } else {
+            resultsContainer.innerHTML = '<div style="text-align:center; padding:20px; color:#888; font-size:13px;">未找到相关歌曲</div>';
+        }
+    } catch (e) {
+        console.error("Search Error:", e);
+        resultsContainer.innerHTML = '<div style="text-align:center; padding:20px; color:#ff3b30; font-size:13px;">搜索失败，请尝试切换音源</div>';
+    }
+}
+
+window.currentPlayingLyric = ""; // 全局保存当前歌词供 AI 读取
+
+window.parsedLyrics = []; 
+
+function parseLrc(lrc) {
+    const lines = lrc.split('\n');
+    const result = [];
+    const timeReg = /\[(\d{2}):(\d{2})\.(\d{2,3})\]/;
+    for (let line of lines) {
+        const match = timeReg.exec(line);
+        if (match) {
+            const time = parseInt(match[1]) * 60 + parseInt(match[2]) + parseInt(match[3]) / (match[3].length === 3 ? 1000 : 100);
+            const text = line.replace(timeReg, '').trim();
+            if (text) result.push({ time, text });
+        }
+    }
+    return result;
+}
+
+async function musicPlaySong(id, title, artist, cover) {
+    hasScrobbledCurrentSong = false; // 重置打卡状态
+    try {
+        // 【核心修复】：将网易云封面参数替换为 500x500 高清图，解决全屏播放器封面模糊问题
+        if (cover && typeof cover === 'string' && cover.includes('music.126.net')) {
+            cover = cover.replace(/\?param=\d+y\d+/, '?param=500y500');
+            if (!cover.includes('?param=')) cover += '?param=500y500';
+        }
+
+        document.querySelector('.music-player-title').innerText = title;
+        document.querySelector('.music-player-sub').innerText = artist;
+        document.querySelector('.music-player-disc-inner').style.backgroundImage = `url(${cover})`;
+        document.querySelector('.music-player-disc-inner').style.backgroundSize = 'cover';
+        
+        const mpSongName = document.getElementById('mpSongName');
+        if (mpSongName) mpSongName.innerText = title;
+        const mpArtistName = document.getElementById('mpArtistName');
+        if (mpArtistName) mpArtistName.innerText = artist;
+        
+        // 【核心修复】：动态更新全屏播放器顶部的歌曲名
+        const mpTopTitle = document.getElementById('mpTopTitle');
+        if (mpTopTitle) mpTopTitle.innerText = title;
+        
+        // 【修改】：使用 CSS 变量更新封面，支持多套 UI
+        const playerPanel = document.getElementById('musicPlayerPanel');
+        if (playerPanel) {
+            const musicLoginId = ChatDB.getItem('music_current_login_account');
+            
+            // 检查是否有自定义封面
+            const savedCover = musicLoginId ? ChatDB.getItem(`music_player_cover_${musicLoginId}`) : null;
+            if (savedCover) {
+                playerPanel.style.setProperty('--mp-cover-image', `url('${savedCover}')`);
+            } else {
+                playerPanel.style.setProperty('--mp-cover-image', `url('${cover}')`);
+            }
+            
+            // 检查是否有自定义背景
+            const savedBg = musicLoginId ? ChatDB.getItem(`music_player_bg_${musicLoginId}`) : null;
+            if (savedBg) {
+                playerPanel.style.setProperty('--mp-bg-image', `url('${savedBg}')`);
+            } else {
+                playerPanel.style.setProperty('--mp-bg-image', `url('${cover}')`);
+            }
+        }
+        
+        const mpLyricTitle = document.getElementById('mpLyricTitle');
+        if (mpLyricTitle) mpLyricTitle.innerText = title;
+        const mpLyricArtist = document.getElementById('mpLyricArtist');
+        if (mpLyricArtist) mpLyricArtist.innerText = artist;
+        
+        currentPlayingSong = { id, title, artist, cover };
+        
+        // 【新增】：记录真实听歌数据
+        recordRecentPlay(currentPlayingSong);
+
+        // 同步到桌面韩系 Ins 风小组件 (更新居中卡片的文字)
+        const desktopTitle = document.querySelector('#carousel-music-widget-container .cw-ins-photo-card.center .cw-ins-photo-title');
+        if (desktopTitle) desktopTitle.innerText = title;
+        const desktopArtist = document.querySelector('#carousel-music-widget-container .cw-ins-photo-card.center .cw-ins-photo-artist');
+        if (desktopArtist) desktopArtist.innerText = artist;
+
+        // 新增：写入系统消息，让 Char 感知到用户点播了什么歌
+        if (window.currentListenTogetherCharId) {
+            addMusicSystemMessage(`我 点播了歌曲: ${title} - ${artist}`);
+        }
+
+        // 异步获取歌词并解析
+        let lyricUrl = '';
+        if (localStorage.getItem('music_custom_api')) {
+            // 如果使用了自定义云端 API，使用 NeteaseCloudMusicApi 的歌词接口格式
+            lyricUrl = `${getMusicSearchApiUrl()}/lyric?id=${id}`;
+        } else {
+            // 否则使用内置播放源的 Meting API 格式
+            lyricUrl = `${getMusicPlayApiUrl()}/?server=netease&type=lrc&id=${id}`;
+        }
+
+        fetch(lyricUrl).then(res => res.text()).then(textData => {
+            const lyricContent = document.getElementById('mpLyricContent');
+            const miniLyric = document.getElementById('miniPlayerLyric');
+            
+            let rawLrc = "";
+            try {
+                const jsonData = JSON.parse(textData);
+                if (jsonData.lrc && jsonData.lrc.lyric) rawLrc = jsonData.lrc.lyric;
+                else if (jsonData.lyric) rawLrc = jsonData.lyric;
+                else if (typeof jsonData === 'string') rawLrc = jsonData;
+            } catch (e) {
+                console.warn("歌词解析失败，可能接口返回了错误页面");
+                rawLrc = textData;
+            }
+
+            if (rawLrc) {
+                if (rawLrc.length > 3000) rawLrc = rawLrc.substring(0, 3000);
+                window.currentPlayingLyric = rawLrc.replace(/\[\d{2}:\d{2}\.\d{2,3}\]/g, '').trim();
+                window.parsedLyrics = parseLrc(rawLrc);
+                if (lyricContent) {
+                    lyricContent.innerHTML = window.parsedLyrics.map((line, idx) => `<div class="lyric-line" id="lrc-line-${idx}">${line.text}</div>`).join('');
+                    lyricContent.scrollTop = 0;
+                }
+            } else {
+                window.parsedLyrics = [];
+                if (lyricContent) lyricContent.innerHTML = "暂无歌词数据";
+                if (miniLyric) miniLyric.innerText = "享受纯净音乐";
+            }
+        }).catch(e => {
+            console.error("获取歌词失败", e);
+            window.parsedLyrics = [];
+            const lyricContent = document.getElementById('mpLyricContent');
+            if (lyricContent) lyricContent.innerHTML = "暂无歌词数据";
+        });
+
+        const playBaseUrl = getMusicPlayApiUrl();
+        let songUrl = '';
+        
+        // 如果使用的是自定义 API (Vercel部署的 NeteaseCloudMusicApi)
+        if (localStorage.getItem('music_custom_api')) {
+            const cookie = localStorage.getItem('music_wyy_cookie') || '';
+            const res = await fetch(`${playBaseUrl}/song/url/v1?id=${id}&level=standard&timestamp=${Date.now()}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: `cookie=${encodeURIComponent(cookie)}`
+            });
+            const data = await res.json();
+            if (data.code === 200 && data.data && data.data.length > 0) {
+                songUrl = data.data[0].url;
+            }
+        } else {
+            // 否则使用内置的 Meting API 格式
+            const res = await fetch(`${playBaseUrl}/?server=netease&type=song&id=${id}`);
+            const data = await res.json();
+            if (data && data.length > 0) {
+                if (data[0].url) songUrl = data[0].url.replace('http://', 'https://');
+                if (data[0].title) title = data[0].title;
+                if (data[0].author) artist = data[0].author;
+                if (data[0].pic) cover = data[0].pic;
+            }
+        }
+        
+        if (songUrl) {
+            audioPlayer.src = songUrl;
+            
+            // 👇 新增：保存当前播放状态到本地，供刷新后恢复
+            ChatDB.setItem('music_current_song', JSON.stringify(currentPlayingSong));
+            ChatDB.setItem('music_song_url', songUrl);
+            ChatDB.setItem('music_parsed_lyrics', JSON.stringify(window.parsedLyrics || []));
+            // 👆 新增结束
+
+            const playPromise = audioPlayer.play();
+            if (playPromise !== undefined) {
+                playPromise.then(() => {
+                    const disc = document.querySelector('.mp-disc-outer');
+                    if (disc) disc.style.animationPlayState = 'running';
+                    const playerPanel = document.getElementById('musicPlayerPanel');
+                    if (playerPanel) {
+                        const musicLoginId = ChatDB.getItem('music_current_login_account');
+                        const savedBg = musicLoginId ? ChatDB.getItem(`music_player_bg_${musicLoginId}`) : null;
+                        if (!savedBg) {
+                            playerPanel.style.backgroundImage = `url('${cover}')`;
+                        }
+                    }
+                    
+                    // 👇 核心注入：每次成功播放新歌，立刻更新系统锁屏状态，确立后台霸权
+                    updateSystemMediaSession();
+                    // 【修复】：同步更新悬浮胶囊和迷你播放器的 UI
+                    if (typeof updateCapsuleUI === 'function') updateCapsuleUI();
+                    
+                }).catch(e => {
+                    if (e.name !== 'AbortError') {
+                        alert(`《${title}》可能是 VIP 专属或无版权，无法自动播放。`);
+                    }
+                });
+            }
+        } else {
+            alert(`《${title}》可能是 VIP 专属或无版权，无法播放。`);
+        }
+    } catch (e) {
+        console.error("Play Error:", e);
+    }
+}
+
+// ==========================================
+// 4. 歌单管理 (新建、本地封面、URL导入、UID导入)
+// ==========================================
+let tempLocalCoverBase64 = null;
+
+function renderMyPlaylists() {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    const container = document.getElementById('music-my-playlist-container');
+    if (!container || !musicLoginId) return;
+    
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+    container.innerHTML = '';
+    
+    // 1. 渲染已有的歌单
+    savedPlaylists.forEach(pl => {
+        const div = document.createElement('div');
+        div.className = 'music-pl-item';
+        // 【修改】：点击整个歌单进入详情页
+        div.onclick = () => openPlaylistDetail(pl.id);
+        
+        // 【核心修复】：只对网易云的图片加压缩参数，防止破坏 SVG 或其他外部链接
+        let displayCover = pl.cover;
+        if (displayCover && displayCover.includes('music.126.net')) {
+            displayCover += '?param=100y100';
+        }
+        
+        div.innerHTML = `
+            <div class="music-pl-cover" style="background-image: url('${displayCover}');"></div>
+            <div class="music-pl-info">
+
+                <div class="music-pl-title">${pl.name}</div>
+                <div class="music-pl-sub">歌单 · ${pl.trackCount || 0}首</div>
+            </div>
+            <!-- 【修改】：点击右侧图标打开编辑弹窗，并阻止冒泡 -->
+            <div class="music-pl-action" onclick="event.stopPropagation(); openEditPlaylistModal('${pl.id}')">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="#ccc"><circle cx="12" cy="5" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="12" cy="19" r="2"></circle></svg>
+            </div>
+        `;
+        container.appendChild(div);
+    });
+
+    // 2. 渲染“新建歌单”按钮
+    const createDiv = document.createElement('div');
+    createDiv.className = 'music-pl-item';
+    createDiv.onclick = () => {
+        document.getElementById('music-create-pl-name').value = '';
+        document.getElementById('music-create-pl-cover').value = '';
+        tempLocalCoverBase64 = null;
+        document.getElementById('musicCreatePlaylistModal').classList.add('show');
+    };
+    createDiv.innerHTML = `
+        <div class="music-pl-cover">
+            <svg viewBox="0 0 24 24" width="24" height="24" stroke="#aaa" stroke-width="2" fill="none"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+        </div>
+        <div class="music-pl-info">
+            <div class="music-pl-title">新建歌单</div>
+        </div>
+    `;
+    container.appendChild(createDiv);
+
+    // 3. 渲染“导入外部歌单”按钮
+    const importDiv = document.createElement('div');
+    importDiv.className = 'music-pl-item';
+    importDiv.onclick = () => {
+        // 【修改】：改为弹出选择弹窗
+        document.getElementById('musicImportSelectModal').classList.add('show');
+    };
+    importDiv.innerHTML = `
+        <div class="music-pl-cover">
+            <svg viewBox="0 0 24 24" width="20" height="20" stroke="#aaa" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+        </div>
+        <div class="music-pl-info">
+            <div class="music-pl-title">导入外部歌单</div>
+            <div class="music-pl-sub">轻松导入其他APP里的歌单</div>
+        </div>
+    `;
+    container.appendChild(importDiv);
+}
+
+// 处理本地封面上传
+function musicHandleLocalCoverUpload(event) {
+    const file = event.target.files[0];
+    if (file) {
+        // 【核心修复】：歌单封面只需要 256px，压缩后体积极小，彻底解决列表渲染卡顿
+        window.globalCompressImage(file, 256, function(compressedUrl) {
+            tempLocalCoverBase64 = compressedUrl;
+            document.getElementById('music-create-pl-cover').value = '已选择本地图片';
+        });
+    }
+    event.target.value = '';
+}
+
+function musicCreatePlaylist() {
+    const name = document.getElementById('music-create-pl-name').value.trim();
+    const coverUrl = document.getElementById('music-create-pl-cover').value.trim();
+    
+    if (!name) return alert("请输入歌单标题！");
+
+    let finalCover = 'https://p2.music.126.net/6y-7YvS_G8V8.jpg'; // 默认封面
+    if (tempLocalCoverBase64) {
+        finalCover = tempLocalCoverBase64;
+    } else if (coverUrl && coverUrl !== '已选择本地图片') {
+        finalCover = coverUrl;
+    }
+
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+    
+    savedPlaylists.push({
+        id: Date.now().toString(),
+        name: name,
+        cover: finalCover,
+        trackCount: 0,
+        tracks: []
+    });
+    
+    ChatDB.setItem(`music_playlists_${musicLoginId}`, JSON.stringify(savedPlaylists));
+    document.getElementById('musicCreatePlaylistModal').classList.remove('show');
+    renderMyPlaylists();
+}
+
+// 方式一：URL 链接导入单歌单
+async function musicImportByUrl() {
+    const inputVal = document.getElementById('music-import-url-input').value.trim();
+    if (!inputVal) return alert("请输入网易云歌单链接或 ID！");
+
+    let plId = "";
+    const idMatch = inputVal.match(/id=(\d+)/);
+    if (idMatch) {
+        plId = idMatch[1];
+    } else if (/^\d+$/.test(inputVal)) {
+        plId = inputVal;
+    } else {
+        return alert("无法识别歌单 ID，请检查链接格式。");
+    }
+
+    const btn = document.getElementById('music-btn-import-url');
+    const originalText = btn.innerText;
+    btn.innerText = "解析中...";
+    btn.style.opacity = "0.5";
+    btn.style.pointerEvents = "none";
+
+    try {
+        const baseUrl = getMusicSearchApiUrl();
+        const timestamp = Date.now();
+        
+        const resDetail = await fetch(`${baseUrl}/playlist/detail?id=${plId}&timestamp=${timestamp}`);
+        const dataDetail = await resDetail.json();
+        
+        console.log("URL导入歌单详情:", dataDetail);
+        
+        if (dataDetail.code === 200 && dataDetail.playlist) {
+            const resTracks = await fetch(`${baseUrl}/playlist/track/all?id=${plId}&limit=1000&timestamp=${timestamp}`);
+            const dataTracks = await resTracks.json();
+            
+            let tracks = [];
+            if (dataTracks.code === 200 && dataTracks.songs) {
+                tracks = dataTracks.songs.map(song => ({
+                    id: song.id,
+                    title: song.name,
+                    artist: song.ar ? song.ar.map(a => a.name).join(', ') : '未知歌手',
+                    cover: (song.al && song.al.picUrl) ? song.al.picUrl + '?param=100y100' : 'https://p2.music.126.net/6y-7YvS_G8V8.jpg?param=100y100'
+                }));
+            }
+            
+            const musicLoginId = ChatDB.getItem('music_current_login_account');
+            let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+
+            const exists = savedPlaylists.find(p => p.id === dataDetail.playlist.id);
+            if (!exists) {
+                savedPlaylists.push({
+                    id: dataDetail.playlist.id,
+                    name: dataDetail.playlist.name,
+                    cover: dataDetail.playlist.coverImgUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg',
+                    trackCount: tracks.length,
+                    tracks: tracks
+                });
+                ChatDB.setItem(`music_playlists_${musicLoginId}`, JSON.stringify(savedPlaylists));
+                renderMyPlaylists();
+                alert("导入成功！");
+                document.getElementById('musicImportModal').classList.remove('show');
+            } else {
+                alert("该歌单已存在，请勿重复导入！");
+            }
+        } else {
+            alert("获取歌单详情失败，请确保歌单已在网易云设置为公开！");
+        }
+    } catch (e) {
+        console.error("URL Import Error:", e);
+        alert("导入失败，网络异常或接口不可用。");
+    } finally {
+        btn.innerText = originalText;
+        btn.style.opacity = "1";
+        btn.style.pointerEvents = "auto";
+    }
+}
+
+// ==========================================
+// 【新增】：本地导入歌曲逻辑
+// ==========================================
+let localImportMode = 'url'; // 'url' 或 'file'
+
+function openLocalImportModal() {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (!musicLoginId) return alert("请先登录音乐账号");
+    
+    // 渲染歌单下拉框
+    const select = document.getElementById('localImportPlaylistSelect');
+    select.innerHTML = '<option value="">请选择要添加到的歌单</option>';
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+    savedPlaylists.forEach(pl => {
+        const opt = document.createElement('option');
+        opt.value = pl.id;
+        opt.innerText = pl.name;
+        select.appendChild(opt);
+    });
+
+    // 重置表单
+    document.getElementById('localImportUrlInput').value = '';
+    document.getElementById('localImportFileInput').value = '';
+    document.getElementById('localImportFileName').innerText = '未选择';
+    document.getElementById('localImportName').value = '';
+    document.getElementById('localImportArtist').value = '';
+    document.getElementById('localImportLrcInput').value = '';
+    document.getElementById('localImportLrcName').innerText = '未选择';
+    
+    switchLocalImportTab('url');
+    document.getElementById('musicLocalImportModal').classList.add('show');
+}
+
+function switchLocalImportTab(mode) {
+    localImportMode = mode;
+    const tabUrl = document.getElementById('localImportTabUrl');
+    const tabFile = document.getElementById('localImportTabFile');
+    const inputUrl = document.getElementById('localImportUrlInput');
+    const inputFile = document.getElementById('localImportFileArea');
+    
+    if (mode === 'url') {
+        tabUrl.style.background = '#111'; tabUrl.style.color = '#fff';
+        tabFile.style.background = '#f0f0f0'; tabFile.style.color = '#333';
+        inputUrl.style.display = 'block';
+        inputFile.style.display = 'none';
+    } else {
+        tabFile.style.background = '#111'; tabFile.style.color = '#fff';
+        tabUrl.style.background = '#f0f0f0'; tabUrl.style.color = '#333';
+        inputUrl.style.display = 'none';
+        inputFile.style.display = 'flex';
+    }
+}
+
+function confirmLocalImport() {
+    const name = document.getElementById('localImportName').value.trim();
+    const artist = document.getElementById('localImportArtist').value.trim() || '未知歌手';
+    const playlistId = document.getElementById('localImportPlaylistSelect').value;
+    
+    if (!name) return alert("请输入歌名！");
+    if (!playlistId) return alert("请选择要添加到的歌单！");
+
+    const btn = document.querySelector('#musicLocalImportModal .preset-btn-confirm');
+    const originalText = btn ? btn.innerText : '确认导入';
+    if (btn) {
+        btn.innerText = "导入中...";
+        btn.style.pointerEvents = "none";
+    }
+
+    let songUrl = '';
+    if (localImportMode === 'url') {
+        songUrl = document.getElementById('localImportUrlInput').value.trim();
+        if (!songUrl) {
+            if (btn) { btn.innerText = originalText; btn.style.pointerEvents = "auto"; }
+            return alert("请输入歌曲 URL！");
+        }
+        saveLocalSongToPlaylist(playlistId, name, artist, songUrl, btn, originalText);
+    } else {
+        const fileInput = document.getElementById('localImportFileInput');
+        if (!fileInput.files || fileInput.files.length === 0) {
+            if (btn) { btn.innerText = originalText; btn.style.pointerEvents = "auto"; }
+            return alert("请选择音频文件！");
+        }
+        
+        const file = fileInput.files[0];
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            songUrl = e.target.result; // Base64
+            saveLocalSongToPlaylist(playlistId, name, artist, songUrl, btn, originalText);
+        };
+        reader.readAsDataURL(file);
+    }
+}
+
+function saveLocalSongToPlaylist(playlistId, name, artist, songUrl, btn, originalText) {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+    
+    // 修复：网易云导入的歌单 ID 可能是数字，而 select.value 是字符串，必须转为字符串对比
+    const plIndex = savedPlaylists.findIndex(p => String(p.id) === String(playlistId));
+    if (plIndex !== -1) {
+        const newSong = {
+            id: 'local_' + Date.now(),
+            title: name,
+            artist: artist,
+            url: songUrl,
+            cover: 'https://p2.music.126.net/6y-7YvS_G8V8.jpg?param=100y100' // 默认封面
+        };
+        
+        const finishImport = () => {
+            savedPlaylists[plIndex].tracks.push(newSong);
+            savedPlaylists[plIndex].trackCount = savedPlaylists[plIndex].tracks.length;
+            ChatDB.setItem(`music_playlists_${musicLoginId}`, JSON.stringify(savedPlaylists));
+            alert("导入成功！");
+            document.getElementById('musicLocalImportModal').classList.remove('show');
+            renderMyPlaylists();
+            if (btn) {
+                btn.innerText = originalText;
+                btn.style.pointerEvents = "auto";
+            }
+        };
+
+        // 处理歌词 (如果有)
+        const lrcInput = document.getElementById('localImportLrcInput');
+        if (lrcInput.files && lrcInput.files.length > 0) {
+            const lrcReader = new FileReader();
+            lrcReader.onload = function(e) {
+                newSong.lrc = e.target.result;
+                finishImport();
+            };
+            lrcReader.readAsText(lrcInput.files[0]);
+        } else {
+            finishImport();
+        }
+    } else {
+        if (btn) {
+            btn.innerText = originalText;
+            btn.style.pointerEvents = "auto";
+        }
+    }
+}
+
+// ==========================================
+// 【新增】：网易云双模登录与数据同步逻辑
+// ==========================================
+
+// --- 模式 A：UID 导入 (免登录) ---
+async function musicDoWyyLogin() {
+    let uid = document.getElementById('wyy-uid-input-modal').value.trim();
+    if (!uid) return alert("请输入网易云 UID！");
+    
+    const btn = document.getElementById('wyy-uid-btn');
+    const originalText = btn.innerText;
+    btn.innerText = "获取中...";
+    btn.style.opacity = "0.5";
+    btn.style.pointerEvents = "none";
+    
+    try {
+        const baseUrl = getMusicSearchApiUrl();
+        const timestamp = Date.now(); 
+        
+        const plRes = await fetch(`${baseUrl}/user/playlist?uid=${uid}&timestamp=${timestamp}`);
+        const plJson = await plRes.json();
+        
+        if (plJson.code === 200 && plJson.playlist) {
+            const musicLoginId = ChatDB.getItem('music_current_login_account');
+            let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+            
+            const maxImport = Math.min(plJson.playlist.length, 10);
+            let successCount = 0;
+            
+            for (let i = 0; i < maxImport; i++) {
+                const pl = plJson.playlist[i];
+                if (!savedPlaylists.some(p => p.id === pl.id)) {
+                    try {
+                        const resTracks = await fetch(`${baseUrl}/playlist/track/all?id=${pl.id}&limit=1000&timestamp=${timestamp}`);
+                        const dataTracks = await resTracks.json();
+                        let tracks = [];
+                        if (dataTracks.code === 200 && dataTracks.songs) {
+                            tracks = dataTracks.songs.map(song => ({
+                                id: song.id,
+                                title: song.name,
+                                artist: song.ar ? song.ar.map(a => a.name).join(', ') : '未知歌手',
+                                cover: (song.al && song.al.picUrl) ? song.al.picUrl + '?param=100y100' : 'https://p2.music.126.net/6y-7YvS_G8V8.jpg?param=100y100'
+                            }));
+                        }
+                        savedPlaylists.push({
+                            id: pl.id,
+                            name: pl.name,
+                            cover: pl.coverImgUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg',
+                            trackCount: tracks.length,
+                            tracks: tracks
+                        });
+                        successCount++;
+                    } catch (err) { console.warn(`歌单 ${pl.name} 歌曲拉取失败`, err); }
+                }
+            }
+            
+            ChatDB.setItem(`music_playlists_${musicLoginId}`, JSON.stringify(savedPlaylists));
+            renderMyPlaylists();
+            document.getElementById('musicWyyLoginModal').classList.remove('show');
+            alert(`成功获取并保存了 ${successCount} 个歌单！`);
+        } else {
+            alert("获取歌单失败，请检查 UID 是否正确或切换音源。");
+        }
+    } catch (e) {
+        console.error("UID Import Error:", e);
+        alert("网络请求失败，请切换搜索接口。");
+    } finally {
+        btn.innerText = originalText;
+        btn.style.opacity = "1";
+        btn.style.pointerEvents = "auto";
+    }
+}
+
+// --- 模式 B：扫码登录 (获取完整权限与数据) ---
+let wyyQrCheckTimer = null;
+
+function closeMusicQrLoginModal() {
+    document.getElementById('musicQrLoginModal').classList.remove('show');
+    if (wyyQrCheckTimer) {
+        clearInterval(wyyQrCheckTimer);
+        wyyQrCheckTimer = null;
+    }
+    document.getElementById('wyy-qr-img').style.display = 'none';
+    document.getElementById('wyy-qr-placeholder').style.display = 'flex';
+    document.getElementById('wyy-qr-status').innerText = '登录后可同步红心歌单与听歌打卡';
+    document.getElementById('wyy-qr-btn').innerText = '获取登录二维码';
+    document.getElementById('wyy-qr-btn').style.pointerEvents = 'auto';
+    document.getElementById('wyy-qr-btn').style.opacity = '1';
+}
+
+async function musicStartQrLogin() {
+    // 【新增】：强制检查是否填写了专属云端 API
+    const customApi = localStorage.getItem('music_custom_api');
+    if (!customApi) {
+        alert("【安全提示】\n为了保护您的账号安全，扫码登录必须使用您自己部署的专属云端 API (如 Vercel)。\n请先在侧边栏上方【专属云端 API】中填入您的接口地址！");
+        closeMusicQrLoginModal();
+        return;
+    }
+
+    const baseUrl = getMusicSearchApiUrl();
+    const btn = document.getElementById('wyy-qr-btn');
+    const statusText = document.getElementById('wyy-qr-status');
+    const qrImg = document.getElementById('wyy-qr-img');
+    const placeholder = document.getElementById('wyy-qr-placeholder');
+
+    btn.innerText = "正在获取二维码...";
+    btn.style.pointerEvents = "none";
+    btn.style.opacity = "0.5";
+
+    try {
+        const keyRes = await fetch(`${baseUrl}/login/qr/key?timestamp=${Date.now()}`);
+        const keyData = await keyRes.json();
+        if (keyData.code !== 200) throw new Error("获取 Key 失败");
+        const unikey = keyData.data.unikey;
+
+        const qrRes = await fetch(`${baseUrl}/login/qr/create?key=${unikey}&qrimg=true&timestamp=${Date.now()}`);
+        const qrData = await qrRes.json();
+        if (qrData.code !== 200) throw new Error("获取二维码失败");
+
+        placeholder.style.display = 'none';
+        qrImg.src = qrData.data.qrimg;
+        qrImg.style.display = 'block';
+        statusText.innerText = "请打开网易云音乐 APP 扫码";
+        btn.innerText = "等待扫码中...";
+
+        if (wyyQrCheckTimer) clearInterval(wyyQrCheckTimer);
+        wyyQrCheckTimer = setInterval(async () => {
+            try {
+                const checkRes = await fetch(`${baseUrl}/login/qr/check?key=${unikey}&timestamp=${Date.now()}`);
+                const checkData = await checkRes.json();
+                
+                if (checkData.code === 800) {
+                    statusText.innerText = "二维码已过期，请重新获取";
+                    clearInterval(wyyQrCheckTimer);
+                    btn.innerText = "重新获取二维码";
+                    btn.style.pointerEvents = "auto";
+                    btn.style.opacity = "1";
+                } else if (checkData.code === 802) {
+                    statusText.innerText = "扫描成功，请在手机上确认登录";
+                } else if (checkData.code === 803) {
+                    clearInterval(wyyQrCheckTimer);
+                    statusText.innerText = "登录成功！正在获取账号信息...";
+                    btn.innerText = "正在同步...";
+                    
+                    const cookie = checkData.cookie;
+                    localStorage.setItem('music_wyy_cookie', cookie);
+                    
+                    // 获取账号信息拿到 UID
+                    const statusRes = await fetch(`${baseUrl}/login/status?timestamp=${Date.now()}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: `cookie=${encodeURIComponent(cookie)}`
+                    });
+                    const statusJson = await statusRes.json();
+                    
+                    if (statusJson.data && statusJson.data.profile) {
+                        const uid = statusJson.data.profile.userId;
+                        localStorage.setItem('music_wyy_uid', uid);
+                        
+                        // 获取用户详情 (VIP、听歌量、村龄)
+                        await fetchWyyUserDetail(uid, cookie);
+                        
+                        // 同步歌单
+                        await musicSyncWyyPlaylists(uid, cookie);
+                    } else {
+                        alert("获取账号信息失败，请重试");
+                        closeMusicQrLoginModal();
+                    }
+                }
+            } catch (err) { console.error("轮询状态失败", err); }
+        }, 3000);
+
+    } catch (e) {
+        console.error("QR Login Error:", e);
+        alert("获取二维码失败，请检查 API 地址是否正确或网络是否通畅。");
+        closeMusicQrLoginModal();
+    }
+}
+
+// 获取网易云用户详情并更新侧边栏 UI
+async function fetchWyyUserDetail(uid, cookie) {
+    try {
+        const baseUrl = getMusicSearchApiUrl();
+        const res = await fetch(`${baseUrl}/user/detail?uid=${uid}&timestamp=${Date.now()}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `cookie=${encodeURIComponent(cookie)}`
+        });
+        const data = await res.json();
+        
+        if (data.code === 200) {
+            const profile = data.profile;
+            // 【新增】：网易云官方不直接返回听歌时长，按 1首歌 ≈ 3分钟 估算小时数
+            const estimatedHours = Math.floor((data.listenSongs * 3) / 60);
+            
+            const userInfo = {
+                nickname: profile.nickname,
+                avatarUrl: profile.avatarUrl,
+                vipType: profile.vipType, // 11 为黑胶VIP
+                listenSongs: data.listenSongs,
+                listenHours: estimatedHours, // 保存估算时长
+                createDays: data.createDays
+            };
+            localStorage.setItem('music_wyy_user_info', JSON.stringify(userInfo));
+            updateWyySidebarUI(); // 刷新侧边栏 UI
+        }
+    } catch (e) {
+        console.error("获取用户详情失败", e);
+    }
+}
+
+// 更新侧边栏网易云卡片 UI
+function updateWyySidebarUI() {
+    const unloginState = document.getElementById('wyyUnloginState');
+    const loggedInState = document.getElementById('wyyLoggedInState');
+    const userInfoStr = localStorage.getItem('music_wyy_user_info');
+    
+    if (userInfoStr && unloginState && loggedInState) {
+        const userInfo = JSON.parse(userInfoStr);
+        unloginState.style.display = 'none';
+        loggedInState.style.display = 'flex';
+        
+        document.getElementById('wyySidebarAvatar').style.backgroundImage = `url('${userInfo.avatarUrl}?param=100y100')`;
+        document.getElementById('wyySidebarName').innerText = userInfo.nickname;
+        
+        // 格式化数字 (如 12345 -> 1.2w)
+        const formatNum = (num) => num > 10000 ? (num / 10000).toFixed(1) + 'w' : num;
+        
+        document.getElementById('wyySidebarListen').innerText = formatNum(userInfo.listenSongs || 0);
+        
+        // 【新增】：渲染听歌时长
+        const timeEl = document.getElementById('wyySidebarTime');
+        if (timeEl) timeEl.innerText = formatNum(userInfo.listenHours || 0);
+        
+        document.getElementById('wyySidebarDays').innerText = userInfo.createDays || 0;
+        
+        const vipTag = document.getElementById('wyySidebarVip');
+        if (userInfo.vipType === 11) {
+            vipTag.innerText = '黑胶VIP';
+            vipTag.style.display = 'block';
+        } else {
+            vipTag.style.display = 'none';
+        }
+    } else if (unloginState && loggedInState) {
+        unloginState.style.display = 'block';
+        loggedInState.style.display = 'none';
+    }
+}
+
+// 退出网易云登录
+function musicWyyLogout() {
+    if (confirm("确定要退出网易云账号吗？")) {
+        localStorage.removeItem('music_wyy_cookie');
+        localStorage.removeItem('music_wyy_uid');
+        localStorage.removeItem('music_wyy_user_info');
+        updateWyySidebarUI();
+    }
+}
+
+// 同步歌单数据 (支持无参调用，用于手动同步按钮)
+async function musicSyncWyyPlaylists(uid = null, cookie = null) {
+    if (!uid) uid = localStorage.getItem('music_wyy_uid');
+    if (!cookie) cookie = localStorage.getItem('music_wyy_cookie');
+    if (!uid || !cookie) return alert("请先登录网易云账号！");
+
+    try {
+        const baseUrl = getMusicSearchApiUrl();
+        const timestamp = Date.now(); 
+        
+        const plRes = await fetch(`${baseUrl}/user/playlist?uid=${uid}&timestamp=${timestamp}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `cookie=${encodeURIComponent(cookie)}`
+        });
+        const plJson = await plRes.json();
+        
+        if (plJson.code === 200 && plJson.playlist) {
+            const musicLoginId = ChatDB.getItem('music_current_login_account');
+            let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+            
+            const maxImport = Math.min(plJson.playlist.length, 10);
+            let successCount = 0;
+            
+            for (let i = 0; i < maxImport; i++) {
+                const pl = plJson.playlist[i];
+                if (!savedPlaylists.some(p => p.id === pl.id)) {
+                    try {
+                        const resTracks = await fetch(`${baseUrl}/playlist/track/all?id=${pl.id}&limit=1000&timestamp=${timestamp}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                            body: `cookie=${encodeURIComponent(cookie)}`
+                        });
+                        const dataTracks = await resTracks.json();
+                        let tracks = [];
+                        if (dataTracks.code === 200 && dataTracks.songs) {
+                            tracks = dataTracks.songs.map(song => ({
+                                id: song.id,
+                                title: song.name,
+                                artist: song.ar ? song.ar.map(a => a.name).join(', ') : '未知歌手',
+                                cover: (song.al && song.al.picUrl) ? song.al.picUrl + '?param=100y100' : 'https://p2.music.126.net/6y-7YvS_G8V8.jpg?param=100y100'
+                            }));
+                        }
+                        
+                        savedPlaylists.push({
+                            id: pl.id,
+                            name: pl.name,
+                            cover: pl.coverImgUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg',
+                            trackCount: tracks.length,
+                            tracks: tracks
+                        });
+                        successCount++;
+                    } catch (err) { console.warn(`歌单 ${pl.name} 歌曲拉取失败`, err); }
+                }
+            }
+            
+            ChatDB.setItem(`music_playlists_${musicLoginId}`, JSON.stringify(savedPlaylists));
+            renderMyPlaylists();
+            closeMusicQrLoginModal();
+            alert(`同步成功！已获取 ${successCount} 个新歌单。`);
+        } else {
+            alert("获取歌单失败，请重试。");
+            closeMusicQrLoginModal();
+        }
+    } catch (e) {
+        console.error("Sync Playlists Error:", e);
+        alert("同步数据失败，网络异常。");
+        closeMusicQrLoginModal();
+    }
+}
+
+// ==========================================
+// 5. 音乐好友与一起听歌逻辑
+// ==========================================
+function renderMusicFriends() {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (!musicLoginId) return;
+
+    const listContainer = document.getElementById('musicFriendListContainer');
+    listContainer.innerHTML = '';
+
+    let friends = JSON.parse(ChatDB.getItem(`music_friends_${musicLoginId}`) || '[]');
+    // 核心修复：使用 getAllEntities 包含所有用户和角色，防止 Char 登录时找不到 User 好友
+    let allEntities = getAllEntities();
+
+    if (friends.length === 0) {
+        listContainer.innerHTML = '<div style="text-align: center; padding: 40px 20px; color: #aaa; font-size: 13px;">暂无好友，快去添加吧</div>';
+        return;
+    }
+
+    friends.forEach(charId => {
+        const char = allEntities.find(c => c.id === charId);
+        if (!char) return;
+
+        const item = document.createElement('div');
+        item.style.cssText = 'display: flex; align-items: center; gap: 12px; padding: 12px 15px; background: #fff; border-radius: 16px; border: 1px solid #eee; box-shadow: 0 2px 10px rgba(0,0,0,0.02); cursor: pointer;';
+        
+        // 如果对方是角色，点击进入角色音乐主页
+        if (!char.isAccount) {
+            item.onclick = () => openMusicCharProfile(char.id);
+        }
+        
+        item.innerHTML = `
+            <div style="width: 44px; height: 44px; border-radius: 12px; background-image: url('${char.avatarUrl || ''}'); background-size: cover; background-position: center; background-color: #f4f4f4; border: 1px solid #eee;"></div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 4px;">
+                <div style="font-size: 15px; font-weight: bold; color: #111;">${char.netName || char.name}</div>
+                <div style="font-size: 12px; color: #888;">在线</div>
+            </div>
+            <div onclick="event.stopPropagation(); inviteListenTogether('${char.id}', '${char.netName || char.name}')" style="font-size: 11px; font-weight: bold; color: #111; background: #f4f4f4; padding: 6px 12px; border-radius: 10px; cursor: pointer;">一起听</div>
+        `;
+        listContainer.appendChild(item);
+    });
+}
+
+function openMusicAddFriendSidebar() {
+    document.getElementById('musicSearchFriendInput').value = '';
+    document.getElementById('musicSearchResult').innerHTML = '';
+    document.getElementById('musicAddFriendSidebarOverlay').classList.add('show');
+}
+
+function closeMusicAddFriendSidebar() {
+    document.getElementById('musicAddFriendSidebarOverlay').classList.remove('show');
+}
+
+function searchMusicFriend() {
+    const keyword = document.getElementById('musicSearchFriendInput').value.trim();
+    const resultContainer = document.getElementById('musicSearchResult');
+    
+    if (!keyword) { resultContainer.innerHTML = ''; return; }
+
+    // 核心修复：从所有实体中搜索，让 Char 也能搜到 User 账号
+    let allEntities = getAllEntities();
+    const currentLoginId = ChatDB.getItem('music_current_login_account');
+    
+    // 过滤掉自己，并且匹配账号
+    const matchedChars = allEntities.filter(c => c.id !== currentLoginId && c.account && c.account.includes(keyword));
+
+    if (matchedChars.length === 0) {
+        resultContainer.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 12px; padding: 20px;">未找到该账号</div>';
+        return;
+    }
+
+    resultContainer.innerHTML = '';
+    matchedChars.forEach(char => {
+        const card = document.createElement('div');
+        // 优化卡片样式：纯白背景、大圆角、微阴影，与设置页卡片保持一致
+        card.style.cssText = 'display: flex; align-items: center; gap: 12px; padding: 15px; background: #fff; border-radius: 16px; border: 1px solid #f0f0f0; box-shadow: 0 2px 10px rgba(0,0,0,0.02);';
+        card.innerHTML = `
+            <div style="width: 44px; height: 44px; border-radius: 12px; background-image: url('${char.avatarUrl || ''}'); background-size: cover; background-position: center; background-repeat: no-repeat; background-color: #f4f4f4; border: 1px solid #eee;"></div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 4px; overflow: hidden;">
+                <div style="font-size: 15px; font-weight: bold; color: #111; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${char.netName || char.name}</div>
+                <div style="font-size: 12px; color: #888; font-family: monospace;">账号: ${char.account}</div>
+            </div>
+            <div onclick="addMusicFriend('${char.id}')" style="background: #111; color: #fff; padding: 8px 16px; border-radius: 12px; font-size: 12px; font-weight: bold; cursor: pointer; transition: transform 0.1s;" onmousedown="this.style.transform='scale(0.95)'" onmouseup="this.style.transform='scale(1)'" onmouseleave="this.style.transform='scale(1)'">添加</div>
+        `;
+        resultContainer.appendChild(card);
+    });
+}
+
+function addMusicFriend(charId) {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (!musicLoginId) return;
+
+    // 1. 添加到自己的好友列表
+    let friends = JSON.parse(ChatDB.getItem(`music_friends_${musicLoginId}`) || '[]');
+    if (friends.includes(charId)) { alert('该角色已经是您的音乐好友了！'); return; }
+
+    friends.push(charId);
+    ChatDB.setItem(`music_friends_${musicLoginId}`, JSON.stringify(friends));
+    
+    // 2. 核心修改：双向同步，把当前账号也加到对方的好友列表里
+    let targetFriends = JSON.parse(ChatDB.getItem(`music_friends_${charId}`) || '[]');
+    if (!targetFriends.includes(musicLoginId)) {
+        targetFriends.push(musicLoginId);
+        ChatDB.setItem(`music_friends_${charId}`, JSON.stringify(targetFriends));
+    }
+    
+    alert('添加成功！');
+    closeMusicAddFriendModal();
+    renderMusicFriends();
+}
+
+let listenTogetherTimer = null;
+let listenTogetherStartTime = 0; 
+window.currentListenTogetherCharId = null; // 全局记录当前一起听歌的对象
+
+function inviteListenTogether(charId, charName) {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    const chatLoginId = ChatDB.getItem('current_login_account');
+
+    if (musicLoginId !== chatLoginId) {
+        alert('【账号不匹配】\n您当前在 Music 登录的账号，与 Chat APP 中登录的账号不一致。\n请切换到对应的账号后，再邀请该角色一起听歌！');
+        return;
+    }
+
+    if (confirm(`确定要邀请 ${charName} 一起听歌吗？`)) {
+        // 1. 向聊天室发送邀请卡片
+        let history = JSON.parse(ChatDB.getItem(`chat_history_${chatLoginId}_${charId}`) || '[]');
+        const now = Date.now();
+        const inviteMsg = {
+            role: 'user',
+            type: 'music_invite',
+            status: 'pending',
+            content: '[一起听歌邀请]',
+            timestamp: now,
+            updateTime: now,
+            inviteId: `invite_${now}_${Math.random().toString(36).substr(2, 6)}`,
+            songTitle: currentPlayingSong ? currentPlayingSong.title : '',
+            songArtist: currentPlayingSong ? currentPlayingSong.artist : '',
+            songCover: currentPlayingSong ? currentPlayingSong.cover : ''
+        };
+        history.push(inviteMsg);
+        ChatDB.setItem(`chat_history_${chatLoginId}_${charId}`, JSON.stringify(history));
+        
+        // 2. 更新会话列表顺序
+        let sessions = JSON.parse(ChatDB.getItem(`chat_sessions_${chatLoginId}`) || '[]');
+        sessions = sessions.filter(id => id !== charId);
+        sessions.unshift(charId);
+        ChatDB.setItem(`chat_sessions_${chatLoginId}`, JSON.stringify(sessions));
+
+        // 【核心修复】：双向同步，将邀请卡片存入对方的视角
+        let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${charId}_${chatLoginId}`) || '[]');
+        let targetMsg = { ...inviteMsg, role: 'char' }; // 在对方视角里，是我发给他的
+        targetHistory.push(targetMsg);
+        ChatDB.setItem(`chat_history_${charId}_${chatLoginId}`, JSON.stringify(targetHistory));
+
+        let targetSessions = JSON.parse(ChatDB.getItem(`chat_sessions_${charId}`) || '[]');
+        targetSessions = targetSessions.filter(id => id !== chatLoginId);
+        targetSessions.unshift(chatLoginId);
+        ChatDB.setItem(`chat_sessions_${charId}`, JSON.stringify(targetSessions));
+
+        // 增加对方视角的未读数
+        let unreadCount = parseInt(ChatDB.getItem(`unread_${charId}_${chatLoginId}`) || '0');
+        ChatDB.setItem(`unread_${charId}_${chatLoginId}`, (unreadCount + 1).toString());
+
+        alert('邀请已发送，等待对方回复...');
+        // 已移除自动触发 AI 回复的逻辑
+    }
+}
+
+// 核心：正式开始一起听歌的 UI 逻辑
+window.startListenTogether = function(charId, isRestore = false) {
+    // 触发一起听歌互动统计
+    if (typeof updateMusicInteractionStats === 'function') {
+        updateMusicInteractionStats(charId);
+    }
+
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const me = accounts.find(a => a.id === musicLoginId);
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === charId);
+    
+    if (!char) return;
+    
+    window.currentListenTogetherCharId = charId;
+    const charName = char.netName || char.name;
+
+    const statusEl = document.getElementById('mpListenTogetherStatus');
+    if (statusEl) {
+        statusEl.style.display = 'flex';
+        const textEl = document.getElementById('mpListenTogetherText');
+        if (textEl) textEl.innerText = `正在与 ${charName} 一起听歌`;
+        
+        if (me && me.avatarUrl) {
+            document.getElementById('mpListenTogetherAvatar1').style.backgroundImage = `url(${me.avatarUrl})`;
+            document.getElementById('mpBigAvatar1').style.backgroundImage = `url(${me.avatarUrl})`;
+            const miniAv1 = document.getElementById('miniAvatar1');
+            if (miniAv1) miniAv1.style.backgroundImage = `url(${me.avatarUrl})`;
+        }
+        if (char && char.avatarUrl) {
+            document.getElementById('mpListenTogetherAvatar2').style.backgroundImage = `url(${char.avatarUrl})`;
+            document.getElementById('mpBigAvatar2').style.backgroundImage = `url(${char.avatarUrl})`;
+            const miniAv2 = document.getElementById('miniAvatar2');
+            if (miniAv2) miniAv2.style.backgroundImage = `url(${char.avatarUrl})`;
+        }
+        
+        // 切换底部小播放器
+        const miniDisc = document.getElementById('miniPlayerDisc');
+        const miniAvatars = document.getElementById('miniPlayerTogetherAvatars');
+        if (miniDisc && miniAvatars) {
+            miniDisc.style.display = 'none';
+            miniAvatars.style.display = 'flex';
+        }
+
+        // 切换全屏播放器中间的黑胶唱片为双头像 (已取消，保留唱片)
+        const normalDisc = document.getElementById('mpNormalDisc');
+        const togetherAvatars = document.getElementById('mpTogetherAvatars');
+        if (normalDisc && togetherAvatars) {
+            // normalDisc.style.display = 'none';
+            // togetherAvatars.style.display = 'flex';
+        }
+        
+        // 【核心修复】：通过明确的 isRestore 参数判断是否为恢复状态，彻底解决时长累加问题
+        if (!isRestore) {
+            listenTogetherStartTime = Date.now();
+        } else {
+            const savedStartTime = ChatDB.getItem('music_listen_together_startTime');
+            listenTogetherStartTime = savedStartTime ? parseInt(savedStartTime) : Date.now();
+        }
+        
+        // 持久化状态
+        ChatDB.setItem('music_listen_together_charId', charId);
+        ChatDB.setItem('music_listen_together_startTime', listenTogetherStartTime.toString());
+
+        document.getElementById('mpListenTime').innerText = Math.floor((Date.now() - listenTogetherStartTime) / 60000);
+        clearInterval(listenTogetherTimer);
+        
+        listenTogetherTimer = setInterval(() => {
+            const passedMinutes = Math.floor((Date.now() - listenTogetherStartTime) / 60000);
+            document.getElementById('mpListenTime').innerText = passedMinutes;
+            updateCapsuleUI(); // 实时更新胶囊上的时长
+        }, 1000);
+    }
+    
+    if (typeof showToast === 'function') {
+        showToast(`已和 ${charName} 开始一起听歌`, 'success', 2000);
+    }
+};
+
+// 处理 Char 主动邀请的弹窗响应
+window.handleMusicInviteResponse = function(isAccept) {
+    document.getElementById('musicInviteModalOverlay').classList.remove('show');
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    const charId = window.currentListenTogetherCharId; 
+    if (!currentLoginId || !charId) return;
+
+    if (isAccept) {
+        window.startListenTogether(charId, false); // 【核心修复】：传入 false 表示这是全新的开始，强制重置时间
+        
+        // 播放选中的歌曲
+        if (window.pendingInviteSong) {
+            const song = window.pendingInviteSong;
+            if (song.isGenerated) {
+                playGeneratedSong(song.title, song.artist);
+            } else if (song.url && song.url.startsWith('data:audio')) {
+                playLocalSong(song);
+            } else {
+                musicPlaySong(song.id, song.title, song.artist, song.cover);
+            }
+            window.pendingInviteSong = null; // 清空
+        }
+    }
+    
+    if (typeof renderChatHistory === 'function' && typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId === charId) {
+        renderChatHistory(charId);
+    }
+};
+
+// ==========================================
+// 全屏播放器交互逻辑 (已移除旧菜单)
+// ==========================================
+
+function endListenTogether(e) {
+    if(e) e.stopPropagation();
+    
+    // 判断当前是否正在一起听歌
+    if (!window.currentListenTogetherCharId) {
+        alert('请先邀请角色一起听歌');
+        return;
+    }
+
+    if(confirm('确定要结束一起听歌吗？')) {
+        // 更新最后一条邀请消息的更新时间和状态
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        if (currentLoginId && window.currentListenTogetherCharId) {
+            let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${window.currentListenTogetherCharId}`) || '[]');
+            // 从后往前找最后一条已同意的邀请
+            for (let i = history.length - 1; i >= 0; i--) {
+                if (history[i].type === 'music_invite' && history[i].status === 'accepted') {
+                    history[i].status = 'ended';
+                    history[i].updateTime = Date.now();
+                    break;
+                }
+            }
+            ChatDB.setItem(`chat_history_${currentLoginId}_${window.currentListenTogetherCharId}`, JSON.stringify(history));
+            if (typeof renderChatHistory === 'function' && currentChatRoomCharId === window.currentListenTogetherCharId) {
+                renderChatHistory(window.currentListenTogetherCharId);
+            }
+        }
+
+        // 清除持久化状态
+        ChatDB.removeItem('music_listen_together_charId');
+        ChatDB.removeItem('music_listen_together_startTime');
+
+        document.getElementById('mpListenTogetherStatus').style.display = 'none';
+        clearInterval(listenTogetherTimer);
+        listenTogetherTimer = null; 
+        window.currentListenTogetherCharId = null;
+        
+        // 恢复底部小播放器显示为黑胶唱片
+        const miniDisc = document.getElementById('miniPlayerDisc');
+        const miniAvatars = document.getElementById('miniPlayerTogetherAvatars');
+        if (miniDisc && miniAvatars) {
+            miniDisc.style.display = 'flex';
+            miniAvatars.style.display = 'none';
+        }
+
+        // 恢复全屏播放器中间的黑胶唱片 (已取消，保留唱片)
+        const normalDisc = document.getElementById('mpNormalDisc');
+        const togetherAvatars = document.getElementById('mpTogetherAvatars');
+        if (normalDisc && togetherAvatars) {
+            // normalDisc.style.display = 'flex';
+            // togetherAvatars.style.display = 'none';
+        }
+        
+        updateCapsuleUI(); // 刷新悬浮胶囊恢复单封面
+        alert('已结束一起听歌');
+    }
+}
+
+function triggerMpBgUpload(e) {
+    if(e) e.stopPropagation();
+    // 直接触发上传
+    document.getElementById('mpBgUploadInput').click();
+}
+
+// 切换黑胶唱片与歌词显示
+function toggleMpLyric() {
+    const discArea = document.getElementById('mpDiscArea');
+    const lyricArea = document.getElementById('mpLyricArea');
+    if (discArea && lyricArea) {
+        if (discArea.style.display === 'none') {
+            discArea.style.display = 'flex';
+            lyricArea.style.display = 'none';
+        } else {
+            discArea.style.display = 'none';
+            lyricArea.style.display = 'flex';
+        }
+    }
+}
+
+// 播放模式切换逻辑
+let currentPlayMode = 'loop'; // 'loop' 列表循环, 'single' 单曲循环, 'random' 随机播放
+
+function togglePlayMode() {
+    const btn = document.getElementById('mpPlayModeBtn');
+    const miniBtn = document.getElementById('miniPlayModeBtn');
+    
+    if (currentPlayMode === 'loop') {
+        currentPlayMode = 'single';
+        const icon = `<svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" stroke-width="2" fill="none"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path><text x="12" y="16" font-size="8" fill="currentColor" stroke="none" text-anchor="middle">1</text></svg>`;
+        if(btn) btn.innerHTML = icon;
+        if(miniBtn) miniBtn.innerHTML = icon;
+        alert('已切换为：单曲循环');
+    } else if (currentPlayMode === 'single') {
+        currentPlayMode = 'random';
+        const icon = `<svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" stroke-width="2" fill="none"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>`;
+        if(btn) btn.innerHTML = icon;
+        if(miniBtn) miniBtn.innerHTML = icon;
+        alert('已切换为：随机播放');
+    } else {
+        currentPlayMode = 'loop';
+        const icon = `<svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" stroke-width="2" fill="none"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>`;
+        if(btn) btn.innerHTML = icon;
+        if(miniBtn) miniBtn.innerHTML = icon;
+        alert('已切换为：列表循环');
+    }
+}
+
+// 播放列表弹窗逻辑
+function openMpPlaylist() {
+    const modal = document.getElementById('mpPlaylistModal');
+    if (modal) {
+        modal.style.transform = 'translateY(0)';
+    }
+}
+
+function closeMpPlaylist() {
+    const modal = document.getElementById('mpPlaylistModal');
+    if (modal) {
+        modal.style.transform = 'translateY(100%)';
+    }
+}
+
+function handleMpBgUpload(event) {
+    const file = event.target.files[0];
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const imgUrl = e.target.result;
+            const playerPanel = document.getElementById('musicPlayerPanel');
+            if (playerPanel) {
+                playerPanel.style.backgroundImage = `url('${imgUrl}')`;
+                // 【修复】：保存到本地存储，防止刷新丢失
+                const musicLoginId = ChatDB.getItem('music_current_login_account');
+                if (musicLoginId) {
+                    try {
+                        ChatDB.setItem(`music_player_bg_${musicLoginId}`, imgUrl);
+                    } catch (err) {
+                        console.warn("图片过大，无法持久化保存", err);
+                    }
+                }
+            }
+        }
+        reader.readAsDataURL(file);
+    }
+    event.target.value = '';
+}
+
+// 音乐进度条与播放控制逻辑
+audioPlayer.addEventListener('timeupdate', () => {
+    const currentTime = audioPlayer.currentTime;
+    const duration = audioPlayer.duration;
+
+    // 👇 新增：实时保存播放进度 (节流，每秒保存一次，防止频繁写入 IndexedDB 导致卡顿)
+    if (!window.lastSaveTime || Math.abs(currentTime - window.lastSaveTime) >= 1) {
+        window.lastSaveTime = currentTime;
+        ChatDB.setItem('music_current_time', currentTime.toString());
+        if (!isNaN(duration)) ChatDB.setItem('music_duration', duration.toString());
+    }
+    // 👆 新增结束
+
+    // 1. 滚动歌词逻辑
+    if (window.parsedLyrics && window.parsedLyrics.length > 0) {
+        let activeIdx = 0;
+        for (let i = 0; i < window.parsedLyrics.length; i++) {
+            if (currentTime >= window.parsedLyrics[i].time) {
+                activeIdx = i;
+            } else {
+                break;
+            }
+        }
+        
+        // 性能优化：只有当歌词行发生变化时才操作 DOM
+        if (window.currentActiveLyricIdx !== activeIdx) {
+            window.currentActiveLyricIdx = activeIdx;
+            const lyricLines = document.querySelectorAll('.lyric-line');
+            const lyricContent = document.getElementById('mpLyricContent');
+            const miniLyric = document.getElementById('miniPlayerLyric');
+            if (lyricLines[activeIdx] && !lyricLines[activeIdx].classList.contains('active')) {
+                lyricLines.forEach(l => l.classList.remove('active'));
+                lyricLines[activeIdx].classList.add('active');
+                if (miniLyric) miniLyric.innerText = window.parsedLyrics[activeIdx].text;
+                if (lyricContent) {
+                    const lineEl = lyricLines[activeIdx];
+                    const containerHeight = lyricContent.offsetHeight;
+                    const lineOffset = lineEl.offsetTop;
+                    const lineHeight = lineEl.offsetHeight;
+                    lyricContent.scrollTo({
+                        top: lineOffset - containerHeight / 2 + lineHeight / 2,
+                        behavior: 'smooth'
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. 进度条逻辑
+    if (!isNaN(duration)) {
+        const progressPercent = (currentTime / duration) * 100;
+        const fill = document.getElementById('mpProgressFill');
+        const dot = document.getElementById('mpProgressDot');
+        if(fill) fill.style.width = `${progressPercent}%`;
+        if(dot) dot.style.left = `${progressPercent}%`;
+        const curTimeEl = document.getElementById('mpCurrentTime');
+        const durTimeEl = document.getElementById('mpDuration');
+        if(curTimeEl) curTimeEl.innerText = formatTime(currentTime);
+        if(durTimeEl) durTimeEl.innerText = formatTime(duration);
+
+        // 同步迷你播放器进度
+        const miniFill = document.getElementById('miniProgressFill');
+        const miniCur = document.getElementById('miniCurrentTime');
+        const miniDur = document.getElementById('miniDuration');
+        if(miniFill) miniFill.style.width = `${progressPercent}%`;
+        if(miniCur) miniCur.innerText = formatTime(currentTime);
+        if(miniDur) miniDur.innerText = formatTime(duration);
+
+        // 同步到桌面韩系 Ins 风小组件进度条和时间
+        const desktopFill = document.getElementById('cwDesktopProgressFill');
+        if (desktopFill) desktopFill.style.width = `${progressPercent}%`;
+        const desktopCur = document.getElementById('cwDesktopCurrentTime');
+        if (desktopCur) desktopCur.innerText = formatTime(currentTime);
+        const desktopDur = document.getElementById('cwDesktopDuration');
+        if (desktopDur) desktopDur.innerText = formatTime(duration);
+    }
+
+    // 同步到桌面韩系 Ins 风小组件歌词
+    if (window.parsedLyrics && window.parsedLyrics.length > 0) {
+        let activeIdx = 0;
+        for (let i = 0; i < window.parsedLyrics.length; i++) {
+            if (audioPlayer.currentTime >= window.parsedLyrics[i].time) {
+                activeIdx = i;
+            } else {
+                break;
+            }
+        }
+        const dLyric1 = document.getElementById('cwDesktopLyric1');
+        const dLyric2 = document.getElementById('cwDesktopLyric2');
+        const dLyric3 = document.getElementById('cwDesktopLyric3');
+        if (dLyric1 && dLyric2 && dLyric3) {
+            dLyric1.innerText = activeIdx > 0 ? window.parsedLyrics[activeIdx - 1].text : '';
+            dLyric2.innerText = window.parsedLyrics[activeIdx].text;
+            dLyric3.innerText = activeIdx < window.parsedLyrics.length - 1 ? window.parsedLyrics[activeIdx + 1].text : '';
+        }
+    }
+});
+
+// ==========================================
+// 【新增】：听歌打卡同步逻辑 (Scrobble)
+// ==========================================
+let hasScrobbledCurrentSong = false;
+
+// 监听播放进度，如果播放超过 60 秒，且未打卡，则触发打卡
+audioPlayer.addEventListener('timeupdate', () => {
+    if (!currentPlayingSong || hasScrobbledCurrentSong) return;
+    
+    // 播放超过 60 秒触发打卡
+    if (audioPlayer.currentTime > 60) {
+        hasScrobbledCurrentSong = true;
+        scrobbleToWyy(currentPlayingSong.id, Math.floor(audioPlayer.currentTime));
+    }
+});
+
+// 监听播放结束，如果没到 60 秒但也播完了，也触发打卡
+audioPlayer.addEventListener('ended', () => {
+    if (currentPlayingSong && !hasScrobbledCurrentSong) {
+        hasScrobbledCurrentSong = true;
+        scrobbleToWyy(currentPlayingSong.id, Math.floor(audioPlayer.currentTime));
+    }
+});
+
+// 发送打卡请求到网易云
+async function scrobbleToWyy(songId, time) {
+    if (String(songId).startsWith('local_') || String(songId).startsWith('gen_')) return; // 不打卡本地和生成的歌曲
+    const cookie = localStorage.getItem('music_wyy_cookie');
+    if (!cookie) return; // 未登录网易云则不打卡
+
+    try {
+        const baseUrl = getMusicSearchApiUrl();
+        // sourceid 随便传一个歌单 ID，这里传每日推荐的默认 ID
+        const res = await fetch(`${baseUrl}/scrobble?id=${songId}&sourceid=3136952023&time=${time}&timestamp=${Date.now()}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `cookie=${encodeURIComponent(cookie)}`
+        });
+        const data = await res.json();
+        if (data.code === 200) {
+            console.log(`[网易云同步] 歌曲 ${songId} 打卡成功！`);
+            // 打卡成功后，静默刷新一下侧边栏的听歌数量
+            const uid = localStorage.getItem('music_wyy_uid');
+            if (uid) fetchWyyUserDetail(uid, cookie);
+        }
+    } catch (e) {
+        console.error("[网易云同步] 打卡失败", e);
+    }
+}
+
+audioPlayer.addEventListener('play', () => {
+    // 全屏播放器按钮
+    const mpPlayBtn = document.getElementById('mpPlayBtn');
+    const mpPauseBtn = document.getElementById('mpPauseBtn');
+    if (mpPlayBtn) mpPlayBtn.style.display = 'none';
+    if (mpPauseBtn) mpPauseBtn.style.display = 'block';
+    
+    // 迷你播放器按钮
+    const miniPlayBtn2 = document.getElementById('miniPlayBtn2');
+    const miniPauseBtn2 = document.getElementById('miniPauseBtn2');
+    if (miniPlayBtn2) miniPlayBtn2.style.display = 'none';
+    if (miniPauseBtn2) miniPauseBtn2.style.display = 'block';
+
+    // 音乐APP底部悬浮播放栏按钮
+    const appMiniPlayBtn = document.getElementById('appMiniPlayBtn');
+    const appMiniPauseBtn = document.getElementById('appMiniPauseBtn');
+    if (appMiniPlayBtn) appMiniPlayBtn.style.display = 'none';
+    if (appMiniPauseBtn) appMiniPauseBtn.style.display = 'block';
+
+    // 查手机音乐胶囊按钮
+    const pmMiniPlayBtn = document.getElementById('pmMiniPlayBtn');
+    const pmMiniPauseBtn = document.getElementById('pmMiniPauseBtn');
+    const pmMiniPlayerDisc = document.getElementById('pmMiniPlayerDisc');
+    if (pmMiniPlayBtn) pmMiniPlayBtn.style.display = 'none';
+    if (pmMiniPauseBtn) pmMiniPauseBtn.style.display = 'block';
+    if (pmMiniPlayerDisc) pmMiniPlayerDisc.classList.add('playing');
+
+    // 桌面小组件按钮
+    const desktopPlayIcon = document.querySelector('#carousel-music-widget-container .cw-ins-icon-play');
+    const desktopPauseIcon = document.querySelector('#carousel-music-widget-container .cw-ins-icon-pause');
+    if (desktopPlayIcon) desktopPlayIcon.style.display = 'none';
+    if (desktopPauseIcon) desktopPauseIcon.style.display = 'block';
+
+    const disc = document.querySelector('.mp-disc-outer');
+    if (disc) disc.style.animationPlayState = 'running';
+    
+    if (typeof updateCapsuleUI === 'function') updateCapsuleUI();
+});
+
+audioPlayer.addEventListener('pause', () => {
+    // 全屏播放器按钮
+    const mpPlayBtn = document.getElementById('mpPlayBtn');
+    const mpPauseBtn = document.getElementById('mpPauseBtn');
+    if (mpPlayBtn) mpPlayBtn.style.display = 'block';
+    if (mpPauseBtn) mpPauseBtn.style.display = 'none';
+    
+    // 迷你播放器按钮
+    const miniPlayBtn2 = document.getElementById('miniPlayBtn2');
+    const miniPauseBtn2 = document.getElementById('miniPauseBtn2');
+    if (miniPlayBtn2) miniPlayBtn2.style.display = 'block';
+    if (miniPauseBtn2) miniPauseBtn2.style.display = 'none';
+
+    // 音乐APP底部悬浮播放栏按钮
+    const appMiniPlayBtn = document.getElementById('appMiniPlayBtn');
+    const appMiniPauseBtn = document.getElementById('appMiniPauseBtn');
+    if (appMiniPlayBtn) appMiniPlayBtn.style.display = 'block';
+    if (appMiniPauseBtn) appMiniPauseBtn.style.display = 'none';
+
+    // 查手机音乐胶囊按钮
+    const pmMiniPlayBtn = document.getElementById('pmMiniPlayBtn');
+    const pmMiniPauseBtn = document.getElementById('pmMiniPauseBtn');
+    const pmMiniPlayerDisc = document.getElementById('pmMiniPlayerDisc');
+    if (pmMiniPlayBtn) pmMiniPlayBtn.style.display = 'block';
+    if (pmMiniPauseBtn) pmMiniPauseBtn.style.display = 'none';
+    if (pmMiniPlayerDisc) pmMiniPlayerDisc.classList.remove('playing');
+
+    // 桌面小组件按钮
+    const desktopPlayIcon = document.querySelector('#carousel-music-widget-container .cw-ins-icon-play');
+    const desktopPauseIcon = document.querySelector('#carousel-music-widget-container .cw-ins-icon-pause');
+    if (desktopPlayIcon) desktopPlayIcon.style.display = 'block';
+    if (desktopPauseIcon) desktopPauseIcon.style.display = 'none';
+
+    const disc = document.querySelector('.mp-disc-outer');
+    if (disc) disc.style.animationPlayState = 'paused';
+    
+    if (typeof updateCapsuleUI === 'function') updateCapsuleUI();
+});
+
+function toggleMusicPlay() {
+    if (audioPlayer.paused) {
+        if (audioPlayer.src && audioPlayer.src !== window.location.href) {
+            audioPlayer.play().catch(e => console.warn("播放失败:", e));
+        } else {
+            console.warn("当前没有可播放的音源");
+            return;
+        }
+    } else {
+        audioPlayer.pause();
+    }
+    // 新增：写入系统消息
+    if (window.currentListenTogetherCharId) {
+        const state = audioPlayer.paused ? '暂停了播放' : '继续了播放';
+        addMusicSystemMessage(`我 ${state}`);
+    }
+}
+
+function seekMusic(event) {
+    const progressBar = document.getElementById('mpProgressBar');
+    const rect = progressBar.getBoundingClientRect();
+    
+    // 兼容鼠标点击和手机触摸滑动事件
+    let clientX = event.clientX;
+    if (event.touches && event.touches.length > 0) {
+        clientX = event.touches[0].clientX;
+    } else if (event.changedTouches && event.changedTouches.length > 0) {
+        clientX = event.changedTouches[0].clientX;
+    }
+    
+    let clickX = clientX - rect.left;
+    
+    // 限制边界，防止手指拖出进度条外导致报错
+    if (clickX < 0) clickX = 0;
+    if (clickX > rect.width) clickX = rect.width;
+    
+    const percentage = clickX / rect.width;
+    if (!isNaN(audioPlayer.duration) && isFinite(audioPlayer.duration)) {
+        const targetTime = percentage * audioPlayer.duration;
+        if (isFinite(targetTime)) {
+            audioPlayer.currentTime = targetTime;
+        }
+    }
+}
+
+function formatTime(seconds) {
+    const min = Math.floor(seconds / 60);
+    const sec = Math.floor(seconds % 60);
+    return `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}`;
+}
+
+// ==========================================
+// 6. 全屏播放器逻辑
+// ==========================================
+function openMusicPlayer() {
+    const player = document.getElementById('musicPlayerPanel');
+    if (player) {
+        player.style.display = 'flex';
+        // 【修复】：打开时读取保存的背景
+        const musicLoginId = ChatDB.getItem('music_current_login_account');
+        if (musicLoginId) {
+            const savedBg = ChatDB.getItem(`music_player_bg_${musicLoginId}`);
+            if (savedBg) {
+                player.style.backgroundImage = `url('${savedBg}')`;
+            }
+        }
+        // 【修复】：如果正在一起听歌，打开全屏播放器时恢复显示一起听歌状态
+        const statusEl = document.getElementById('mpListenTogetherStatus');
+        if (statusEl && window.currentListenTogetherCharId) {
+            statusEl.style.display = 'flex';
+        }
+    }
+}
+
+// 修改后 (music.js 末尾)
+function closeMusicPlayer() {
+    const player = document.getElementById('musicPlayerPanel');
+    if (player) player.style.display = 'none';
+    // 【修复】：不要在这里隐藏一起听歌状态，否则下次打开播放器会消失
+    // const statusEl = document.getElementById('mpListenTogetherStatus');
+    // if (statusEl) statusEl.style.display = 'none';
+}
+// ==========================================
+// 【新增】：主页真实数据初始化与 iPod 交互逻辑
+// ==========================================
+let ipodCharsData = [];
+let ipodCurrentIndex = 0;
+let ipodIsAnimating = false;
+
+// 记录真实听歌数据 (支持长期储存与时间戳记录)
+function recordRecentPlay(song) {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (!musicLoginId || !song) return;
+
+    let recentPlaylist = JSON.parse(ChatDB.getItem(`music_recent_${musicLoginId}`) || 'null');
+    if (!recentPlaylist || !recentPlaylist.tracks) {
+        recentPlaylist = {
+            id: 'recent',
+            name: '最近播放',
+            cover: 'https://p2.music.126.net/6y-7YvS_G8V8.jpg',
+            trackCount: 0,
+            tracks: []
+        };
+    }
+
+    const now = Date.now();
+    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000; // 保留最近30天的记录用于长期储存
+
+    // 查找是否已存在该歌曲
+    let existingIndex = recentPlaylist.tracks.findIndex(t => String(t.id) === String(song.id) || (t.title === song.title && t.artist === song.artist));
+    
+    if (existingIndex !== -1) {
+        // 已存在，提取出来更新
+        let existingSong = recentPlaylist.tracks.splice(existingIndex, 1)[0];
+        
+        // 兼容旧数据：如果没有 playHistory 数组，则根据 playCount 伪造几个时间戳
+        if (!existingSong.playHistory) {
+            existingSong.playHistory = Array(existingSong.playCount || 1).fill(now);
+        }
+        
+        // 记录本次播放的时间戳
+        existingSong.playHistory.push(now);
+        
+        // 清理 30 天前的数据，防止数组无限膨胀
+        existingSong.playHistory = existingSong.playHistory.filter(t => t > thirtyDaysAgo);
+        existingSong.playCount = existingSong.playHistory.length; // 更新总次数
+        
+        recentPlaylist.tracks.unshift(existingSong);
+    } else {
+        // 不存在，新增并记录时间戳
+        let newSong = { ...song, playCount: 1, playHistory: [now] };
+        recentPlaylist.tracks.unshift(newSong);
+    }
+
+    // 限制最近播放列表最大长度为 200 (放宽限制以支持长期储存)
+    if (recentPlaylist.tracks.length > 200) {
+        recentPlaylist.tracks = recentPlaylist.tracks.slice(0, 200);
+    }
+    
+    recentPlaylist.trackCount = recentPlaylist.tracks.length;
+    ChatDB.setItem(`music_recent_${musicLoginId}`, JSON.stringify(recentPlaylist));
+    
+    // 如果当前在主页，实时刷新排行榜
+    if (document.getElementById('music-page-home').classList.contains('active')) {
+        renderHomeLeaderboard(musicLoginId);
+    }
+}
+
+function initMusicHomeData() {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (!musicLoginId) return;
+
+    // 1. 设置右上角当前登录账号头像
+    let allEntities = getAllEntities();
+    const account = allEntities.find(a => a.id === musicLoginId);
+    const topAvatar = document.getElementById('musicHomeTopAvatar');
+    if (topAvatar && account) {
+        topAvatar.style.backgroundImage = `url('${account.avatarUrl || 'https://api.dicebear.com/7.x/notionists/svg?seed=User'}')`;
+    }
+
+    // 2. 初始化 iPod 播放器角色数据 (仅限已添加好友的 Char)
+    let friendsIds = JSON.parse(ChatDB.getItem(`music_friends_${musicLoginId}`) || '[]');
+    let friendChars = allEntities.filter(e => !e.isAccount && friendsIds.includes(e.id));
+    
+    ipodCharsData = friendChars.map(char => {
+        // 读取听歌时长
+        let listenTime = parseInt(ChatDB.getItem(`music_listen_time_${char.id}`) || '0');
+        // 读取听歌次数 (通过最近播放列表长度计算)
+        let recentPlaylist = JSON.parse(ChatDB.getItem(`music_recent_${char.id}`) || 'null');
+        let count = recentPlaylist && recentPlaylist.tracks ? recentPlaylist.tracks.length : 0;
+        
+        return {
+            id: char.id,
+            name: char.netName || char.name,
+            avatar: char.avatarUrl || 'https://api.dicebear.com/7.x/adventurer/svg?seed=' + char.id,
+            count: count,
+            time: listenTime
+        };
+    });
+
+    if (ipodCharsData.length === 0) {
+        ipodCharsData = [{ name: '暂无好友', avatar: '', count: 0, time: 0 }];
+    }
+    
+    ipodCurrentIndex = 0;
+    updateIpodUI();
+
+    // 3. 渲染最近听歌排行榜
+    renderHomeLeaderboard(musicLoginId);
+}
+
+function updateIpodUI() {
+    const char = ipodCharsData[ipodCurrentIndex];
+    if (!char) return;
+    document.getElementById('ipodCharName').innerText = char.name;
+    document.getElementById('ipodCharAvatar').style.backgroundImage = `url('${char.avatar}')`;
+    document.getElementById('ipodListenCount').innerText = `共听歌 ${char.count} 次`;
+    document.getElementById('ipodListenTime').innerText = `累计 ${char.time} 小时`;
+}
+
+window.switchIpodChar = function(direction) {
+    if (ipodIsAnimating || ipodCharsData.length <= 1) return;
+    ipodIsAnimating = true;
+
+    const content = document.getElementById('ipodScreenContent');
+    if (!content) return;
+    
+    // 1. 滑出当前内容
+    content.style.transform = direction === 'next' ? 'translateX(-100%)' : 'translateX(100%)';
+    content.style.opacity = '0';
+
+    setTimeout(() => {
+        // 2. 更新数据
+        if (direction === 'next') {
+            ipodCurrentIndex = (ipodCurrentIndex + 1) % ipodCharsData.length;
+        } else {
+            ipodCurrentIndex = (ipodCurrentIndex - 1 + ipodCharsData.length) % ipodCharsData.length;
+        }
+        updateIpodUI();
+
+        // 3. 瞬间将容器移动到另一侧准备滑入 (关闭过渡动画)
+        content.style.transition = 'none';
+        content.style.transform = direction === 'next' ? 'translateX(100%)' : 'translateX(-100%)';
+        
+        // 4. 强制重绘，然后开启过渡动画滑入
+        void content.offsetWidth;
+        content.style.transition = 'transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1), opacity 0.3s ease';
+        content.style.transform = 'translateX(0)';
+        content.style.opacity = '1';
+
+        setTimeout(() => {
+            ipodIsAnimating = false;
+        }, 300);
+
+    }, 300); // 等待滑出动画完成
+};
+
+function renderHomeLeaderboard(musicLoginId) {
+    const listContainer = document.getElementById('musicHomeLeaderboardList');
+    if (!listContainer) return;
+
+    // 读取当前登录账号的最近播放记录
+    let recentPlaylist = JSON.parse(ChatDB.getItem(`music_recent_${musicLoginId}`) || 'null');
+    let tracks = recentPlaylist && recentPlaylist.tracks ? recentPlaylist.tracks : [];
+
+    if (tracks.length === 0) {
+        listContainer.innerHTML = '<div style="text-align:center; padding:30px; color:#888; font-size:13px;">暂无听歌记录，快去听歌吧</div>';
+        return;
+    }
+
+    const now = Date.now();
+    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000; // 计算过去 7 天的时间戳边界
+
+    // 计算过去 7 天的播放次数，并过滤掉 7 天内没播放过的歌曲
+    let weeklyTracks = tracks.map(song => {
+        let weeklyCount = 0;
+        if (song.playHistory) {
+            weeklyCount = song.playHistory.filter(t => t > sevenDaysAgo).length;
+        } else {
+            // 兼容旧数据，如果没有 playHistory，就当做是本周播放的
+            weeklyCount = song.playCount || 1;
+        }
+        return { ...song, weeklyCount };
+    }).filter(song => song.weeklyCount > 0);
+
+    if (weeklyTracks.length === 0) {
+        listContainer.innerHTML = '<div style="text-align:center; padding:30px; color:#888; font-size:13px;">本周暂无听歌记录，快去听歌吧</div>';
+        return;
+    }
+
+    // 按本周播放次数降序排序，取前 10 首作为排行榜
+    let sortedTracks = weeklyTracks.sort((a, b) => b.weeklyCount - a.weeklyCount);
+    let displayTracks = sortedTracks.slice(0, 10);
+    
+    listContainer.innerHTML = '';
+    
+    displayTracks.forEach((song, index) => {
+        const item = document.createElement('div');
+        item.className = 'leaderboard-item';
+        
+        // 点击排行榜歌曲直接播放
+        item.onclick = () => {
+            window.currentPlaylistTracks = tracks;
+            renderMpPlaylist();
+            if (song.url && song.url.startsWith('data:audio')) {
+                playLocalSong(song);
+            } else if (song.isGenerated || String(song.id).startsWith('gen_')) {
+                playGeneratedSong(song.title, song.artist);
+            } else {
+                musicPlaySong(song.id, song.title, song.artist, song.cover);
+            }
+        };
+
+        let rankClass = '';
+        if (index === 0) rankClass = 'top1';
+        else if (index === 1) rankClass = 'top2';
+        else if (index === 2) rankClass = 'top3';
+
+        // 读取本周真实的播放次数
+        let realPlayCount = song.weeklyCount;
+
+        item.innerHTML = `
+            <div class="rank-num ${rankClass}">${index + 1}</div>
+            <div class="song-cover" style="background-image: url('${song.cover}');"></div>
+            <div class="song-info">
+                <div class="song-title">${song.title}</div>
+                <div class="song-artist">${song.artist}</div>
+            </div>
+            <div class="play-count-box">
+                <span class="play-count-num">${realPlayCount}</span>
+                <span class="play-count-label">次播放</span>
+            </div>
+        `;
+        listContainer.appendChild(item);
+    });
+}
+// ==========================================
+// 【新增】：添加到歌单、编辑歌单、歌单详情逻辑
+// ==========================================
+
+let tempAddSong = null;
+
+function openAddToPlaylistModal(id, title, artist, cover) {
+    tempAddSong = { id, title, artist, cover };
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (!musicLoginId) return alert("请先登录音乐账号");
+    
+    const select = document.getElementById('addToPlaylistSelect');
+    select.innerHTML = '<option value="">请选择歌单</option>';
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+    savedPlaylists.forEach(pl => {
+        const opt = document.createElement('option');
+        opt.value = pl.id;
+        opt.innerText = pl.name;
+        select.appendChild(opt);
+    });
+    document.getElementById('musicAddToPlaylistModal').classList.add('show');
+}
+
+function confirmAddToPlaylist() {
+    const playlistId = document.getElementById('addToPlaylistSelect').value;
+    if (!playlistId) return alert("请选择歌单！");
+    
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+    // 修复：网易云导入的歌单 ID 可能是数字，而 select.value 是字符串，必须转为字符串对比
+    const plIndex = savedPlaylists.findIndex(p => String(p.id) === String(playlistId));
+    
+    if (plIndex !== -1 && tempAddSong) {
+        if (!savedPlaylists[plIndex].tracks) savedPlaylists[plIndex].tracks = [];
+        // 查重：同样转为字符串对比，防止类型不匹配
+        if (savedPlaylists[plIndex].tracks.some(t => String(t.id) === String(tempAddSong.id))) {
+            alert("该歌曲已在歌单中！");
+            return;
+        }
+        savedPlaylists[plIndex].tracks.push(tempAddSong);
+        savedPlaylists[plIndex].trackCount = savedPlaylists[plIndex].tracks.length;
+        ChatDB.setItem(`music_playlists_${musicLoginId}`, JSON.stringify(savedPlaylists));
+        alert("添加成功！");
+        document.getElementById('musicAddToPlaylistModal').classList.remove('show');
+        renderMyPlaylists();
+    } else {
+        alert("未找到对应歌单或歌曲信息丢失！");
+    }
+}
+
+let tempEditPlaylistCoverBase64 = null;
+
+function openEditPlaylistModal(id) {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+    const pl = savedPlaylists.find(p => String(p.id) === String(id));
+    if (!pl) return;
+    
+    document.getElementById('editPlaylistId').value = pl.id;
+    document.getElementById('editPlaylistName').value = pl.name;
+    document.getElementById('editPlaylistCover').value = pl.cover;
+    tempEditPlaylistCoverBase64 = null;
+    document.getElementById('musicEditPlaylistModal').classList.add('show');
+}
+
+function handleEditPlaylistCover(event) {
+    const file = event.target.files[0];
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            tempEditPlaylistCoverBase64 = e.target.result;
+            document.getElementById('editPlaylistCover').value = '已选择本地图片';
+        };
+        reader.readAsDataURL(file);
+    }
+    event.target.value = '';
+}
+
+function confirmEditPlaylist() {
+    const id = document.getElementById('editPlaylistId').value;
+    const name = document.getElementById('editPlaylistName').value.trim();
+    const coverUrl = document.getElementById('editPlaylistCover').value.trim();
+    if (!name) return alert("请输入歌单名称！");
+
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+    const plIndex = savedPlaylists.findIndex(p => String(p.id) === String(id));
+    if (plIndex !== -1) {
+        savedPlaylists[plIndex].name = name;
+        if (tempEditPlaylistCoverBase64) {
+            savedPlaylists[plIndex].cover = tempEditPlaylistCoverBase64;
+        } else if (coverUrl && coverUrl !== '已选择本地图片') {
+            savedPlaylists[plIndex].cover = coverUrl;
+        }
+        ChatDB.setItem(`music_playlists_${musicLoginId}`, JSON.stringify(savedPlaylists));
+        document.getElementById('musicEditPlaylistModal').classList.remove('show');
+        renderMyPlaylists();
+    }
+}
+
+function deletePlaylist() {
+    if (!confirm("确定要删除该歌单吗？")) return;
+    const id = document.getElementById('editPlaylistId').value;
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+    savedPlaylists = savedPlaylists.filter(p => String(p.id) !== String(id));
+    ChatDB.setItem(`music_playlists_${musicLoginId}`, JSON.stringify(savedPlaylists));
+    document.getElementById('musicEditPlaylistModal').classList.remove('show');
+    renderMyPlaylists();
+}
+
+function openPlaylistDetail(id, isCharPlaylist = false, charId = null, directPlaylistData = null) {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let pl;
+    
+    // 【性能优化】：如果直接传入了歌单数据（如最近听歌），则跳过耗时的数据库查询
+    if (directPlaylistData) {
+        pl = directPlaylistData;
+    } else {
+        let savedPlaylists = [];
+        if (isCharPlaylist && charId) {
+            savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${charId}`) || '[]');
+        } else {
+            savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+        }
+        pl = savedPlaylists.find(p => p.id === id);
+    }
+    
+    if (!pl) return;
+
+    // 韩系简约 iOS 风格 UI 赋值
+    document.getElementById('playlistDetailName').innerText = pl.name;
+    document.getElementById('playlistDetailCover').style.backgroundImage = `url('${pl.cover}')`;
+    
+    // 模拟创建者信息
+    let creatorName = "我";
+    if (isCharPlaylist && charId) {
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        const char = chars.find(c => c.id === charId);
+        if (char) {
+            creatorName = char.netName || char.name;
+        }
+    } else {
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        const acc = accounts.find(a => a.id === musicLoginId);
+        if (acc) {
+            creatorName = acc.netName || "我";
+        }
+    }
+    
+    const creatorNameEl = document.getElementById('playlistDetailCreatorName');
+    if (creatorNameEl) creatorNameEl.innerText = creatorName;
+
+    // 设置 Meta 信息 (Album · X songs · Year)
+    const metaEl = document.getElementById('playlistDetailMeta');
+    if (metaEl) {
+        const songCount = pl.tracks ? pl.tracks.length : 0;
+        const currentYear = new Date().getFullYear();
+        metaEl.innerText = `Album · ${songCount} songs · ${currentYear}`;
+    }
+    
+    // 绑定批量编辑事件到“更多”图标上
+    const moreBtnEl = document.getElementById('playlistDetailMoreBtn');
+    if (moreBtnEl) {
+        moreBtnEl.onclick = () => openPlaylistBatchEdit(pl.id, isCharPlaylist, charId);
+    }
+
+    const tracksContainer = document.getElementById('playlistDetailTracks');
+    tracksContainer.innerHTML = '';
+    
+    if (pl.tracks && pl.tracks.length > 0) {
+        // 如果是最近播放，给容器加一点顶部内边距，并改浅灰背景以凸显白色卡片
+        if (id === 'recent') {
+            tracksContainer.style.paddingTop = '15px';
+            tracksContainer.style.backgroundColor = '#f4f4f5'; 
+        } else {
+            tracksContainer.style.paddingTop = '0';
+            tracksContainer.style.backgroundColor = 'transparent';
+        }
+
+        // 【性能优化】：使用 DocumentFragment 批量插入 DOM，解决进入页面卡顿问题
+        const fragment = document.createDocumentFragment();
+
+        pl.tracks.forEach((song, index) => {
+            const item = document.createElement('div');
+            
+            item.onclick = () => {
+                window.currentPlaylistTracks = pl.tracks;
+                renderMpPlaylist();
+                if (song.url && song.url.startsWith('data:audio')) {
+                    playLocalSong(song);
+                } else if (song.isGenerated || String(song.id).startsWith('gen_')) {
+                    playGeneratedSong(song.title, song.artist);
+                } else {
+                    musicPlaySong(song.id, song.title, song.artist, song.cover);
+                }
+            };
+
+            if (id === 'recent') {
+                // 最近听歌专属卡片 UI (极简 iOS 韩系白灰风格)
+                item.style.cssText = 'background: #ffffff; border-radius: 20px; padding: 18px; display: flex; flex-direction: column; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.02); border: 1px solid rgba(0, 0, 0, 0.03); cursor: pointer; margin: 0 20px 16px 20px; transition: transform 0.15s ease, background 0.15s ease;';
+                
+                // 【修复】：SVG 图标糊在一起是因为缺少 fill="none" 和 stroke 属性
+                item.innerHTML = `
+                    <div style="display: flex; align-items: center; gap: 14px;">
+                        <div style="width: 48px; height: 48px; border-radius: 12px; background-color: #f0f0f0; display: flex; justify-content: center; align-items: center; flex-shrink: 0; border: 1px solid #eaeaea;">
+                            <svg viewBox="0 0 24 24" style="width: 24px; height: 24px; stroke: #a0a0a0; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round;"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
+                        </div>
+                        <div style="flex: 1; display: flex; flex-direction: column; gap: 4px; overflow: hidden;">
+                            <div style="font-size: 16px; font-weight: 700; color: #111; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: 0.3px;">${song.title}</div>
+                            <div style="font-size: 13px; color: #8e8e93; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${song.artist}</div>
+                        </div>
+                        <div style="width: 32px; height: 32px; border-radius: 50%; border: 1.5px solid #e0e0e0; display: flex; justify-content: center; align-items: center; flex-shrink: 0; color: #ccc;">
+                            <svg viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor; margin-left: 2px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                        </div>
+                    </div>
+                    <div style="margin-top: 16px; padding-top: 14px; border-top: 1px solid #f5f5f5; display: flex; align-items: flex-start; gap: 16px;">
+                        <div style="font-size: 15px; font-weight: 800; color: #111; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; letter-spacing: 0.5px; flex-shrink: 0; padding-top: 1px;">os</div>
+                        <div style="font-size: 14px; color: #555; line-height: 1.5; font-weight: 500; word-break: break-all;">${song.innerVoice || '享受纯净音乐时光...'}</div>
+                    </div>
+                `;
+            } else {
+                // 普通歌单列表风格保持不变
+                item.style.cssText = 'display: flex; align-items: center; padding: 12px 20px; gap: 15px; cursor: pointer;';
+                let innerVoiceHtml = '';
+                if (song.innerVoice) {
+                    innerVoiceHtml = `<div style="font-size: 11px; color: #555; margin-top: 4px; font-style: normal; background: #f5f5f5; padding: 4px 8px; border-radius: 6px; display: inline-block; border: 1px solid #eee;">"${song.innerVoice}"</div>`;
+                }
+
+                item.innerHTML = `
+                    <div style="width: 20px; text-align: center; color: #999; font-size: 15px; font-weight: bold;">${index + 1}</div>
+                    <div style="flex: 1; display: flex; flex-direction: column; gap: 4px; overflow: hidden;">
+                        <div style="font-size: 15px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${song.title}</div>
+                        <div style="font-size: 12px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${song.artist}</div>
+                        ${innerVoiceHtml}
+                    </div>
+                    <div style="padding: 5px; color: #ccc;">
+                        <svg viewBox="0 0 24 24" width="24" height="24" stroke="currentColor" stroke-width="1.5" fill="none"><circle cx="12" cy="12" r="10"></circle><polygon points="10 8 16 12 10 16 10 8" fill="currentColor"></polygon></svg>
+                    </div>
+                `;
+            }
+
+            fragment.appendChild(item);
+        });
+        
+        // 【性能优化】：一次性插入 DOM，极大提升渲染性能，消除卡顿
+        tracksContainer.appendChild(fragment);
+    } else {
+        if (id === 'recent') {
+            tracksContainer.innerHTML = '<div style="text-align:center; padding:40px; color:#888; font-size:13px;">暂无最近播放记录，点击右上角按钮生成</div>';
+        } else {
+            tracksContainer.innerHTML = '<div style="text-align:center; padding:40px; color:#888; font-size:13px;">歌单为空，快去添加歌曲吧</div>';
+        }
+    }
+
+    // 处理加载更多按钮
+    const loadMoreBtn = document.getElementById('playlistLoadMoreBtn');
+    if (isCharPlaylist && pl.tracks && pl.tracks.length < (pl.trackCount || 50) && id !== 'recent') {
+        loadMoreBtn.style.display = 'block';
+        loadMoreBtn.onclick = () => loadMoreCharSongsAPI(charId, pl.id);
+    } else {
+        loadMoreBtn.style.display = 'none';
+    }
+
+    // 绑定播放全部按钮
+    window.playAllPlaylistSongs = function() {
+        if (pl.tracks && pl.tracks.length > 0) {
+            window.currentPlaylistTracks = pl.tracks;
+            renderMpPlaylist();
+            const firstSong = pl.tracks[0];
+            if (firstSong.url && firstSong.url.startsWith('data:audio')) {
+                playLocalSong(firstSong);
+            } else if (firstSong.isGenerated || String(firstSong.id).startsWith('gen_')) {
+                playGeneratedSong(firstSong.title, firstSong.artist);
+            } else {
+                musicPlaySong(firstSong.id, firstSong.title, firstSong.artist, firstSong.cover);
+            }
+        }
+    };
+
+    const regenBtn = document.getElementById('playlistRegenerateBtn');
+    const searchBtn = document.getElementById('playlistSearchBtn');
+    if (id === 'recent') {
+        if (regenBtn) {
+            regenBtn.style.display = 'flex';
+            regenBtn.onclick = () => generateCharRecentMusicAPI(charId || musicLoginId);
+        }
+        if (searchBtn) searchBtn.style.display = 'none';
+    } else {
+        if (regenBtn) regenBtn.style.display = 'none';
+        if (searchBtn) searchBtn.style.display = 'flex';
+    }
+
+    document.getElementById('musicPlaylistDetailPanel').style.display = 'flex';
+}
+
+// 【新增】：歌单批量编辑逻辑
+let batchEditState = {
+    playlistId: null,
+    isCharPlaylist: false,
+    charId: null,
+    tracks: [],
+    selectedIds: new Set()
+};
+
+function openPlaylistBatchEdit(playlistId, isCharPlaylist, charId) {
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let dbKey = isCharPlaylist ? `music_playlists_${charId}` : `music_playlists_${musicLoginId}`;
+    let savedPlaylists = JSON.parse(ChatDB.getItem(dbKey) || '[]');
+    const pl = savedPlaylists.find(p => p.id === playlistId);
+    
+    if (!pl || !pl.tracks || pl.tracks.length === 0) {
+        alert("歌单为空，无法编辑");
+        return;
+    }
+
+    batchEditState = {
+        playlistId,
+        isCharPlaylist,
+        charId,
+        tracks: pl.tracks,
+        selectedIds: new Set()
+    };
+
+    renderBatchEditList();
+    document.getElementById('musicPlaylistBatchEditPanel').style.display = 'flex';
+}
+
+function closePlaylistBatchEdit() {
+    document.getElementById('musicPlaylistBatchEditPanel').style.display = 'none';
+    batchEditState.selectedIds.clear();
+}
+
+function renderBatchEditList() {
+    const container = document.getElementById('batchEditTracks');
+    container.innerHTML = '';
+    
+    batchEditState.tracks.forEach((song, index) => {
+        const isSelected = batchEditState.selectedIds.has(song.id);
+        const item = document.createElement('div');
+        item.style.cssText = 'display: flex; align-items: center; padding: 12px 20px; gap: 15px; cursor: pointer; border-bottom: 1px solid #f9f9f9;';
+        item.onclick = () => toggleBatchSelect(song.id);
+        
+        const checkboxHtml = isSelected 
+            ? `<div style="width: 20px; height: 20px; border-radius: 50%; background: #ff3b30; display: flex; justify-content: center; align-items: center;"><svg viewBox="0 0 24 24" width="12" height="12" stroke="#fff" stroke-width="3" fill="none"><polyline points="20 6 9 17 4 12"></polyline></svg></div>`
+            : `<div style="width: 20px; height: 20px; border-radius: 50%; border: 1px solid #ccc;"></div>`;
+
+        item.innerHTML = `
+            ${checkboxHtml}
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 4px; overflow: hidden;">
+                <div style="font-size: 15px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${song.title}</div>
+                <div style="font-size: 12px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${song.artist}</div>
+            </div>
+        `;
+        container.appendChild(item);
+    });
+
+    updateBatchEditUI();
+}
+
+function toggleBatchSelect(songId) {
+    if (batchEditState.selectedIds.has(songId)) {
+        batchEditState.selectedIds.delete(songId);
+    } else {
+        batchEditState.selectedIds.add(songId);
+    }
+    renderBatchEditList();
+}
+
+function toggleBatchSelectAll() {
+    if (batchEditState.selectedIds.size === batchEditState.tracks.length) {
+        batchEditState.selectedIds.clear();
+    } else {
+        batchEditState.tracks.forEach(song => batchEditState.selectedIds.add(song.id));
+    }
+    renderBatchEditList();
+}
+
+function updateBatchEditUI() {
+    const count = batchEditState.selectedIds.size;
+    document.getElementById('batchEditTitle').innerText = `已选择 ${count} 项`;
+    
+    const selectAllBtn = document.getElementById('batchSelectAllBtn');
+    if (count === batchEditState.tracks.length && count > 0) {
+        selectAllBtn.innerText = '取消全选';
+    } else {
+        selectAllBtn.innerText = '全选';
+    }
+
+    const deleteBtn = document.getElementById('batchDeleteBtn');
+    if (count > 0) {
+        deleteBtn.style.opacity = '1';
+        deleteBtn.style.pointerEvents = 'auto';
+    } else {
+        deleteBtn.style.opacity = '0.5';
+        deleteBtn.style.pointerEvents = 'none';
+    }
+}
+
+function confirmBatchDelete() {
+    const count = batchEditState.selectedIds.size;
+    if (count === 0) return;
+    if (!confirm(`确定要删除选中的 ${count} 首歌曲吗？`)) return;
+
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let dbKey = batchEditState.isCharPlaylist ? `music_playlists_${batchEditState.charId}` : `music_playlists_${musicLoginId}`;
+    let savedPlaylists = JSON.parse(ChatDB.getItem(dbKey) || '[]');
+    
+    const plIndex = savedPlaylists.findIndex(p => p.id === batchEditState.playlistId);
+    if (plIndex !== -1) {
+        savedPlaylists[plIndex].tracks = savedPlaylists[plIndex].tracks.filter(s => !batchEditState.selectedIds.has(s.id));
+        savedPlaylists[plIndex].trackCount = savedPlaylists[plIndex].tracks.length;
+        ChatDB.setItem(dbKey, JSON.stringify(savedPlaylists));
+        
+        closePlaylistBatchEdit();
+        // 刷新详情页
+        openPlaylistDetail(batchEditState.playlistId, batchEditState.isCharPlaylist, batchEditState.charId);
+        // 刷新主页歌单列表
+        if (!batchEditState.isCharPlaylist) renderMyPlaylists();
+    }
+}
+
+// 【新增】：从歌单中删除歌曲 (保留原有的单曲删除函数以防其他地方调用)
+window.removeSongFromPlaylist = function(playlistId, songId, isCharPlaylist, charId) {
+    if (!confirm("确定要将这首歌从歌单中移除吗？")) return;
+    
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    let dbKey = isCharPlaylist ? `music_playlists_${charId}` : `music_playlists_${musicLoginId}`;
+    let savedPlaylists = JSON.parse(ChatDB.getItem(dbKey) || '[]');
+    
+    const plIndex = savedPlaylists.findIndex(p => p.id === playlistId);
+    if (plIndex !== -1) {
+        savedPlaylists[plIndex].tracks = savedPlaylists[plIndex].tracks.filter(s => String(s.id) !== String(songId));
+        savedPlaylists[plIndex].trackCount = savedPlaylists[plIndex].tracks.length;
+        ChatDB.setItem(dbKey, JSON.stringify(savedPlaylists));
+        
+        // 刷新当前页面
+        openPlaylistDetail(playlistId, isCharPlaylist, charId);
+        // 刷新主页歌单列表
+        if (!isCharPlaylist) renderMyPlaylists();
+    }
+};
+
+// 播放 AI 生成的歌曲 (先搜索再播放)
+async function playGeneratedSong(title, artist) {
+    // 创建或获取原生的搜索提示框
+    let toast = document.getElementById('music-search-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'music-search-toast';
+        toast.style.cssText = 'position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); background:rgba(0,0,0,0.8); color:#fff; padding:12px 24px; border-radius:12px; z-index:999999; font-size:14px; font-weight:bold; text-align:center; box-shadow:0 4px 15px rgba(0,0,0,0.2);';
+        document.body.appendChild(toast);
+    }
+    toast.innerText = `正在搜索歌曲中...`;
+    toast.style.display = 'block';
+
+    try {
+        const baseUrl = getMusicSearchApiUrl();
+        const kw = `${title} ${artist}`;
+        // 增加 timestamp 防止浏览器缓存旧源的数据
+        let res = await fetch(`${baseUrl}/cloudsearch?keywords=${encodeURIComponent(kw)}&limit=1&timestamp=${Date.now()}`);
+        let data = await res.json();
+        
+        // 如果当前源不支持 cloudsearch 接口，自动降级尝试 search 接口
+        if (data.code !== 200 || !data.result || !data.result.songs || data.result.songs.length === 0) {
+            res = await fetch(`${baseUrl}/search?keywords=${encodeURIComponent(kw)}&limit=1&timestamp=${Date.now()}`);
+            data = await res.json();
+        }
+        
+        if (data.code === 200 && data.result && data.result.songs && data.result.songs.length > 0) {
+            const song = data.result.songs[0];
+            // 兼容不同源返回的歌手字段格式 (ar 或 artists)
+            const artistName = song.ar ? song.ar.map(a=>a.name).join(',') : (song.artists ? song.artists.map(a=>a.name).join(',') : artist);
+            const cover = (song.al && song.al.picUrl) ? song.al.picUrl + '?param=100y100' : 'https://p2.music.126.net/6y-7YvS_G8V8.jpg?param=100y100';
+            
+            toast.style.display = 'none';
+            musicPlaySong(song.id, song.name, artistName, cover);
+        } else {
+            toast.style.display = 'none';
+            alert(`未找到《${title}》的音源，请尝试在设置中切换其他音乐源。`);
+        }
+    } catch (e) {
+        console.error("Search Error:", e);
+        toast.style.display = 'none';
+        alert(`搜索失败，该接口可能暂时不可用，请在设置中切换其他音乐源。`);
+    }
+}
+
+function closePlaylistDetail() {
+    document.getElementById('musicPlaylistDetailPanel').style.display = 'none';
+}
+
+function playLocalSong(song) {
+    hasScrobbledCurrentSong = false; // 重置打卡状态
+    // 【核心修复】：获取高清封面
+    let cover = song.cover;
+    if (cover && typeof cover === 'string' && cover.includes('music.126.net')) {
+        cover = cover.replace(/\?param=\d+y\d+/, '?param=500y500');
+        if (!cover.includes('?param=')) cover += '?param=500y500';
+    }
+
+    // 更新底部悬浮播放器 UI
+    document.querySelector('.music-player-title').innerText = song.title;
+    document.querySelector('.music-player-sub').innerText = song.artist;
+    document.querySelector('.music-player-disc-inner').style.backgroundImage = `url(${cover})`;
+    document.querySelector('.music-player-disc-inner').style.backgroundSize = 'cover';
+    
+    // 更新全屏播放器 UI
+    const mpSongName = document.getElementById('mpSongName');
+    if (mpSongName) mpSongName.innerText = song.title;
+    const mpArtistName = document.getElementById('mpArtistName');
+    if (mpArtistName) mpArtistName.innerText = song.artist;
+    // 【修改】：使用 CSS 变量更新封面，支持多套 UI
+    const playerPanel = document.getElementById('musicPlayerPanel');
+    if (playerPanel) {
+        const musicLoginId = ChatDB.getItem('music_current_login_account');
+        
+        // 检查是否有自定义封面
+        const savedCover = musicLoginId ? ChatDB.getItem(`music_player_cover_${musicLoginId}`) : null;
+        if (savedCover) {
+            playerPanel.style.setProperty('--mp-cover-image', `url('${savedCover}')`);
+        } else {
+            playerPanel.style.setProperty('--mp-cover-image', `url('${cover}')`);
+        }
+        
+        // 检查是否有自定义背景
+        const savedBg = musicLoginId ? ChatDB.getItem(`music_player_bg_${musicLoginId}`) : null;
+        if (savedBg) {
+            playerPanel.style.setProperty('--mp-bg-image', `url('${savedBg}')`);
+        } else {
+            playerPanel.style.setProperty('--mp-bg-image', `url('${cover}')`);
+        }
+    }
+
+    const mpLyricTitle = document.getElementById('mpLyricTitle');
+    if (mpLyricTitle) mpLyricTitle.innerText = song.title;
+    const mpLyricArtist = document.getElementById('mpLyricArtist');
+    if (mpLyricArtist) mpLyricArtist.innerText = song.artist;
+    
+    currentPlayingSong = song;
+    
+    // 【新增】：记录真实听歌数据
+    recordRecentPlay(currentPlayingSong);
+
+    // 修复：如果本地歌曲自带歌词，则解析并显示
+    if (song.lrc) {
+        window.currentPlayingLyric = song.lrc.replace(/\[\d{2}:\d{2}\.\d{2,3}\]/g, '').trim();
+        window.parsedLyrics = parseLrc(song.lrc);
+        const lyricContent = document.getElementById('mpLyricContent');
+        if (lyricContent) {
+            lyricContent.innerHTML = window.parsedLyrics.map((line, idx) => `<div class="lyric-line" id="lrc-line-${idx}">${line.text}</div>`).join('');
+            lyricContent.scrollTop = 0;
+        }
+    } else {
+        window.currentPlayingLyric = "";
+        window.parsedLyrics = [];
+        const lyricContent = document.getElementById('mpLyricContent');
+        if (lyricContent) lyricContent.innerHTML = "暂无歌词数据";
+    }
+
+    // 👇 新增：保存当前播放状态到本地，供刷新后恢复
+    ChatDB.setItem('music_current_song', JSON.stringify(currentPlayingSong));
+    ChatDB.setItem('music_song_url', song.url);
+    ChatDB.setItem('music_parsed_lyrics', JSON.stringify(window.parsedLyrics || []));
+    // 👆 新增结束
+
+    audioPlayer.src = song.url;
+    const playPromise = audioPlayer.play();
+    if (playPromise !== undefined) {
+        playPromise.then(() => {
+            const disc = document.querySelector('.mp-disc-outer');
+            if (disc) disc.style.animationPlayState = 'running';
+            
+            const playerPanel = document.getElementById('musicPlayerPanel');
+            if (playerPanel) {
+                const musicLoginId = ChatDB.getItem('music_current_login_account');
+                const savedBg = musicLoginId ? ChatDB.getItem(`music_player_bg_${musicLoginId}`) : null;
+                if (!savedBg) {
+                    playerPanel.style.backgroundImage = `url('${song.cover}')`;
+                }
+            }
+            
+            // 👇 核心注入：本地歌曲播放时同样接管系统锁屏
+            updateSystemMediaSession();
+            // 【修复】：同步更新悬浮胶囊和迷你播放器的 UI
+            if (typeof updateCapsuleUI === 'function') updateCapsuleUI();
+            
+        }).catch(e => console.error(e));
+    }
+}
+// ==========================================
+// 【新增】：音乐分享逻辑 (聊天 & 朋友圈)
+// ==========================================
+
+function openMusicShareModal() {
+    if (!currentPlayingSong) return alert("当前没有正在播放的歌曲！");
+    document.getElementById('musicShareModalOverlay').classList.add('show');
+}
+
+function closeMusicShareModal() {
+    document.getElementById('musicShareModalOverlay').classList.remove('show');
+}
+
+function closeMusicShareChatModal() {
+    document.getElementById('musicShareChatModalOverlay').classList.remove('show');
+}
+
+// 1. 分享到聊天
+function shareMusicToChat() {
+    closeMusicShareModal();
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return alert("请先在 Chat 中登录账号！");
+
+    let contacts = JSON.parse(ChatDB.getItem(`contacts_${currentLoginId}`) || '[]');
+    let allChars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+    
+    const listEl = document.getElementById('musicShareContactList');
+    listEl.innerHTML = '';
+    
+    const friends = contacts.map(id => allChars.find(c => c.id === id)).filter(c => c);
+    
+    if (friends.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#aaa; font-size:12px;">暂无好友可分享</div>';
+    } else {
+        friends.forEach(f => {
+            const displayName = remarks[f.id] || f.netName || f.name;
+            const item = document.createElement('div');
+            item.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 10px; background: #f9f9f9; border-radius: 10px; cursor: pointer;';
+            item.innerHTML = `
+                <div style="width: 36px; height: 36px; border-radius: 8px; background-image: url('${f.avatarUrl || ''}'); background-size: cover; background-color: #eee;"></div>
+                <div style="font-size: 14px; font-weight: bold; color: #333;">${displayName}</div>
+            `;
+            item.onclick = () => confirmShareMusicToChat(f.id);
+            listEl.appendChild(item);
+        });
+    }
+    
+    document.getElementById('musicShareChatModalOverlay').classList.add('show');
+}
+
+function confirmShareMusicToChat(targetCharId) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${targetCharId}`) || '[]');
+    
+    // 构建仿网易云音乐卡片 HTML
+    const shareHtml = `
+        <div class="music-share-card" onclick="openMusicApp(); setTimeout(() => musicPlaySong('${currentPlayingSong.id}', '${currentPlayingSong.title.replace(/'/g, "\\'")}', '${currentPlayingSong.artist.replace(/'/g, "\\'")}', '${currentPlayingSong.cover}'), 500);">
+            <img src="${currentPlayingSong.cover}">
+            <div class="info">
+                <div class="title">${currentPlayingSong.title}</div>
+                <div class="artist">${currentPlayingSong.artist}</div>
+            </div>
+            <div class="icon">
+                <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>
+            </div>
+        </div>
+    `;
+
+    history.push({
+        role: 'user',
+        type: 'text',
+        content: shareHtml,
+        timestamp: Date.now()
+    });
+    
+    ChatDB.setItem(`chat_history_${currentLoginId}_${targetCharId}`, JSON.stringify(history));
+    
+    // 更新会话列表顺序
+    let sessions = JSON.parse(ChatDB.getItem(`chat_sessions_${currentLoginId}`) || '[]');
+    sessions = sessions.filter(id => id !== targetCharId);
+    sessions.unshift(targetCharId);
+    ChatDB.setItem(`chat_sessions_${currentLoginId}`, JSON.stringify(sessions));
+    
+    alert('分享成功！');
+    closeMusicShareChatModal();
+    
+    // 如果当前正好在聊天界面，刷新一下
+    if (typeof renderChatList === 'function') renderChatList();
+    if (typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId === targetCharId) {
+        renderChatHistory(targetCharId);
+    }
+}
+
+// 2. 分享到朋友圈
+function shareMusicToMoment() {
+    closeMusicShareModal();
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return alert("请先在 Chat 中登录账号！");
+
+    // 构建仿网易云音乐卡片 HTML
+    const shareHtml = `
+        <div class="music-share-card" style="width: 100%; margin-top: 10px; background: #f9f9f9;" onclick="openMusicApp(); setTimeout(() => musicPlaySong('${currentPlayingSong.id}', '${currentPlayingSong.title.replace(/'/g, "\\'")}', '${currentPlayingSong.artist.replace(/'/g, "\\'")}', '${currentPlayingSong.cover}'), 500);">
+            <img src="${currentPlayingSong.cover}">
+            <div class="info">
+                <div class="title">${currentPlayingSong.title}</div>
+                <div class="artist">${currentPlayingSong.artist}</div>
+            </div>
+            <div class="icon">
+                <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>
+            </div>
+        </div>
+    `;
+
+    const newMoment = {
+        id: Date.now().toString(),
+        authorId: currentLoginId,
+        content: `分享单曲：\n${shareHtml}`,
+        images: [],
+        visibility: 'all',
+        timestamp: Date.now(),
+        likes: [],
+        comments: []
+    };
+
+    let moments = JSON.parse(ChatDB.getItem(`moments_${currentLoginId}`) || '[]');
+    moments.push(newMoment);
+    ChatDB.setItem(`moments_${currentLoginId}`, JSON.stringify(moments));
+
+    alert('已成功分享到朋友圈！');
+    
+    // 如果当前在朋友圈页面，刷新一下
+    if (typeof renderMoments === 'function') renderMoments();
+}
+// ==========================================
+// 【新增】：角色音乐主页与 API 生成歌单逻辑
+// ==========================================
+let currentMusicProfileCharId = null;
+
+function openMusicCharProfile(charId) {
+    currentMusicProfileCharId = charId;
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === charId);
+    if (!char) return;
+
+    // 读取保存的专属背景，如果没有则使用头像
+    const savedBg = ChatDB.getItem(`music_char_bg_${charId}`);
+    if (savedBg) {
+        document.getElementById('mcpBg').style.backgroundImage = `url('${savedBg}')`;
+    } else {
+        document.getElementById('mcpBg').style.backgroundImage = `url('${char.avatarUrl || ''}')`;
+    }
+    
+    document.getElementById('mcpAvatar').style.backgroundImage = `url('${char.avatarUrl || ''}')`;
+    document.getElementById('mcpName').innerText = char.netName || char.name;
+    document.getElementById('mcpSign').innerText = char.signature || '这个人很神秘，什么都没写~';
+
+    renderCharPlaylists(charId);
+    document.getElementById('musicCharProfilePanel').style.display = 'flex';
+}
+
+function closeMusicCharProfile() {
+    document.getElementById('musicCharProfilePanel').style.display = 'none';
+}
+
+// 处理角色音乐主页背景上传
+function handleMusicCharBgUpload(event) {
+    const file = event.target.files[0];
+    if (file && currentMusicProfileCharId) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const imgUrl = e.target.result;
+            const bgEl = document.getElementById('mcpBg');
+            if (bgEl) {
+                bgEl.style.backgroundImage = `url('${imgUrl}')`;
+            }
+            try {
+                ChatDB.setItem(`music_char_bg_${currentMusicProfileCharId}`, imgUrl);
+            } catch (err) {
+                console.warn("图片过大，无法持久化保存", err);
+                alert("图片体积过大，本次已应用，但可能无法永久保存。");
+            }
+        }
+        reader.readAsDataURL(file);
+    }
+    event.target.value = '';
+}
+
+function renderCharPlaylists(charId) {
+    const container = document.getElementById('mcpPlaylistContainer');
+    container.innerHTML = '';
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${charId}`) || '[]');
+    
+    if (savedPlaylists.length === 0) {
+        container.innerHTML = '<div style="text-align:center; padding:30px 0; color:#aaa; font-size:13px;">TA 还没有专属歌单，点击右上角生成吧</div>';
+        return;
+    }
+
+    savedPlaylists.forEach(pl => {
+        const div = document.createElement('div');
+        div.className = 'music-pl-item';
+        div.onclick = () => openPlaylistDetail(pl.id, true, charId);
+        div.innerHTML = `
+            <div class="music-pl-cover" style="background-image: url('${pl.cover}');"></div>
+            <div class="music-pl-info">
+                <div class="music-pl-title">${pl.name}</div>
+                <div class="music-pl-sub">专属歌单 · 已生成 ${pl.tracks ? pl.tracks.length : 0}/${pl.trackCount || 50}首</div>
+            </div>
+        `;
+        container.appendChild(div);
+    });
+}
+
+// 调用 API 生成角色歌单
+async function generateCharPlaylistAPI() {
+    if (!currentMusicProfileCharId) return;
+    const charId = currentMusicProfileCharId;
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        return alert('请先在 Chat 设置中配置 API 信息！');
+    }
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === charId);
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    // 获取世界书
+    let activeWbs = [];
+    if (char.wbEntries && char.wbEntries.length > 0) {
+        let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+        let entries = wbData.entries.filter(e => char.wbEntries.includes(e.id));
+        entries.forEach(entry => { if (entry.constant) activeWbs.push(entry.content); });
+    }
+
+    const prompt = `你是一个资深的音乐DJ。请根据以下角色设定，为该角色生成一个符合其性格、背景和喜好的专属歌单。
+【角色设定】：${char.description || '无'}
+【用户身份】：我的网名是：【${userName}】，我的真实名字是：【${userRealName}】。请严格区分网名和真名。
+【用户设定】：${persona ? persona.persona : '无'}
+【世界书背景】：${activeWbs.join('\n')}
+
+要求：
+1. 必须返回合法的 JSON 对象。
+2. 包含歌单名称(playlistName)、总歌曲数(trackCount，设定为50-100之间)。
+3. 包含初始的 30 首歌曲列表(songs数组)，每首歌包含 title(歌名) 和 artist(歌手)。
+4. 歌曲必须是现实中真实存在的知名歌曲，以便能够在音乐软件中搜索到。不要自己瞎编歌名！
+
+JSON 格式示例：
+{
+  "playlistName": "深渊的低语",
+  "trackCount": 60,
+  "songs": [
+    {"title": "夜曲", "artist": "周杰伦"},
+    {"title": "Creep", "artist": "Radiohead"}
+  ]
+}`;
+
+    if (typeof showToast === 'function') showToast('正在生成专属歌单...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.8
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            if (!parsed.playlistName || !parsed.songs) throw new Error("JSON 格式不正确");
+
+            const newPlaylist = {
+                id: 'char_pl_' + Date.now(),
+                name: parsed.playlistName,
+                cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg',
+                trackCount: parsed.trackCount || 50,
+                tracks: parsed.songs.map(s => ({
+                    id: 'gen_' + Date.now() + Math.random(),
+                    title: s.title,
+                    artist: s.artist,
+                    isGenerated: true,
+                    cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg'
+                }))
+            };
+
+            let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${charId}`) || '[]');
+            savedPlaylists.push(newPlaylist);
+            ChatDB.setItem(`music_playlists_${charId}`, JSON.stringify(savedPlaylists));
+
+            if (typeof hideToast === 'function') hideToast();
+            alert('专属歌单生成成功！');
+            renderCharPlaylists(charId);
+        } else {
+            throw new Error("API 请求失败");
+        }
+    } catch (e) {
+        if (typeof hideToast === 'function') hideToast();
+        alert('生成失败，请检查 API 配置或重试。\n' + e.message);
+    }
+}
+
+// 调用 API 加载更多歌曲
+async function loadMoreCharSongsAPI(charId, playlistId) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${charId}`) || '[]');
+    const plIndex = savedPlaylists.findIndex(p => p.id === playlistId);
+    if (plIndex === -1) return;
+    
+    const pl = savedPlaylists[plIndex];
+    const existingSongs = pl.tracks.map(t => `${t.title} - ${t.artist}`).join('\n');
+
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请配置 API！');
+
+    const prompt = `你之前为角色生成了一个名为《${pl.name}》的专属歌单。
+以下是歌单中已经存在的歌曲：
+${existingSongs}
+
+请继续为该歌单生成 20 首【不重复】的、符合该歌单风格的真实存在的歌曲。
+必须且只能返回 JSON 格式，包含 songs 数组，每首歌包含 title 和 artist。
+示例：{"songs": [{"title":"xxx", "artist":"yyy"}]}`;
+
+    const btn = document.getElementById('playlistLoadMoreBtn');
+    const originalText = btn.innerText;
+    btn.innerText = '正在生成中...';
+    btn.style.pointerEvents = 'none';
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            if (parsed.songs && Array.isArray(parsed.songs)) {
+                const newTracks = parsed.songs.map(s => ({
+                    id: 'gen_' + Date.now() + Math.random(),
+                    title: s.title,
+                    artist: s.artist,
+                    isGenerated: true,
+                    cover: pl.cover
+                }));
+                
+                pl.tracks = pl.tracks.concat(newTracks);
+                ChatDB.setItem(`music_playlists_${charId}`, JSON.stringify(savedPlaylists));
+                
+                // 刷新详情页
+                openPlaylistDetail(playlistId, true, charId);
+            }
+        } else {
+            throw new Error("API 请求失败");
+        }
+    } catch (e) {
+        alert('加载失败: ' + e.message);
+    } finally {
+        btn.innerText = originalText;
+        btn.style.pointerEvents = 'auto';
+    }
+}
+// ==========================================
+// 【新增】：播放列表渲染与搜索取消逻辑
+// ==========================================
+window.currentPlaylistTracks = [];
+
+function renderMpPlaylist() {
+    // 保存当前播放列表到本地，防止退出后台/刷新后丢失 (使用 ChatDB 突破 5MB 限制)
+    ChatDB.setItem('music_current_playlist', JSON.stringify(window.currentPlaylistTracks || []));
+    
+    const contentEl = document.getElementById('mpPlaylistContent');
+    if (!contentEl) return;
+    
+    if (!window.currentPlaylistTracks || window.currentPlaylistTracks.length === 0) {
+        contentEl.innerHTML = '<div style="text-align: center; color: rgba(255,255,255,0.4); font-size: 13px; margin-top: 20px;">暂无歌曲</div>';
+        return;
+    }
+    
+    contentEl.innerHTML = '';
+    window.currentPlaylistTracks.forEach((song, index) => {
+        const item = document.createElement('div');
+        item.style.cssText = 'display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.05); cursor: pointer;';
+        
+        // 高亮当前正在播放的歌曲
+        const isPlaying = currentPlayingSong && (String(currentPlayingSong.id) === String(song.id) || (currentPlayingSong.title === song.title && currentPlayingSong.artist === song.artist));
+        const titleColor = isPlaying ? '#ff3b30' : '#fff';
+        
+        item.onclick = () => {
+            if (song.url && song.url.startsWith('data:audio')) {
+                playLocalSong(song);
+            } else if (song.isGenerated || String(song.id).startsWith('gen_')) {
+                playGeneratedSong(song.title, song.artist);
+            } else {
+                musicPlaySong(song.id, song.title, song.artist, song.cover);
+            }
+            renderMpPlaylist(); // 刷新高亮状态
+        };
+        
+        item.innerHTML = `
+            <div style="width: 20px; text-align: center; color: ${isPlaying ? '#ff3b30' : 'rgba(255,255,255,0.4)'}; font-size: 12px; font-weight: bold;">
+                ${isPlaying ? '▶' : index + 1}
+            </div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 4px; overflow: hidden;">
+                <div style="font-size: 14px; font-weight: bold; color: ${titleColor}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${song.title}</div>
+                <div style="font-size: 11px; color: rgba(255,255,255,0.5); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${song.artist}</div>
+            </div>
+        `;
+        contentEl.appendChild(item);
+    });
+}
+
+// 搜索取消逻辑
+function cancelMusicSearch() {
+    document.getElementById('music-search-input').value = '';
+    document.getElementById('music-search-cancel').style.display = 'none';
+    musicPerformSearch(); // 传空值会恢复主页 UI
+}
+// ==========================================
+// 【新增】：一起听歌实时交互与 AI 控制逻辑
+// ==========================================
+
+// 1. 悬浮输入栏显示与拖拽逻辑
+function toggleMusicFloatingInput() {
+    const bar = document.getElementById('musicFloatingInputBar');
+    if (bar.style.display === 'none' || !bar.style.display) {
+        bar.style.display = 'flex';
+        document.getElementById('musicFloatingInputText').focus();
+    } else {
+        bar.style.display = 'none';
+    }
+}
+
+const floatingBar = document.getElementById('musicFloatingInputBar');
+const dragHandle = document.getElementById('musicFloatingDragHandle');
+let isDragging = false;
+let startY, startBottom;
+
+if (dragHandle && floatingBar) {
+    dragHandle.addEventListener('touchstart', (e) => {
+        isDragging = true;
+        startY = e.touches[0].clientY;
+        startBottom = parseInt(window.getComputedStyle(floatingBar).bottom, 10);
+    }, { passive: true });
+
+    document.addEventListener('touchmove', (e) => {
+        if (!isDragging) return;
+        const deltaY = startY - e.touches[0].clientY;
+        let newBottom = startBottom + deltaY;
+        // 限制拖拽范围
+        if (newBottom < 20) newBottom = 20;
+        if (newBottom > window.innerHeight - 100) newBottom = window.innerHeight - 100;
+        floatingBar.style.bottom = newBottom + 'px';
+    }, { passive: true });
+
+    document.addEventListener('touchend', () => {
+        isDragging = false;
+    });
+}
+
+// 2. 发送实时消息与弹幕显示
+function sendMusicFloatingMessage() {
+    const input = document.getElementById('musicFloatingInputText');
+    const text = input.value.trim();
+    if (!text) return;
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    const charId = window.currentListenTogetherCharId;
+    if (!currentLoginId || !charId) {
+        alert("请先开始一起听歌！");
+        return;
+    }
+
+    // 显示弹幕
+    showMusicLiveMessage('user', text);
+    input.value = '';
+
+    // 存入聊天记录
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${charId}`) || '[]');
+    history.push({ role: 'user', type: 'text', content: text, timestamp: Date.now() });
+    ChatDB.setItem(`chat_history_${currentLoginId}_${charId}`, JSON.stringify(history));
+
+    // 已移除自动触发 AI 回复的逻辑，交由用户手动点击 AI 按钮触发
+}
+
+function triggerMusicFloatingAI() {
+    const charId = window.currentListenTogetherCharId;
+    if (!charId) return alert("请先开始一起听歌！");
+    
+    // 显示正在回复气泡
+    const typingBubble = document.getElementById('mpListenTogetherTyping');
+    if (typingBubble) typingBubble.style.display = 'block';
+
+    if (typeof generateApiReply === 'function') {
+        generateApiReply(true, charId);
+    }
+}
+
+function showMusicLiveMessage(role, text) {
+    const isUser = role === 'user';
+    const containerId = isUser ? 'mpListenTogetherBubbleUser' : 'mpListenTogetherBubbleChar';
+    const containerEl = document.getElementById(containerId);
+    
+    if (!containerEl) return;
+
+    // 创建独立的气泡元素
+    const bubbleEl = document.createElement('div');
+    bubbleEl.className = 'mp-listen-bubble-item';
+    bubbleEl.innerText = text;
+    
+    containerEl.appendChild(bubbleEl);
+
+    // 保持最多显示 3 条，防止连续发消息堆叠太高挡住屏幕
+    if (containerEl.children.length > 3) {
+        containerEl.removeChild(containerEl.firstChild);
+    }
+
+    // 4.5秒后自动淡出并移除该气泡
+    setTimeout(() => {
+        bubbleEl.style.opacity = '0';
+        setTimeout(() => {
+            if (containerEl.contains(bubbleEl)) {
+                containerEl.removeChild(bubbleEl);
+            }
+        }, 500); // 等待 CSS 的 opacity 0.5s 动画结束再移除 DOM
+    }, 4500);
+}
+
+// 3. 上一首 / 下一首 逻辑
+function playNextMusicSong(isAuto = false) {
+    if (!window.currentPlaylistTracks || window.currentPlaylistTracks.length === 0) return alert("当前播放列表为空");
+    if (!currentPlayingSong) return;
+    
+    if (currentPlayMode === 'random') {
+        playRandomMusicSong(isAuto);
+        return;
+    }
+    
+    // 修复：增加歌名和歌手的双重匹配，防止 AI 生成的歌单 ID 不匹配导致无法切歌
+    let currentIndex = window.currentPlaylistTracks.findIndex(s => 
+        String(s.id) === String(currentPlayingSong.id) || 
+        (s.title === currentPlayingSong.title && s.artist === currentPlayingSong.artist)
+    );
+    if (currentIndex === -1) currentIndex = 0;
+    
+    let nextIndex = currentIndex + 1;
+    if (nextIndex >= window.currentPlaylistTracks.length) nextIndex = 0; // 列表循环
+    
+    const nextSong = window.currentPlaylistTracks[nextIndex];
+    executePlaySongObj(nextSong);
+    
+    // 新增：写入系统消息
+    if (window.currentListenTogetherCharId) {
+        if (isAuto) {
+            addMusicSystemMessage(`自动切换到了下一首`);
+        } else {
+            addMusicSystemMessage(`我 切到了下一首`);
+        }
+    }
+}
+
+function playPrevMusicSong() {
+    if (!window.currentPlaylistTracks || window.currentPlaylistTracks.length === 0) return alert("当前播放列表为空");
+    if (!currentPlayingSong) return;
+    
+    if (currentPlayMode === 'random') {
+        playRandomMusicSong(false);
+        return;
+    }
+    
+    // 修复：增加歌名和歌手的双重匹配，防止 AI 生成的歌单 ID 不匹配导致无法切歌
+    let currentIndex = window.currentPlaylistTracks.findIndex(s => 
+        String(s.id) === String(currentPlayingSong.id) || 
+        (s.title === currentPlayingSong.title && s.artist === currentPlayingSong.artist)
+    );
+    if (currentIndex === -1) currentIndex = 0;
+    
+    let prevIndex = currentIndex - 1;
+    if (prevIndex < 0) prevIndex = window.currentPlaylistTracks.length - 1; // 列表循环
+    
+    const prevSong = window.currentPlaylistTracks[prevIndex];
+    executePlaySongObj(prevSong);
+    
+    // 新增：写入系统消息
+    if (window.currentListenTogetherCharId) {
+        addMusicSystemMessage(`我 切到了上一首`);
+    }
+}
+
+function executePlaySongObj(song) {
+    if (song.url && song.url.startsWith('data:audio')) {
+        playLocalSong(song);
+    } else if (song.isGenerated || String(song.id).startsWith('gen_')) {
+        playGeneratedSong(song.title, song.artist);
+    } else {
+        musicPlaySong(song.id, song.title, song.artist, song.cover);
+    }
+    if (typeof renderMpPlaylist === 'function') renderMpPlaylist();
+}
+
+// 4. AI 控制音乐播放器执行函数
+window.handleAiMusicControl = async function(controlObj) {
+    if (!controlObj || !controlObj.action) return;
+    const action = controlObj.action;
+    const target = controlObj.target;
+
+    console.log("AI 执行音乐控制:", action, target);
+
+    switch (action) {
+        case 'play':
+            audioPlayer.play();
+            break;
+        case 'pause':
+            audioPlayer.pause();
+            break;
+        case 'next':
+            playNextMusicSong();
+            break;
+        case 'prev':
+            playPrevMusicSong();
+            break;
+        case 'play_song':
+            if (target) {
+                showToast(`AI 正在点歌: ${target}`, 'loading');
+                await aiSearchAndPlay(target);
+                hideToast();
+            }
+            break;
+        case 'add_song':
+            if (target) {
+                await aiSearchAndAdd(target);
+            }
+            break;
+        case 'remove_song':
+            if (target && window.currentPlaylistTracks) {
+                window.currentPlaylistTracks = window.currentPlaylistTracks.filter(s => !s.title.includes(target));
+                if (typeof renderMpPlaylist === 'function') renderMpPlaylist();
+            }
+            break;
+        case 'exit':
+            document.getElementById('mpListenTogetherStatus').style.display = 'none';
+            clearInterval(listenTogetherTimer);
+            window.currentListenTogetherCharId = null;
+            const miniDisc = document.getElementById('miniPlayerDisc');
+            const miniAvatars = document.getElementById('miniPlayerTogetherAvatars');
+            if (miniDisc && miniAvatars) {
+                miniDisc.style.display = 'flex';
+                miniAvatars.style.display = 'none';
+            }
+            break;
+    }
+    
+    // 新增：写入系统消息
+    if (window.currentListenTogetherCharId) {
+        let actionText = '';
+        switch (action) {
+            case 'play': actionText = '继续了播放'; break;
+            case 'pause': actionText = '暂停了播放'; break;
+            case 'next': actionText = '切到了下一首'; break;
+            case 'prev': actionText = '切到了上一首'; break;
+            case 'play_song': actionText = `点播了歌曲: ${target}`; break;
+        }
+        if (actionText) addMusicSystemMessage(`对方 ${actionText}`);
+    }
+};
+
+async function aiSearchAndPlay(keyword) {
+    try {
+        const baseUrl = getMusicSearchApiUrl();
+        const res = await fetch(`${baseUrl}/cloudsearch?keywords=${encodeURIComponent(keyword)}&limit=1`);
+        const data = await res.json();
+        if (data.code === 200 && data.result && data.result.songs && data.result.songs.length > 0) {
+            const song = data.result.songs[0];
+            const cover = (song.al && song.al.picUrl) ? song.al.picUrl + '?param=100y100' : 'https://p2.music.126.net/6y-7YvS_G8V8.jpg?param=100y100';
+            
+            // 将点播的歌曲加入播放列表并播放
+            if (!window.currentPlaylistTracks) window.currentPlaylistTracks = [];
+            const newSong = { id: song.id, title: song.name, artist: song.ar[0].name, cover: cover };
+            window.currentPlaylistTracks.unshift(newSong); // 插入到列表最前面
+            if (typeof renderMpPlaylist === 'function') renderMpPlaylist();
+            
+            musicPlaySong(song.id, song.name, song.ar[0].name, cover);
+        }
+    } catch (e) { console.error("AI 点歌失败", e); }
+}
+
+async function aiSearchAndAdd(keyword) {
+    try {
+        const baseUrl = getMusicSearchApiUrl();
+        const res = await fetch(`${baseUrl}/cloudsearch?keywords=${encodeURIComponent(keyword)}&limit=1`);
+        const data = await res.json();
+        if (data.code === 200 && data.result && data.result.songs && data.result.songs.length > 0) {
+            const song = data.result.songs[0];
+            const cover = (song.al && song.al.picUrl) ? song.al.picUrl + '?param=100y100' : 'https://p2.music.126.net/6y-7YvS_G8V8.jpg?param=100y100';
+            if (!window.currentPlaylistTracks) window.currentPlaylistTracks = [];
+            window.currentPlaylistTracks.push({
+                id: song.id, title: song.name, artist: song.ar[0].name, cover: cover
+            });
+            if (typeof renderMpPlaylist === 'function') renderMpPlaylist();
+        }
+    } catch (e) { console.error("AI 添加歌曲失败", e); }
+}
+// ==========================================
+// 【新增】：系统提示、全屏聊天页、悬浮胶囊逻辑
+// ==========================================
+
+// 1. 写入系统提示消息
+function addMusicSystemMessage(content) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    const charId = window.currentListenTogetherCharId;
+    if (!currentLoginId || !charId) return;
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${charId}`) || '[]');
+    history.push({ role: 'system', type: 'system', content: content, timestamp: Date.now() });
+    ChatDB.setItem(`chat_history_${currentLoginId}_${charId}`, JSON.stringify(history));
+
+    // 如果聊天面板开着，刷新它
+    if (document.getElementById('musicChatPanel').style.display === 'flex') {
+        renderMusicChatHistory();
+    }
+    if (document.getElementById('chatRoomPanel').style.display === 'flex' && currentChatRoomCharId === charId) {
+        renderChatHistory(charId);
+    }
+}
+
+// 2. 音乐全屏聊天面板
+function openMusicChatPanel() {
+    if (!window.currentListenTogetherCharId) return alert("请先开始一起听歌！");
+    document.getElementById('musicChatPanel').style.display = 'flex';
+    renderMusicChatHistory();
+}
+
+function closeMusicChatPanel() {
+    document.getElementById('musicChatPanel').style.display = 'none';
+}
+
+function renderMusicChatHistory() {
+    const charId = window.currentListenTogetherCharId;
+    if (!charId) return;
+    
+    // 借用 chat.js 的渲染逻辑，但挂载到 musicChatHistory 容器
+    const originalHistoryEl = document.getElementById('chatRoomHistory');
+    const musicHistoryEl = document.getElementById('musicChatHistory');
+    
+    // 临时替换 ID 欺骗 renderChatHistory
+    originalHistoryEl.id = 'chatRoomHistory_temp';
+    musicHistoryEl.id = 'chatRoomHistory';
+    
+    renderChatHistory(charId, false);
+    
+    // 恢复 ID
+    musicHistoryEl.id = 'musicChatHistory';
+    originalHistoryEl.id = 'chatRoomHistory';
+    
+    // 强制修改气泡颜色适应深色背景
+    const bubbles = musicHistoryEl.querySelectorAll('.cr-bubble-left');
+    bubbles.forEach(b => { b.style.backgroundColor = 'rgba(255,255,255,0.1)'; b.style.color = '#fff'; });
+}
+
+function sendMusicChatMessage() {
+    const input = document.getElementById('musicChatInput');
+    const text = input.value.trim();
+    if (!text) return;
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    const charId = window.currentListenTogetherCharId;
+    if (!currentLoginId || !charId) return;
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${charId}`) || '[]');
+    history.push({ role: 'user', type: 'text', content: text, timestamp: Date.now() });
+    ChatDB.setItem(`chat_history_${currentLoginId}_${charId}`, JSON.stringify(history));
+
+    let sessions = JSON.parse(ChatDB.getItem(`chat_sessions_${currentLoginId}`) || '[]');
+    sessions = sessions.filter(id => id !== charId);
+    sessions.unshift(charId);
+    ChatDB.setItem(`chat_sessions_${currentLoginId}`, JSON.stringify(sessions));
+
+    input.value = '';
+    renderMusicChatHistory();
+    
+    // 同步刷新主聊天室（如果它在后台开着的话）
+    if (document.getElementById('chatRoomPanel') && document.getElementById('chatRoomPanel').style.display === 'flex' && typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId === charId) {
+        if (typeof renderChatHistory === 'function') renderChatHistory(charId);
+    }
+    // 已移除自动触发 AI 的逻辑，交由左侧按钮手动触发
+}
+
+// 新增：音乐聊天室专属 AI 触发函数
+function triggerMusicChatAI() {
+    const charId = window.currentListenTogetherCharId;
+    if (!charId) return alert("请先开始一起听歌！");
+    if (typeof generateApiReply === 'function') {
+        generateApiReply(false, charId);
+    }
+}
+
+let isCapsuleVisible = false;
+let isMiniPlayerExpanded = false;
+
+// 页面加载时读取胶囊状态与播放列表 (改为监听 ChatDBReady 确保数据库已加载)
+window.addEventListener('ChatDBReady', () => {
+    // 【核心修复】：恢复全屏播放器的 UI 样式 (唱片胶片等)
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (musicLoginId) {
+        const savedUIStyle = ChatDB.getItem(`music_player_ui_style_${musicLoginId}`);
+        if (savedUIStyle) {
+            switchMpUIStyle(savedUIStyle, null);
+        }
+        
+        // 恢复自定义背景和封面
+        const savedBg = ChatDB.getItem(`music_player_bg_${musicLoginId}`);
+        if (savedBg) {
+            updateMpCSSVar('--mp-bg-image', `url('${savedBg}')`);
+        }
+        const savedCover = ChatDB.getItem(`music_player_cover_${musicLoginId}`);
+        if (savedCover) {
+            updateMpCSSVar('--mp-cover-image', `url('${savedCover}')`);
+        }
+
+        // 恢复迷你播放器设置
+        const miniVars = ['--player-bg-color', '--player-bg-opacity', '--player-bg-image', '--text-title-color', '--text-sub-color', '--icon-color', '--control-btn-color', '--progress-bg-color', '--progress-fill-color'];
+        miniVars.forEach(v => {
+            const savedVal = ChatDB.getItem(`mini_player_${v}_${musicLoginId}`);
+            if (savedVal) {
+                const player = document.getElementById('miniMusicPlayer');
+                if (player) player.style.setProperty(v, savedVal);
+            }
+        });
+    }
+
+    // 恢复播放列表
+    const savedPlaylist = ChatDB.getItem('music_current_playlist');
+    if (savedPlaylist) {
+        try { window.currentPlaylistTracks = JSON.parse(savedPlaylist); } catch(e){}
+    }
+    
+    // 👇 新增：恢复上一首未播完的歌及进度
+    const savedSong = ChatDB.getItem('music_current_song');
+    if (savedSong) {
+        try {
+            currentPlayingSong = JSON.parse(savedSong);
+            const savedUrl = ChatDB.getItem('music_song_url');
+            const savedTime = parseFloat(ChatDB.getItem('music_current_time') || 0);
+            const savedLyrics = ChatDB.getItem('music_parsed_lyrics');
+            
+            if (savedLyrics) {
+                window.parsedLyrics = JSON.parse(savedLyrics);
+                const lyricContent = document.getElementById('mpLyricContent');
+                if (lyricContent) {
+                    lyricContent.innerHTML = window.parsedLyrics.map((line, idx) => `<div class="lyric-line" id="lrc-line-${idx}">${line.text}</div>`).join('');
+                }
+            }
+
+            if (savedUrl) {
+                audioPlayer.autoplay = false; // 保持关闭自动播放，刷新后保持暂停状态
+                audioPlayer.src = savedUrl;
+                window.pendingRestoreTime = savedTime; // 交给 loadedmetadata 恢复进度
+            }
+
+            // 【核心修复】：恢复状态时也使用高清封面
+            let cover = currentPlayingSong.cover;
+            if (cover && typeof cover === 'string' && cover.includes('music.126.net')) {
+                cover = cover.replace(/\?param=\d+y\d+/, '?param=500y500');
+                if (!cover.includes('?param=')) cover += '?param=500y500';
+            }
+
+            // 恢复 UI
+            document.querySelector('.music-player-title').innerText = currentPlayingSong.title;
+            document.querySelector('.music-player-sub').innerText = currentPlayingSong.artist;
+            document.querySelector('.music-player-disc-inner').style.backgroundImage = `url(${cover})`;
+            document.querySelector('.music-player-disc-inner').style.backgroundSize = 'cover';
+            
+            const mpSongName = document.getElementById('mpSongName');
+            if (mpSongName) mpSongName.innerText = currentPlayingSong.title;
+            const mpArtistName = document.getElementById('mpArtistName');
+            if (mpArtistName) mpArtistName.innerText = currentPlayingSong.artist;
+            
+            // 【核心修复】：恢复时同步更新全屏播放器顶部的歌曲名
+            const mpTopTitle = document.getElementById('mpTopTitle');
+            if (mpTopTitle) mpTopTitle.innerText = currentPlayingSong.title;
+            
+            // 【修改】：恢复 CSS 变量封面
+            const playerPanel = document.getElementById('musicPlayerPanel');
+            if (playerPanel) {
+                playerPanel.style.setProperty('--mp-cover-image', `url('${currentPlayingSong.cover}')`);
+                const musicLoginId = ChatDB.getItem('music_current_login_account');
+                const savedBg = musicLoginId ? ChatDB.getItem(`music_player_bg_${musicLoginId}`) : null;
+                if (savedBg) {
+                    playerPanel.style.setProperty('--mp-bg-image', `url('${savedBg}')`);
+                } else {
+                    playerPanel.style.setProperty('--mp-bg-image', `url('${currentPlayingSong.cover}')`);
+                }
+            }
+            
+            const mpLyricTitle = document.getElementById('mpLyricTitle');
+            if (mpLyricTitle) mpLyricTitle.innerText = currentPlayingSong.title;
+            const mpLyricArtist = document.getElementById('mpLyricArtist');
+            if (mpLyricArtist) mpLyricArtist.innerText = currentPlayingSong.artist;
+
+            // 恢复桌面小组件 UI
+            const desktopTitle = document.querySelector('#carousel-music-widget-container .cw-ins-photo-card.center .cw-ins-photo-title');
+            if (desktopTitle) desktopTitle.innerText = currentPlayingSong.title;
+            const desktopArtist = document.querySelector('#carousel-music-widget-container .cw-ins-photo-card.center .cw-ins-photo-artist');
+            if (desktopArtist) desktopArtist.innerText = currentPlayingSong.artist;
+
+            // 恢复进度条 UI
+            const duration = parseFloat(ChatDB.getItem('music_duration') || 0);
+            if (duration > 0) {
+                const progressPercent = (savedTime / duration) * 100;
+                const fill = document.getElementById('mpProgressFill');
+                const dot = document.getElementById('mpProgressDot');
+                if(fill) fill.style.width = `${progressPercent}%`;
+                if(dot) dot.style.left = `${progressPercent}%`;
+                
+                const curTimeEl = document.getElementById('mpCurrentTime');
+                const durTimeEl = document.getElementById('mpDuration');
+                if(curTimeEl) curTimeEl.innerText = formatTime(savedTime);
+                if(durTimeEl) durTimeEl.innerText = formatTime(duration);
+
+                const miniFill = document.getElementById('miniProgressFill');
+                const miniCur = document.getElementById('miniCurrentTime');
+                const miniDur = document.getElementById('miniDuration');
+                if(miniFill) miniFill.style.width = `${progressPercent}%`;
+                if(miniCur) miniCur.innerText = formatTime(savedTime);
+                if(miniDur) miniDur.innerText = formatTime(duration);
+            }
+        } catch(e) {
+            console.error("恢复音乐状态失败", e);
+        }
+    }
+    // 👆 新增结束
+    
+    const container = document.getElementById('globalMusicCapsuleContainer');
+    if (container) {
+        isCapsuleVisible = false;
+        container.style.display = 'none';
+        localStorage.setItem('music_capsule_visible', 'false');
+    }
+
+    // 同步所有播放/暂停按钮的初始状态
+    setTimeout(() => {
+        const isPaused = audioPlayer.paused;
+        
+        const mpPlayBtn = document.getElementById('mpPlayBtn');
+        const mpPauseBtn = document.getElementById('mpPauseBtn');
+        if (mpPlayBtn) mpPlayBtn.style.display = isPaused ? 'block' : 'none';
+        if (mpPauseBtn) mpPauseBtn.style.display = isPaused ? 'none' : 'block';
+        
+        const miniPlayBtn2 = document.getElementById('miniPlayBtn2');
+        const miniPauseBtn2 = document.getElementById('miniPauseBtn2');
+        if (miniPlayBtn2) miniPlayBtn2.style.display = isPaused ? 'block' : 'none';
+        if (miniPauseBtn2) miniPauseBtn2.style.display = isPaused ? 'none' : 'block';
+
+        const appMiniPlayBtn = document.getElementById('appMiniPlayBtn');
+        const appMiniPauseBtn = document.getElementById('appMiniPauseBtn');
+        if (appMiniPlayBtn) appMiniPlayBtn.style.display = isPaused ? 'block' : 'none';
+        if (appMiniPauseBtn) appMiniPauseBtn.style.display = isPaused ? 'none' : 'block';
+
+        const desktopPlayIcon = document.querySelector('#carousel-music-widget-container .cw-ins-icon-play');
+        const desktopPauseIcon = document.querySelector('#carousel-music-widget-container .cw-ins-icon-pause');
+        if (desktopPlayIcon) desktopPlayIcon.style.display = isPaused ? 'block' : 'none';
+        if (desktopPauseIcon) desktopPauseIcon.style.display = isPaused ? 'none' : 'block';
+    }, 1500);
+});
+
+function toggleGlobalMusicCapsule() {
+    const container = document.getElementById('globalMusicCapsuleContainer');
+    isCapsuleVisible = !isCapsuleVisible;
+    container.style.display = isCapsuleVisible ? 'flex' : 'none';
+    localStorage.setItem('music_capsule_visible', isCapsuleVisible); // 持久化保存状态
+    if (isCapsuleVisible) updateCapsuleUI();
+}
+
+function updateCapsuleUI() {
+    // 同步查手机音乐胶囊信息
+    const pmTitle = document.getElementById('pmMiniPlayerTitle');
+    const pmArtist = document.getElementById('pmMiniPlayerArtist');
+    const pmCover = document.getElementById('pmMiniPlayerCover');
+    if (currentPlayingSong) {
+        if (pmTitle) pmTitle.innerText = currentPlayingSong.title;
+        if (pmArtist) pmArtist.innerText = currentPlayingSong.artist;
+        if (pmCover) pmCover.style.backgroundImage = `url(${currentPlayingSong.cover})`;
+    }
+
+    if (!isCapsuleVisible) return;
+    const titleEl = document.getElementById('gmcTitle');
+    const coverEl = document.getElementById('gmcCover');
+    const waveEl = document.getElementById('gmcWave');
+    const togetherAvatars = document.getElementById('gmcTogetherAvatars');
+    const miniCover = document.getElementById('miniPlayerCover');
+    const miniTitle = document.getElementById('miniPlayerTitle');
+    const miniSub = document.getElementById('miniPlayerSub');
+    const miniLyric = document.getElementById('miniPlayerLyric');
+    const miniPlayBtn2 = document.getElementById('miniPlayBtn2');
+    const miniPauseBtn2 = document.getElementById('miniPauseBtn2');
+
+    if (currentPlayingSong) {
+        if (window.currentListenTogetherCharId) {
+            coverEl.style.display = 'none';
+            togetherAvatars.style.display = 'flex';
+            const musicLoginId = ChatDB.getItem('music_current_login_account');
+            let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+            const me = accounts.find(a => a.id === musicLoginId);
+            let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+            const char = chars.find(c => c.id === window.currentListenTogetherCharId);
+            if (me && me.avatarUrl) document.getElementById('gmcAvatar1').style.backgroundImage = `url(${me.avatarUrl})`;
+            if (char && char.avatarUrl) document.getElementById('gmcAvatar2').style.backgroundImage = `url(${char.avatarUrl})`;
+            const passedMinutes = typeof listenTogetherStartTime !== 'undefined' ? Math.floor((Date.now() - listenTogetherStartTime) / 60000) : 0;
+            titleEl.innerText = `一起听 ${passedMinutes} 分钟`;
+        } else {
+            coverEl.style.display = 'block';
+            togetherAvatars.style.display = 'none';
+            coverEl.style.backgroundImage = `url(${currentPlayingSong.cover})`;
+            titleEl.innerText = currentPlayingSong.title;
+        }
+        miniCover.style.backgroundImage = `url(${currentPlayingSong.cover})`;
+        miniTitle.innerText = currentPlayingSong.title;
+        miniSub.innerText = currentPlayingSong.artist;
+        if (audioPlayer.paused) {
+            coverEl.style.animationPlayState = 'paused';
+            waveEl.style.display = 'none';
+            if(miniPlayBtn2) miniPlayBtn2.style.display = 'block';
+            if(miniPauseBtn2) miniPauseBtn2.style.display = 'none';
+        } else {
+            coverEl.style.animationPlayState = 'running';
+            waveEl.style.display = 'flex';
+            if(miniPlayBtn2) miniPlayBtn2.style.display = 'none';
+            if(miniPauseBtn2) miniPauseBtn2.style.display = 'block';
+        }
+    }
+}
+
+const capsuleContainer = document.getElementById('globalMusicCapsuleContainer');
+const capsuleBtn = document.getElementById('globalMusicCapsule');
+let isCapsuleDragging = false;
+let capStartX, capStartY, capStartLeft, capStartTop;
+
+if (capsuleBtn && capsuleContainer) {
+    capsuleBtn.addEventListener('touchstart', (e) => {
+        isCapsuleDragging = true;
+        capStartX = e.touches[0].clientX;
+        capStartY = e.touches[0].clientY;
+        
+        // 获取容器中心点相对于视口左侧的距离
+        const rect = capsuleContainer.getBoundingClientRect();
+        capStartLeft = rect.left + rect.width / 2; 
+        capStartTop = rect.top;
+    }, { passive: true });
+
+    document.addEventListener('touchmove', (e) => {
+        if (!isCapsuleDragging) return;
+        const deltaX = e.touches[0].clientX - capStartX;
+        const deltaY = e.touches[0].clientY - capStartY;
+        
+        let newLeft = capStartLeft + deltaX;
+        let newTop = capStartTop + deltaY;
+        
+        // 边界限制 (以中心点为基准)
+        const halfWidth = capsuleContainer.offsetWidth / 2;
+        if (newLeft - halfWidth < 0) newLeft = halfWidth;
+        if (newTop < 20) newTop = 20;
+        if (newLeft + halfWidth > window.innerWidth) newLeft = window.innerWidth - halfWidth;
+        if (newTop + capsuleContainer.offsetHeight > window.innerHeight) newTop = window.innerHeight - capsuleContainer.offsetHeight;
+        
+        // 核心修复：始终保留 translateX(-50%)，让 left 值代表中心点
+        capsuleContainer.style.left = newLeft + 'px';
+        capsuleContainer.style.top = newTop + 'px';
+        capsuleContainer.style.transform = 'translateX(-50%)'; 
+    }, { passive: true });
+
+    document.addEventListener('touchend', (e) => {
+        if (!isCapsuleDragging) return;
+        isCapsuleDragging = false;
+        
+        const deltaX = Math.abs(e.changedTouches ? e.changedTouches[0].clientX - capStartX : 0);
+        const deltaY = Math.abs(e.changedTouches ? e.changedTouches[0].clientY - capStartY : 0);
+        
+        if (deltaX < 5 && deltaY < 5) {
+            const miniPlayer = document.getElementById('miniMusicPlayer');
+            isMiniPlayerExpanded = !isMiniPlayerExpanded;
+            miniPlayer.style.display = isMiniPlayerExpanded ? 'flex' : 'none';
+        }
+    });
+}
+// 页面加载时恢复一起听歌状态
+window.addEventListener('DOMContentLoaded', () => {
+    setTimeout(() => {
+        const savedCharId = ChatDB.getItem('music_listen_together_charId');
+        const savedStartTime = ChatDB.getItem('music_listen_together_startTime');
+        
+        if (savedCharId && savedStartTime) {
+            if (typeof window.startListenTogether === 'function') {
+                window.startListenTogether(savedCharId, true); // 【核心修复】：传入 true 表示这是页面刷新后的恢复
+            }
+        }
+    }, 1000); // 延迟等待 DOM 和数据就绪
+});
+// ==========================================
+// 【新增】：角色最近播放与心声逻辑
+// ==========================================
+function openCharRecentMusic(charId) {
+    let recentPlaylist = JSON.parse(ChatDB.getItem(`music_recent_${charId}`) || 'null');
+    
+    // 如果没有数据，构造一个空的占位歌单，而不是自动生成
+    if (!recentPlaylist || !recentPlaylist.tracks) {
+        let allEntities = getAllEntities();
+        const char = allEntities.find(c => c.id === charId);
+        recentPlaylist = {
+            id: 'recent',
+            name: '最近播放',
+            cover: char ? (char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg') : 'https://p2.music.126.net/6y-7YvS_G8V8.jpg',
+            trackCount: 0,
+            tracks: []
+        };
+    }
+    
+    // 【性能优化】：直接将数据作为第四个参数传给 openPlaylistDetail，彻底干掉反复读写数据库的卡顿操作
+    openPlaylistDetail('recent', true, charId, recentPlaylist);
+}
+
+async function generateCharRecentMusicAPI(charId) {
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        return alert('请先在 Chat 设置中配置 API 信息！');
+    }
+
+    let allEntities = getAllEntities();
+    const char = allEntities.find(c => c.id === charId);
+    if (!char) return;
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    const account = allEntities.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${charId}`) || '[]');
+    let recentHistory = history.slice(-15).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    const prompt = `你是一个情感细腻的音乐分析师。请根据角色【${char.name}】的设定以及TA最近的聊天记录，推测TA最近的心境，并生成一份TA最近单曲循环最多的 10 首真实存在的歌曲。
+【角色设定】：${char.description || '无'}
+【用户身份】：我的网名是：【${userName}】，我的真实名字是：【${userRealName}】。请严格区分网名和真名。
+【最近聊天记录】：
+${recentHistory || '暂无聊天记录'}
+
+要求：
+1. 必须返回合法的 JSON 对象。
+2. 包含 songs 数组，每首歌包含 title(歌名)、artist(歌手) 和 innerVoice(心声)。
+3. innerVoice(心声) 是角色听这首歌时的内心独白，解释TA为什么听这首歌，心情如何（第一人称，简短感性，10-30字）。
+4. 歌曲必须是现实中真实存在的知名歌曲。
+
+JSON 格式示例：
+{
+  "songs": [
+    {"title": "夜曲", "artist": "周杰伦", "innerVoice": "最近总是想起以前的事，这旋律太适合现在的雨夜了。"},
+    {"title": "Creep", "artist": "Radiohead", "innerVoice": "感觉自己像个局外人，只有这首歌懂我。"}
+  ]
+}`;
+
+    if (typeof showToast === 'function') showToast('正在窥探TA的最近听歌心境...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.8
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            if (!parsed.songs) throw new Error("JSON 格式不正确");
+
+            const recentPlaylist = {
+                id: 'recent',
+                name: '最近播放',
+                cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg',
+                trackCount: parsed.songs.length,
+                tracks: parsed.songs.map(s => ({
+                    id: 'gen_recent_' + Date.now() + Math.random(),
+                    title: s.title,
+                    artist: s.artist,
+                    innerVoice: s.innerVoice,
+                    isGenerated: true,
+                    cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg'
+                }))
+            };
+
+            ChatDB.setItem(`music_recent_${charId}`, JSON.stringify(recentPlaylist));
+
+            if (typeof hideToast === 'function') hideToast();
+            
+            openCharRecentMusic(charId);
+            
+        } else {
+            throw new Error("API 请求失败");
+        }
+    } catch (e) {
+        if (typeof hideToast === 'function') hideToast();
+        alert('生成失败，请检查 API 配置或重试。\n' + e.message);
+    }
+}
+
+// ==========================================
+// 【新增】：全屏播放器自定义设置与 UI 切换逻辑
+// ==========================================
+
+function openMpSettingsModal() {
+    document.getElementById('mpSettingsModalOverlay').classList.add('show');
+}
+
+function closeMpSettingsModal(e) {
+    if (e) e.stopPropagation();
+    document.getElementById('mpSettingsModalOverlay').classList.remove('show');
+}
+
+function openMpUISelectorModal() {
+    document.getElementById('mpUISelectorModalOverlay').classList.add('show');
+}
+
+function closeMpUISelectorModal(e) {
+    if (e) e.stopPropagation();
+    document.getElementById('mpUISelectorModalOverlay').classList.remove('show');
+}
+
+function updateMpCSSVar(varName, value) {
+    const player = document.getElementById('musicPlayerPanel');
+    if (player) {
+        player.style.setProperty(varName, value);
+    }
+}
+
+function handleMpCustomImageUpload(event, cssVarName) {
+    const file = event.target.files[0];
+    if (file) {
+        // 【核心修复】：使用压缩函数防止爆内存，并支持封面和背景的独立保存
+        window.globalCompressImage(file, 1080, function(compressedUrl) {
+            updateMpCSSVar(cssVarName, `url('${compressedUrl}')`);
+            const musicLoginId = ChatDB.getItem('music_current_login_account');
+            if (musicLoginId) {
+                try {
+                    if (cssVarName === '--mp-bg-image') {
+                        ChatDB.setItem(`music_player_bg_${musicLoginId}`, compressedUrl);
+                    } else if (cssVarName === '--mp-cover-image') {
+                        ChatDB.setItem(`music_player_cover_${musicLoginId}`, compressedUrl);
+                    }
+                } catch (err) {
+                    console.warn("图片过大，无法持久化保存", err);
+                }
+            }
+        });
+    }
+    event.target.value = '';
+}
+
+function resetMpSettings() {
+    const player = document.getElementById('musicPlayerPanel');
+    if (player) {
+        // 恢复默认的 CSS 变量
+        player.style.setProperty('--mp-bg-opacity', '0.6');
+        player.style.setProperty('--mp-text-title', '#ffffff');
+        player.style.setProperty('--mp-text-sub', '#aaaaaa');
+        player.style.setProperty('--mp-icon-color', '#ffffff');
+        player.style.setProperty('--mp-progress-bg', 'rgba(255, 255, 255, 0.2)');
+        player.style.setProperty('--mp-progress-fill', '#ffffff');
+        
+        // 恢复背景和封面
+        const musicLoginId = ChatDB.getItem('music_current_login_account');
+        if (musicLoginId) {
+            ChatDB.removeItem(`music_player_bg_${musicLoginId}`);
+            ChatDB.removeItem(`music_player_cover_${musicLoginId}`); // 新增：彻底清除自定义封面
+        }
+        
+        if (currentPlayingSong && currentPlayingSong.cover) {
+            player.style.setProperty('--mp-cover-image', `url('${currentPlayingSong.cover}')`);
+            player.style.setProperty('--mp-bg-image', `url('${currentPlayingSong.cover}')`);
+        } else {
+            player.style.setProperty('--mp-cover-image', `url('https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=400&auto=format&fit=crop')`);
+            player.style.setProperty('--mp-bg-image', `url('https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=600&auto=format&fit=crop')`);
+        }
+    }
+    
+    // 重置弹窗内的 input 状态
+    const modal = document.getElementById('mpSettingsModalOverlay');
+    if (modal) {
+        modal.querySelectorAll('input[type="color"]').forEach(input => {
+            input.value = input.getAttribute('value');
+        });
+        const range = modal.querySelector('input[type="range"]');
+        if (range) range.value = 0.6;
+    }
+}
+
+function switchMpUIStyle(targetId, btnElement) {
+    // 隐藏所有 UI
+    document.querySelectorAll('.mp-ui-view').forEach(el => {
+        el.style.display = 'none';
+        el.classList.remove('active');
+    });
+    // 显示目标 UI
+    const targetEl = document.getElementById(targetId);
+    if (targetEl) {
+        targetEl.style.display = 'flex'; // 保持 flex 居中
+        targetEl.classList.add('active');
+    }
+    
+    // 更新预览网格中的高亮状态
+    document.querySelectorAll('.mp-ui-preview-item').forEach(btn => btn.classList.remove('active'));
+    if (btnElement) {
+        btnElement.classList.add('active');
+    } else {
+        // 如果没有传入 btnElement (例如页面刷新恢复时)，根据 targetId 找到对应的按钮并高亮
+        const targetBtn = document.querySelector(`.mp-ui-preview-item[onclick*="${targetId}"]`);
+        if (targetBtn) targetBtn.classList.add('active');
+    }
+    
+    // 【核心修复】：将选择的 UI 样式保存到本地数据库
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (musicLoginId) {
+        ChatDB.setItem(`music_player_ui_style_${musicLoginId}`, targetId);
+    }
+    
+    // 切换完毕后自动关闭弹窗 (仅在手动点击按钮时关闭，刷新恢复时不关闭)
+    if (btnElement) {
+        setTimeout(() => {
+            closeMpUISelectorModal();
+        }, 200);
+    }
+}
+
+// 覆盖原有的 togglePlayMode 函数，以支持新的 SVG 图标
+window.togglePlayMode = function() {
+    const playModes = [
+        `<svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" fill="none"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>`,
+        `<svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" fill="none"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path><text x="12" y="16" font-size="8" fill="currentColor" stroke="none" text-anchor="middle" font-family="sans-serif" font-weight="bold">1</text></svg>`,
+        `<svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" fill="none"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>`
+    ];
+    
+    if (typeof window.currentModeIndex === 'undefined') window.currentModeIndex = 0;
+    window.currentModeIndex = (window.currentModeIndex + 1) % playModes.length;
+    
+    const mpBtn = document.getElementById('mpPlayModeBtn');
+    if (mpBtn) mpBtn.innerHTML = playModes[window.currentModeIndex];
+    
+    // 同步全局变量
+    if (window.currentModeIndex === 0) currentPlayMode = 'loop';
+    else if (window.currentModeIndex === 1) currentPlayMode = 'single';
+    else currentPlayMode = 'random';
+};
+
+// 修复：确保播放/暂停时，所有黑胶 UI 都能正确旋转
+const originalAudioPlay = audioPlayer.play;
+audioPlayer.play = function() {
+    const promise = originalAudioPlay.apply(this, arguments);
+    if (promise !== undefined) {
+        promise.then(() => {
+            document.querySelectorAll('.mp-ui-view').forEach(el => {
+                if (el.id === 'ui-vinyl-classic') {
+                    const disc = el.querySelector('#mpNormalDisc');
+                    if (disc) disc.style.animationPlayState = 'running';
+                } else if (el.id === 'ui-vinyl-simple' || el.id === 'ui-vinyl-modern' || el.id === 'ui-glass-disc') {
+                    el.style.animationPlayState = 'running';
+                } else if (el.id === 'ui-cassette') {
+                    el.querySelectorAll('.cassette-hole').forEach(hole => hole.style.animationPlayState = 'running');
+                } else if (el.id === 'ui-cd-player') {
+                    const disc = el.querySelector('.cd-disc');
+                    if (disc) disc.style.animationPlayState = 'running';
+                }
+            });
+        }).catch(e => {});
+    }
+    return promise;
+};
+
+const originalAudioPause = audioPlayer.pause;
+audioPlayer.pause = function() {
+    originalAudioPause.apply(this, arguments);
+    document.querySelectorAll('.mp-ui-view').forEach(el => {
+        if (el.id === 'ui-vinyl-classic') {
+            const disc = el.querySelector('#mpNormalDisc');
+            if (disc) disc.style.animationPlayState = 'paused';
+        } else if (el.id === 'ui-vinyl-simple' || el.id === 'ui-vinyl-modern' || el.id === 'ui-glass-disc') {
+            el.style.animationPlayState = 'paused';
+        } else if (el.id === 'ui-cassette') {
+            el.querySelectorAll('.cassette-hole').forEach(hole => hole.style.animationPlayState = 'paused');
+        } else if (el.id === 'ui-cd-player') {
+            const disc = el.querySelector('.cd-disc');
+            if (disc) disc.style.animationPlayState = 'paused';
+        }
+    });
+};
+// ==========================================
+// 【新增】：迷你播放器自定义设置逻辑
+// ==========================================
+
+function openMiniPlayerSettings(e) {
+    if (e) e.stopPropagation();
+    document.getElementById('miniPlayerSettingsModal').classList.add('show');
+}
+
+function closeMiniPlayerSettings(e) {
+    if (e) e.stopPropagation();
+    document.getElementById('miniPlayerSettingsModal').classList.remove('show');
+}
+
+function updateMiniPlayerCSSVar(varName, value) {
+    const player = document.getElementById('miniMusicPlayer');
+    if (player) {
+        player.style.setProperty(varName, value);
+        const musicLoginId = ChatDB.getItem('music_current_login_account');
+        if (musicLoginId) {
+            ChatDB.setItem(`mini_player_${varName}_${musicLoginId}`, value);
+        }
+    }
+}
+
+function handleMiniPlayerImageUpload(event, cssVarName) {
+    const file = event.target.files[0];
+    if (file) {
+        window.globalCompressImage(file, 1080, function(compressedUrl) {
+            updateMiniPlayerCSSVar(cssVarName, `url('${compressedUrl}')`);
+        });
+    }
+    event.target.value = '';
+}
+
+function resetMiniPlayerSettings() {
+    const player = document.getElementById('miniMusicPlayer');
+    if (player) {
+        // 恢复默认的 CSS 变量
+        player.style.setProperty('--player-bg-color', '#000000');
+        player.style.setProperty('--player-bg-opacity', '0.85');
+        player.style.setProperty('--player-bg-image', 'none');
+        player.style.setProperty('--text-title-color', '#ffffff');
+        player.style.setProperty('--text-sub-color', '#8e8e93');
+        player.style.setProperty('--icon-color', '#8e8e93');
+        player.style.setProperty('--control-btn-color', '#ffffff');
+        player.style.setProperty('--progress-bg-color', 'rgba(255, 255, 255, 0.2)');
+        player.style.setProperty('--progress-fill-color', '#ffffff');
+        
+        const musicLoginId = ChatDB.getItem('music_current_login_account');
+        if (musicLoginId) {
+            const miniVars = ['--player-bg-color', '--player-bg-opacity', '--player-bg-image', '--text-title-color', '--text-sub-color', '--icon-color', '--control-btn-color', '--progress-bg-color', '--progress-fill-color'];
+            miniVars.forEach(v => ChatDB.removeItem(`mini_player_${v}_${musicLoginId}`));
+        }
+        
+        // 如果当前有播放歌曲，恢复封面
+        if (currentPlayingSong && currentPlayingSong.cover) {
+            player.style.setProperty('--cover-image', `url('${currentPlayingSong.cover}')`);
+        } else {
+            player.style.setProperty('--cover-image', `url('https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?q=80&w=200&auto=format&fit=crop')`);
+        }
+    }
+    
+    // 重置弹窗内的 input 状态
+    const modal = document.getElementById('miniPlayerSettingsModal');
+    if (modal) {
+        modal.querySelectorAll('input[type="color"]').forEach(input => {
+            input.value = input.getAttribute('value');
+        });
+        const range = modal.querySelector('input[type="range"]');
+        if (range) range.value = 0.85;
+    }
+}
+
+// 覆盖原有的 togglePlayMode 函数，以支持新的 SVG 图标
+window.togglePlayMode = function() {
+    const playModes = [
+        {
+            name: 'loop',
+            svg: `<svg viewBox="0 0 24 24" width="100%" height="100%" stroke-linejoin="round" stroke-linecap="round" stroke-width="2.5" fill="none" stroke="currentColor"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>`
+        },
+        {
+            name: 'single',
+            svg: `<svg viewBox="0 0 24 24" width="100%" height="100%" stroke-linejoin="round" stroke-linecap="round" stroke-width="2.5" fill="none" stroke="currentColor"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path><text x="12" y="16" font-size="8" fill="currentColor" stroke="none" text-anchor="middle" font-family="sans-serif" font-weight="bold">1</text></svg>`
+        },
+        {
+            name: 'random',
+            svg: `<svg viewBox="0 0 24 24" width="100%" height="100%" stroke-linejoin="round" stroke-linecap="round" stroke-width="2.5" fill="none" stroke="currentColor"><polyline points="16 3 21 3 21 8"></polyline><line x1="4" y1="20" x2="21" y2="3"></line><polyline points="21 16 21 21 16 21"></polyline><line x1="15" y1="15" x2="21" y2="21"></line><line x1="4" y1="4" x2="9" y2="9"></line></svg>`
+        }
+    ];
+    
+    if (typeof window.currentModeIndex === 'undefined') window.currentModeIndex = 0;
+    window.currentModeIndex = (window.currentModeIndex + 1) % playModes.length;
+    
+    const miniBtn = document.getElementById('miniPlayModeBtn');
+    const mpBtn = document.getElementById('mpPlayModeBtn'); // 同步全屏播放器的按钮
+    
+    if (miniBtn) miniBtn.innerHTML = playModes[window.currentModeIndex].svg;
+    // 核心修复：将全屏播放器的 currentColor 替换为你设置的 CSS 变量颜色
+    if (mpBtn) mpBtn.innerHTML = playModes[window.currentModeIndex].svg.replace(/currentColor/g, 'var(--mp-icon-color)');
+    
+    // 同步全局变量
+    if (window.currentModeIndex === 0) currentPlayMode = 'loop';
+    else if (window.currentModeIndex === 1) currentPlayMode = 'single';
+    else currentPlayMode = 'random';
+};
+
+// 拦截 updateCapsuleUI，确保播放歌曲时更新自定义封面的 CSS 变量
+const originalUpdateCapsuleUI = window.updateCapsuleUI;
+window.updateCapsuleUI = function() {
+    if (typeof originalUpdateCapsuleUI === 'function') {
+        originalUpdateCapsuleUI();
+    }
+    if (currentPlayingSong && currentPlayingSong.cover) {
+        updateMiniPlayerCSSVar('--cover-image', `url('${currentPlayingSong.cover}')`);
+    }
+};
+

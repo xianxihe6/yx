@@ -1,0 +1,4371 @@
+// ==========================================
+// Alipay 专属逻辑 (alipay.js)
+// ==========================================
+
+let currentAlipayLoginId = null;
+
+// 打开 Alipay 面板
+function openAlipayPanel() {
+    document.getElementById('alipayPanel').style.display = 'flex';
+    
+    // 检查是否已登录
+    currentAlipayLoginId = ChatDB.getItem('alipay_login_account');
+    
+    if (currentAlipayLoginId) {
+        // 已登录，隐藏登录页，显示主界面
+        document.getElementById('alipayLoginPage').classList.add('hidden');
+        document.getElementById('alipaySettingsPage').classList.add('hidden');
+        switchAlipayTab('home');
+    } else {
+        // 未登录，显示登录页
+        document.getElementById('alipayLoginPage').classList.remove('hidden');
+        document.getElementById('alipaySettingsPage').classList.add('hidden'); // 修复：确保设置页被隐藏
+        renderAlipayLoginAccounts();
+    }
+}
+
+// 关闭 Alipay 面板
+function closeAlipayPanel() {
+    document.getElementById('alipayPanel').style.display = 'none';
+}
+
+// 渲染登录账号列表
+function renderAlipayLoginAccounts() {
+    const listEl = document.getElementById('alipayAccountList');
+    listEl.innerHTML = '';
+    
+    // 获取所有在 Chat 中注册的账号 (包含 User 和 Char)
+    let allEntities = [];
+    if (typeof getAllEntities === 'function') {
+        allEntities = getAllEntities();
+    } else {
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        allEntities = chars.concat(accounts);
+    }
+
+    // 只显示用户账号 (isAccount 为 true)
+    let userAccounts = allEntities.filter(acc => acc.isAccount);
+
+    if (userAccounts.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; color: #888; font-size: 13px; margin-top: 40px;">暂无可用用户账号，请先在 Chat 中注册</div>';
+        return;
+    }
+
+    userAccounts.forEach(acc => {
+        const card = document.createElement('div');
+        card.className = 'alipay-account-card';
+        
+        let avatarHtml = '';
+        if (acc.avatarUrl) {
+            avatarHtml = `<div class="alipay-account-avatar" style="background-image: url('${acc.avatarUrl}');"></div>`;
+        } else {
+            avatarHtml = `<div class="alipay-account-avatar">${(acc.netName || acc.name || 'U').charAt(0).toUpperCase()}</div>`;
+        }
+
+        card.innerHTML = `
+            ${avatarHtml}
+            <div class="alipay-account-info">
+                <div class="alipay-account-name">${acc.netName || acc.name || '未命名'}</div>
+                <div class="alipay-account-id">账号: ${acc.account || '未设置'}</div>
+            </div>
+        `;
+        
+        card.onclick = () => {
+            alipayLogin(acc.id);
+        };
+        
+        listEl.appendChild(card);
+    });
+}
+
+// 账号密码登录
+function alipayLoginWithPassword() {
+    const accountInput = document.getElementById('alipayLoginAccount').value.trim();
+    const passwordInput = document.getElementById('alipayLoginPassword').value.trim();
+    
+    if (!accountInput || !passwordInput) {
+        return alert('请输入账号和密码！');
+    }
+    
+    let allEntities = [];
+    if (typeof getAllEntities === 'function') {
+        allEntities = getAllEntities();
+    } else {
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        allEntities = chars.concat(accounts);
+    }
+    
+    // 只允许用户账号登录
+    const validAccount = allEntities.find(a => a.isAccount && a.account === accountInput && a.password === passwordInput);
+    
+    if (validAccount) {
+        document.getElementById('alipayLoginAccount').value = '';
+        document.getElementById('alipayLoginPassword').value = '';
+        alipayLogin(validAccount.id);
+    } else {
+        alert('账号或密码错误，或者该账号不是用户账号！');
+    }
+}
+
+// 执行登录
+function alipayLogin(accountId) {
+    currentAlipayLoginId = accountId;
+    ChatDB.setItem('alipay_login_account', accountId);
+    
+    document.getElementById('alipayLoginPage').classList.add('hidden');
+    switchAlipayTab('home');
+}
+
+// 退出登录
+function alipayLogout() {
+    currentAlipayLoginId = null;
+    ChatDB.removeItem('alipay_login_account');
+    
+    document.getElementById('alipaySettingsPage').classList.add('hidden');
+    document.getElementById('alipayLoginPage').classList.remove('hidden');
+    renderAlipayLoginAccounts();
+}
+
+// 切换底部 Tab
+function switchAlipayTab(tabId) {
+    document.querySelectorAll('.alipay-page').forEach(page => page.classList.remove('active'));
+    document.querySelectorAll('.alipay-tab-item').forEach(item => item.classList.remove('active'));
+    
+    document.getElementById('alipay-page-' + tabId).classList.add('active');
+    
+    const tabs = document.querySelectorAll('.alipay-tab-item');
+    if(tabId === 'home') tabs[0].classList.add('active');
+    if(tabId === 'chat') {
+        tabs[1].classList.add('active');
+        renderAlipayChatList(); // 渲染消息列表
+    }
+    if(tabId === 'me') {
+        tabs[2].classList.add('active');
+        renderAlipayData();
+    }
+}
+
+// 渲染消息列表
+function renderAlipayChatList() {
+    const listEl = document.getElementById('alipayChatSessionList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    if (!currentAlipayLoginId) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 13px; margin-top: 40px;">请先登录</div>';
+        return;
+    }
+
+    let contacts = JSON.parse(ChatDB.getItem(`contacts_${currentAlipayLoginId}`) || '[]');
+    let allEntities = [];
+    if (typeof getAllEntities === 'function') {
+        allEntities = getAllEntities();
+    } else {
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        allEntities = chars.concat(accounts);
+    }
+
+    // 核心：只显示好友，不显示群聊
+    const friends = contacts.map(id => allEntities.find(c => c.id === id)).filter(c => c && !c.isGroup);
+
+    if (friends.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; font-size:13px; padding:20px 0;">暂无好友</div>';
+        return;
+    }
+
+    friends.forEach(char => {
+        // 核心：使用独立的 alipay_chat_history_ 保证记录不互通
+        let history = JSON.parse(ChatDB.getItem(`alipay_chat_history_${currentAlipayLoginId}_${char.id}`) || '[]');
+        let lastMsgText = '点击进入聊天...';
+        let lastMsgTime = '';
+        
+        if (history.length > 0) {
+            const lastMsg = history[history.length - 1];
+            const safeContent = lastMsg.content || '';
+            if (lastMsg.type === 'image') lastMsgText = '[图片]';
+            else if (lastMsg.type === 'voice') lastMsgText = '[语音]';
+            else if (lastMsg.type === 'transfer') lastMsgText = '[转账]';
+            else lastMsgText = safeContent.replace(/<[^>]+>/g, '');
+            
+            const date = new Date(lastMsg.timestamp);
+            const now = new Date();
+            lastMsgTime = date.toDateString() === now.toDateString() 
+                ? `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+                : `${date.getMonth() + 1}/${date.getDate()}`;
+        }
+
+        const item = document.createElement('div');
+        item.className = 'alipay-msg-item';
+        item.style.cursor = 'pointer';
+        item.onclick = () => openAlipayChatRoom(char.id);
+
+        let avatarHtml = char.avatarUrl 
+            ? `<div class="alipay-msg-avatar" style="background-image: url('${char.avatarUrl}'); background-size: cover; background-position: center;"></div>`
+            : `<div class="alipay-msg-avatar"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg></div>`;
+
+        item.innerHTML = `
+            ${avatarHtml}
+            <div class="alipay-msg-info">
+                <div class="alipay-msg-name">${char.netName || char.name}</div>
+                <div class="alipay-msg-preview">${lastMsgText}</div>
+            </div>
+            <div class="alipay-msg-time">${lastMsgTime}</div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+let currentAlipayChatCharId = null;
+
+function openAlipayChatRoom(charId) {
+    currentAlipayChatCharId = charId;
+    let allEntities = [];
+    if (typeof getAllEntities === 'function') {
+        allEntities = getAllEntities();
+    } else {
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        allEntities = chars.concat(accounts);
+    }
+    const char = allEntities.find(c => c.id === charId);
+    if (char) {
+        document.getElementById('alipayChatRoomTitle').innerText = char.netName || char.name;
+    }
+    document.getElementById('alipayChatInput').value = '';
+    document.getElementById('alipayChatRoomPage').classList.add('show');
+    renderAlipayChatHistory();
+}
+
+function closeAlipayChatRoom() {
+    document.getElementById('alipayChatRoomPage').classList.remove('show');
+    currentAlipayChatCharId = null;
+}
+
+function renderAlipayChatHistory() {
+    const historyEl = document.getElementById('alipayChatHistory');
+    historyEl.innerHTML = '';
+    if (!currentAlipayLoginId || !currentAlipayChatCharId) return;
+
+    let history = JSON.parse(ChatDB.getItem(`alipay_chat_history_${currentAlipayLoginId}_${currentAlipayChatCharId}`) || '[]');
+    
+    let allEntities = [];
+    if (typeof getAllEntities === 'function') {
+        allEntities = getAllEntities();
+    } else {
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        allEntities = chars.concat(accounts);
+    }
+    const me = allEntities.find(a => a.id === currentAlipayLoginId);
+    const char = allEntities.find(c => c.id === currentAlipayChatCharId);
+
+    const meAvatar = me ? me.avatarUrl : '';
+    const charAvatar = char ? char.avatarUrl : '';
+
+    history.forEach(msg => {
+        if (msg.type === 'hidden_system') return;
+
+        const isMe = msg.role === 'user';
+        const avatarUrl = isMe ? meAvatar : charAvatar;
+        const avatarHtml = avatarUrl 
+            ? `<div class="ali-avatar" style="background-image: url('${avatarUrl}');"></div>`
+            : `<div class="ali-avatar"></div>`;
+
+        let bubbleHtml = '';
+        let safeContent = msg.content || '';
+
+        if (msg.type === 'transfer') {
+            const isReceived = msg.status === 'received';
+            const isRejected = msg.status === 'rejected' || msg.status === 'refunded';
+            
+            let descText = msg.note || '转账';
+            if (isReceived) descText = '已收款';
+            else if (isRejected) descText = '已退还';
+
+            bubbleHtml = `
+                <div class="ali-transfer-card ${isReceived ? 'received' : ''}">
+                    <div class="ali-transfer-top">
+                        <div class="ali-transfer-icon">
+                            <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                        </div>
+                        <div class="ali-transfer-info">
+                            <div class="ali-transfer-amount">¥${msg.amount}</div>
+                            <div class="ali-transfer-desc">${descText}</div>
+                        </div>
+                    </div>
+                    <div class="ali-transfer-bottom">支付宝转账</div>
+                </div>
+            `;
+        } else if (msg.type === 'image' || safeContent.includes('<img') || safeContent.includes('chat-desc-img-120')) {
+            bubbleHtml = `<div class="ali-bubble" style="background: transparent; padding: 0;">[图片/表情包]</div>`;
+        } else if (msg.type === 'voice') {
+            bubbleHtml = `<div class="ali-bubble">[语音]</div>`;
+        } else if (msg.type === 'system') {
+            bubbleHtml = `<div style="width: 100%; text-align: center; font-size: 12px; color: #aaa; margin: 10px 0;">${safeContent}</div>`;
+            const row = document.createElement('div');
+            row.innerHTML = bubbleHtml;
+            historyEl.appendChild(row);
+            return;
+        } else {
+            bubbleHtml = `<div class="ali-bubble">${safeContent.replace(/<[^>]+>/g, '')}</div>`;
+        }
+
+        const row = document.createElement('div');
+        row.className = `ali-msg-row ${isMe ? 'me' : 'other'}`;
+        row.innerHTML = `
+            ${avatarHtml}
+            ${bubbleHtml}
+        `;
+        historyEl.appendChild(row);
+    });
+
+    setTimeout(() => {
+        historyEl.scrollTop = historyEl.scrollHeight;
+    }, 50);
+}
+
+function sendAlipayChatMessage() {
+    const inputEl = document.getElementById('alipayChatInput');
+    const content = inputEl.value.trim();
+    if (!content || !currentAlipayLoginId || !currentAlipayChatCharId) return;
+
+    let newMsg = { role: 'user', type: 'text', content: content, timestamp: Date.now() };
+    
+    let history = JSON.parse(ChatDB.getItem(`alipay_chat_history_${currentAlipayLoginId}_${currentAlipayChatCharId}`) || '[]');
+    history.push(newMsg);
+    ChatDB.setItem(`alipay_chat_history_${currentAlipayLoginId}_${currentAlipayChatCharId}`, JSON.stringify(history));
+
+    let targetHistory = JSON.parse(ChatDB.getItem(`alipay_chat_history_${currentAlipayChatCharId}_${currentAlipayLoginId}`) || '[]');
+    targetHistory.push({ ...newMsg, role: 'char' });
+    ChatDB.setItem(`alipay_chat_history_${currentAlipayChatCharId}_${currentAlipayLoginId}`, JSON.stringify(targetHistory));
+
+    // 触发 Char 感知系统 (大模型会知道你通过支付宝发了消息)
+    if (typeof injectCharPerception === 'function') {
+        injectCharPerception('alipay_msg', content, currentAlipayChatCharId);
+    }
+
+    inputEl.value = '';
+    renderAlipayChatHistory();
+    renderAlipayChatList();
+}
+
+function openAlipayTransferModal() {
+    document.getElementById('alipayTransferAmount').value = '';
+    document.getElementById('alipayTransferNote').value = '';
+    document.getElementById('alipayTransferModalOverlay').classList.add('show');
+}
+
+function closeAlipayTransferModal() {
+    document.getElementById('alipayTransferModalOverlay').classList.remove('show');
+}
+
+function confirmAlipayTransfer() {
+    const amount = document.getElementById('alipayTransferAmount').value;
+    const note = document.getElementById('alipayTransferNote').value.trim() || '转账';
+    
+    if (!amount || parseFloat(amount) <= 0) {
+        return alert('请输入正确的转账金额！');
+    }
+
+    const transferAmount = parseFloat(amount);
+    let myBalance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+    
+    if (myBalance < transferAmount) {
+        return alert('支付宝余额不足！');
+    }
+
+    // 扣款
+    myBalance -= transferAmount;
+    ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, myBalance.toFixed(2));
+    
+    // 对方加款
+    let targetBalance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayChatCharId}`) || '0');
+    targetBalance += transferAmount;
+    ChatDB.setItem(`alipay_balance_${currentAlipayChatCharId}`, targetBalance.toFixed(2));
+
+    // 账单记录
+    let allEntities = [];
+    if (typeof getAllEntities === 'function') {
+        allEntities = getAllEntities();
+    } else {
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        allEntities = chars.concat(accounts);
+    }
+    const targetChar = allEntities.find(c => c.id === currentAlipayChatCharId);
+    const targetName = targetChar ? (targetChar.netName || targetChar.name) : '对方';
+    const me = allEntities.find(a => a.id === currentAlipayLoginId);
+    const myName = me ? (me.netName || me.name) : '对方';
+
+    addAlipayRecord(currentAlipayLoginId, 'out', `转账给 ${targetName}`, transferAmount);
+    addAlipayRecord(currentAlipayChatCharId, 'in', `收到 ${myName} 的转账`, transferAmount);
+
+    // 插入聊天记录 (直接到账)
+    let newMsg = {
+        role: 'user',
+        type: 'transfer',
+        amount: transferAmount.toFixed(2),
+        note: note,
+        status: 'received', // 直接到账
+        content: '[支付宝转账]',
+        timestamp: Date.now()
+    };
+
+    let history = JSON.parse(ChatDB.getItem(`alipay_chat_history_${currentAlipayLoginId}_${currentAlipayChatCharId}`) || '[]');
+    history.push(newMsg);
+    ChatDB.setItem(`alipay_chat_history_${currentAlipayLoginId}_${currentAlipayChatCharId}`, JSON.stringify(history));
+
+    let targetHistory = JSON.parse(ChatDB.getItem(`alipay_chat_history_${currentAlipayChatCharId}_${currentAlipayLoginId}`) || '[]');
+    targetHistory.push({ ...newMsg, role: 'char' });
+    ChatDB.setItem(`alipay_chat_history_${currentAlipayChatCharId}_${currentAlipayLoginId}`, JSON.stringify(targetHistory));
+
+    // 触发 Char 感知系统 (大模型会知道你通过支付宝转了账)
+    if (typeof injectCharPerception === 'function') {
+        injectCharPerception('alipay_transfer', transferAmount.toFixed(2), currentAlipayChatCharId);
+    }
+
+    closeAlipayTransferModal();
+    renderAlipayChatHistory();
+    renderAlipayChatList();
+    alert('转账成功，已直接到账！');
+}
+
+// 渲染我的页面数据
+function renderAlipayData() {
+    if (!currentAlipayLoginId) return;
+
+    let allEntities = [];
+    if (typeof getAllEntities === 'function') {
+        allEntities = getAllEntities();
+    } else {
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        allEntities = chars.concat(accounts);
+    }
+    
+    const me = allEntities.find(a => a.id === currentAlipayLoginId);
+    if (me) {
+        document.getElementById('alipayProfileName').innerText = me.netName || me.name || '未命名';
+        document.getElementById('alipayProfileAccount').innerText = '账号: ' + (me.account || '--');
+        const avatarEl = document.getElementById('alipayProfileAvatar');
+        avatarEl.style.backgroundImage = me.avatarUrl ? `url('${me.avatarUrl}')` : '';
+    }
+
+    let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+    document.getElementById('alipayBalanceText').innerText = balance.toFixed(2);
+
+    const listEl = document.getElementById('alipayHistoryList');
+    listEl.innerHTML = '';
+    let history = JSON.parse(ChatDB.getItem(`alipay_history_${currentAlipayLoginId}`) || '[]');
+    
+    if (history.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; font-size:12px; padding:20px 0;">暂无账单记录</div>';
+    } else {
+        history.slice().reverse().forEach(record => {
+            const item = document.createElement('div');
+            item.className = 'alipay-bill-item';
+            const date = new Date(record.timestamp);
+            const timeStr = `${date.getMonth()+1}月${date.getDate()}日 ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+            
+            item.innerHTML = `
+                <div class="alipay-bill-info">
+                    <div class="alipay-bill-name">${record.title}</div>
+                    <div class="alipay-bill-time">${timeStr}</div>
+                </div>
+                <div class="alipay-bill-amount ${record.type === 'out' ? 'minus' : 'plus'}">${record.type === 'out' ? '-' : '+'}${parseFloat(record.amount).toFixed(2)}</div>
+            `;
+            listEl.appendChild(item);
+        });
+    }
+}
+
+// 添加账单记录
+function addAlipayRecord(accountId, type, title, amount) {
+    let history = JSON.parse(ChatDB.getItem(`alipay_history_${accountId}`) || '[]');
+    history.push({
+        id: Date.now().toString(),
+        type: type, // 'out', 'in'
+        title: title,
+        amount: parseFloat(amount).toFixed(2),
+        timestamp: Date.now()
+    });
+    ChatDB.setItem(`alipay_history_${accountId}`, JSON.stringify(history));
+}
+
+// ==========================================
+// 消灭星星 游戏逻辑
+// ==========================================
+let psScore = 0;
+let psFinalReward = 0.00;
+let psBoard = []; 
+let psIsAnimating = false; 
+let psIsGameOver = false;
+const PS_ROWS = 18; // 增加行数
+const PS_COLS = 12; 
+const PS_CELL_SIZE = 360 / 12; // 扩大宽度
+
+const psBlockTypes = [
+    { id: 1, color: 'linear-gradient(135deg, #ff6b81, #ff4757)' },
+    { id: 2, color: 'linear-gradient(135deg, #7bed9f, #2ed573)' },
+    { id: 3, color: 'linear-gradient(135deg, #70a1ff, #1e90ff)' },
+    { id: 4, color: 'linear-gradient(135deg, #eccc68, #ffa502)' },
+    { id: 5, color: 'linear-gradient(135deg, #a29bfe, #8c7ae6)' }
+];
+
+const psStarSVG = `<svg class="popstar-star-svg" viewBox="0 0 24 24"><path d="M12 17.27L18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z"/></svg>`;
+
+function openPopStarGame() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    document.getElementById('popstarPanel').classList.add('show');
+    initPopStarGame();
+}
+
+function closePopStarGame() {
+    document.getElementById('popstarPanel').classList.remove('show');
+}
+
+function initPopStarGame() {
+    if (psIsAnimating) return;
+    const grid = document.getElementById('popstarGrid');
+    grid.innerHTML = '';
+    psBoard = [];
+    psScore = 0;
+    psFinalReward = 0.00;
+    psIsGameOver = false;
+    
+    document.getElementById('popstarTopScore').innerText = psScore;
+    document.getElementById('popstarTargetHint').innerText = '点击相连同色方块消除，剩余越少奖励越高';
+
+    for (let r = 0; r < PS_ROWS; r++) {
+        let row = [];
+        for (let c = 0; c < PS_COLS; c++) {
+            let type = psBlockTypes[Math.floor(Math.random() * psBlockTypes.length)];
+            let block = createPopStarBlockDOM(r, c, type);
+            row.push(block);
+        }
+        psBoard.push(row);
+    }
+}
+
+function createPopStarBlockDOM(r, c, type) {
+    const grid = document.getElementById('popstarGrid');
+    const dom = document.createElement('div');
+    dom.className = 'popstar-block';
+    dom.style.transform = `translate(${c * PS_CELL_SIZE}px, ${(r - PS_ROWS) * PS_CELL_SIZE}px)`;
+    
+    const inner = document.createElement('div');
+    inner.className = 'popstar-block-inner';
+    inner.style.background = type.color;
+    inner.innerHTML = psStarSVG;
+    
+    dom.appendChild(inner);
+    grid.appendChild(dom);
+
+    const blockObj = { r, c, type, dom };
+
+    dom.addEventListener('mousedown', () => handlePopStarBlockClick(blockObj));
+    dom.addEventListener('touchstart', (e) => { e.preventDefault(); handlePopStarBlockClick(blockObj); }, {passive: false});
+
+    // 缩短初始掉落延迟，让开局更顺畅
+    setTimeout(() => { updatePopStarBlockPosition(blockObj); }, 20 + (PS_ROWS - r) * 10);
+
+    return blockObj;
+}
+
+function updatePopStarBlockPosition(block) {
+    block.dom.style.transform = `translate(${block.c * PS_CELL_SIZE}px, ${block.r * PS_CELL_SIZE}px)`;
+}
+
+function handlePopStarBlockClick(clickedBlock) {
+    if (psIsAnimating || psIsGameOver) return;
+    if (!psBoard[clickedBlock.r][clickedBlock.c] || psBoard[clickedBlock.r][clickedBlock.c] !== clickedBlock) return;
+
+    let connectedBlocks = findPopStarConnectedBlocks(clickedBlock.r, clickedBlock.c, clickedBlock.type.id);
+
+    if (connectedBlocks.length >= 2) {
+        psIsAnimating = true;
+        
+        let points = connectedBlocks.length * connectedBlocks.length * 5;
+        psScore += points;
+        document.getElementById('popstarTopScore').innerText = psScore;
+
+        showPopStarFloatingScore(clickedBlock.r, clickedBlock.c, points, connectedBlocks.length);
+
+        connectedBlocks.forEach(b => {
+            b.dom.classList.add('pop');
+            psBoard[b.r][b.c] = null;
+        });
+
+        // 缩短消除等待时间
+        setTimeout(() => {
+            connectedBlocks.forEach(b => b.dom.remove());
+            applyPopStarGravityAndShift();
+        }, 150);
+    }
+}
+
+function findPopStarConnectedBlocks(startR, startC, targetTypeId) {
+    let visited = Array(PS_ROWS).fill(false).map(() => Array(PS_COLS).fill(false));
+    let connected = [];
+
+    function dfs(r, c) {
+        if (r < 0 || r >= PS_ROWS || c < 0 || c >= PS_COLS) return;
+        if (visited[r][c] || !psBoard[r][c]) return;
+        if (psBoard[r][c].type.id !== targetTypeId) return;
+
+        visited[r][c] = true;
+        connected.push(psBoard[r][c]);
+
+        dfs(r - 1, c);
+        dfs(r + 1, c);
+        dfs(r, c - 1);
+        dfs(r, c + 1);
+    }
+
+    dfs(startR, startC);
+    return connected;
+}
+
+function applyPopStarGravityAndShift() {
+    let blocksToUpdate = [];
+
+    // 下落逻辑收集需要移动的方块
+    for (let c = 0; c < PS_COLS; c++) {
+        let emptySpaces = 0;
+        for (let r = PS_ROWS - 1; r >= 0; r--) {
+            if (psBoard[r][c] === null) {
+                emptySpaces++;
+            } else if (emptySpaces > 0) {
+                let block = psBoard[r][c];
+                psBoard[r + emptySpaces][c] = block;
+                psBoard[r][c] = null;
+                block.r += emptySpaces;
+                blocksToUpdate.push(block);
+            }
+        }
+    }
+
+    // 左移逻辑收集
+    let emptyCols = 0;
+    for (let c = 0; c < PS_COLS; c++) {
+        if (psBoard[PS_ROWS - 1][c] === null) {
+            emptyCols++;
+        } else if (emptyCols > 0) {
+            for (let r = 0; r < PS_ROWS; r++) {
+                if (psBoard[r][c] !== null) {
+                    let block = psBoard[r][c];
+                    psBoard[r][c - emptyCols] = block;
+                    psBoard[r][c] = null;
+                    block.c -= emptyCols;
+                    blocksToUpdate.push(block);
+                }
+            }
+        }
+    }
+
+    // 集中一次性更新所有方块位置
+    requestAnimationFrame(() => {
+        for (let block of blocksToUpdate) {
+            updatePopStarBlockPosition(block);
+        }
+    });
+
+    const moved = blocksToUpdate.length > 0;
+    setTimeout(() => {
+        psIsAnimating = false;
+        checkPopStarGameOver();
+    }, moved ? 120 : 20);
+}
+
+function checkPopStarGameOver() {
+    let hasMoves = false;
+    let remainingBlocks = 0;
+
+    for (let r = 0; r < PS_ROWS; r++) {
+        for (let c = 0; c < PS_COLS; c++) {
+            if (psBoard[r][c] !== null) {
+                remainingBlocks++;
+                let typeId = psBoard[r][c].type.id;
+                if (c < PS_COLS - 1 && psBoard[r][c+1] && psBoard[r][c+1].type.id === typeId) hasMoves = true;
+                if (r < PS_ROWS - 1 && psBoard[r+1][c] && psBoard[r+1][c].type.id === typeId) hasMoves = true;
+            }
+        }
+    }
+
+    if (!hasMoves) {
+        psIsGameOver = true;
+        let bonus = 0;
+        let msg = "游戏结束！\n";
+        
+        if (remainingBlocks < 10) {
+            bonus = (10 - remainingBlocks) * 200;
+            psScore += bonus;
+            msg += `剩余 ${remainingBlocks} 个，清盘奖励 +${bonus} 分\n`;
+        } else {
+            msg += `剩余 ${remainingBlocks} 个方块\n`;
+        }
+
+        document.getElementById('popstarTopScore').innerText = psScore;
+        
+        psFinalReward = (psScore / 100).toFixed(2);
+        
+        // 自动结算奖励
+        if (parseFloat(psFinalReward) > 0 && currentAlipayLoginId) {
+            let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+            balance += parseFloat(psFinalReward);
+            ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+            addAlipayRecord(currentAlipayLoginId, 'in', '消灭星星奖励', psFinalReward);
+            
+            if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                renderAlipayData();
+            }
+            msg += `自动结算奖励：¥${psFinalReward}`;
+        } else {
+            msg += `本次收益为 0，再接再厉！`;
+        }
+
+        document.getElementById('popstarTargetHint').innerText = '游戏已结束，正在重新开始...';
+        showPopStarToast(msg);
+        
+        // 3秒后自动重置游戏
+        setTimeout(() => { initPopStarGame(); }, 3000);
+    }
+}
+
+function showPopStarFloatingScore(r, c, points, combo) {
+    const grid = document.getElementById('popstarGrid');
+    const floatDom = document.createElement('div');
+    floatDom.className = 'popstar-floating-score';
+    floatDom.innerHTML = `${combo}连消<br>+${points}`;
+    floatDom.style.left = (c * PS_CELL_SIZE) + 'px';
+    floatDom.style.top = (r * PS_CELL_SIZE - 20) + 'px';
+    grid.appendChild(floatDom);
+    setTimeout(() => floatDom.remove(), 800);
+}
+
+function showPopStarToast(msg) {
+    const toast = document.getElementById('popstarToast');
+    toast.innerText = msg;
+    toast.classList.add('show');
+    setTimeout(() => { toast.classList.remove('show'); }, 2500);
+}
+
+// ==========================================
+// 连连看 游戏逻辑
+// ==========================================
+let llkScore = 0;
+let llkFinalReward = 0.00;
+let llkIsGameOver = false;
+let llkIsAnimating = false;
+let llkLogicalBoard = []; 
+let llkBlocksData = []; 
+let llkSelectedBlock = null;
+let llkCurrentLevel = 1;
+let llkTimerInterval = null;
+let llkTimeLeft = 60;
+const LLK_MAX_LEVEL = 6;
+
+const LLK_COLS = 6;
+const LLK_ROWS = 10;
+const LLK_CELL_SIZE = 300 / 6; 
+const llkIcons = ['🍎','🍊','🍇','🍉','🍓','🍌','🍒','🍑','🍍','🥝','🥑','🥥','🍅','🍆','🌽'];
+
+function openLianliankanGame() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    document.getElementById('lianliankanPanel').classList.add('show');
+    initLianliankanGame(1);
+}
+
+function closeLianliankanGame() {
+    document.getElementById('lianliankanPanel').classList.remove('show');
+    clearInterval(llkTimerInterval);
+    
+    // 中途退出结算
+    if (llkScore > 0) {
+        let reward = (llkScore / 100).toFixed(2);
+        if (parseFloat(reward) > 0 && currentAlipayLoginId) {
+            let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+            balance += parseFloat(reward);
+            ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+            addAlipayRecord(currentAlipayLoginId, 'in', '连连看奖励', reward);
+            if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                renderAlipayData();
+            }
+            alert(`游戏结束，共赚取 ${reward} 元，已存入支付宝余额！`);
+        }
+        llkScore = 0; // 防止重复领取
+    }
+}
+
+function initLianliankanGame(level = 1) {
+    if (llkIsAnimating) return;
+    clearInterval(llkTimerInterval);
+    
+    llkCurrentLevel = level;
+    const grid = document.getElementById('llkGrid');
+    const svgLayer = document.getElementById('llkSvgLayer');
+    grid.innerHTML = '';
+    svgLayer.innerHTML = '';
+    llkBlocksData = [];
+    llkIsGameOver = false;
+    llkSelectedBlock = null;
+    
+    if (level === 1) llkScore = 0;
+    
+    // 设置倒计时：每关减少5秒，最低60秒，初始120秒
+    llkTimeLeft = Math.max(60, 120 - (level - 1) * 5);
+    document.getElementById('llkTimer').innerText = llkTimeLeft + 's';
+    
+    document.getElementById('llkTopScore').innerText = llkScore;
+    document.getElementById('llkLevelTitle').innerText = `第 ${llkCurrentLevel} 关`;
+    document.getElementById('llkGameOverOverlay').classList.remove('show');
+
+    llkLogicalBoard = Array(LLK_ROWS + 2).fill(0).map(() => Array(LLK_COLS + 2).fill(0));
+
+    let totalBlocks = LLK_ROWS * LLK_COLS;
+    let iconPool = [];
+    for (let i = 0; i < totalBlocks / 2; i++) {
+        let icon = llkIcons[i % llkIcons.length];
+        iconPool.push(icon, icon);
+    }
+    iconPool.sort(() => Math.random() - 0.5);
+
+    let index = 0;
+    for (let r = 1; r <= LLK_ROWS; r++) {
+        for (let c = 1; c <= LLK_COLS; c++) {
+            let icon = iconPool[index++];
+            let block = createLlkBlockDOM(r, c, icon);
+            llkBlocksData.push(block);
+            llkLogicalBoard[r][c] = block;
+        }
+    }
+    
+    // 启动倒计时
+    llkTimerInterval = setInterval(() => {
+        if (llkIsGameOver) return;
+        llkTimeLeft--;
+        document.getElementById('llkTimer').innerText = llkTimeLeft + 's';
+        
+        if (llkTimeLeft <= 0) {
+            clearInterval(llkTimerInterval);
+            llkIsGameOver = true;
+            let reward = (llkScore / 100).toFixed(2);
+            document.getElementById('llkGameOverTitle').innerText = '时间到！';
+            document.getElementById('llkGameOverSub').innerText = `很遗憾，挑战失败\n结算奖励 ¥${reward}`;
+            let btn = document.getElementById('llkGameOverBtn');
+            btn.innerText = '领取奖励并重置';
+            btn.onclick = () => {
+                if (parseFloat(reward) > 0 && currentAlipayLoginId) {
+                    let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+                    balance += parseFloat(reward);
+                    ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+                    addAlipayRecord(currentAlipayLoginId, 'in', '连连看奖励', reward);
+                    if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                        renderAlipayData();
+                    }
+                }
+                llkScore = 0;
+                initLianliankanGame(1);
+            };
+            document.getElementById('llkGameOverOverlay').classList.add('show');
+        }
+    }, 1000);
+}
+
+function createLlkBlockDOM(r, c, icon) {
+    const grid = document.getElementById('llkGrid');
+    const dom = document.createElement('div');
+    dom.className = 'llk-block';
+    
+    const inner = document.createElement('div');
+    inner.className = 'llk-block-inner';
+    inner.innerText = icon;
+    
+    dom.appendChild(inner);
+    grid.appendChild(dom);
+
+    const blockObj = { r, c, icon, dom };
+    updateLlkBlockPosition(blockObj);
+
+    dom.addEventListener('mousedown', () => handleLlkBlockClick(blockObj));
+    dom.addEventListener('touchstart', (e) => { e.preventDefault(); handleLlkBlockClick(blockObj); }, {passive: false});
+
+    return blockObj;
+}
+
+function updateLlkBlockPosition(block) {
+    block.dom.style.transform = `translate(${(block.c - 1) * LLK_CELL_SIZE}px, ${(block.r - 1) * LLK_CELL_SIZE}px)`;
+}
+
+function handleLlkBlockClick(block) {
+    if (llkIsAnimating || llkIsGameOver) return;
+    if (llkLogicalBoard[block.r][block.c] === 0) return;
+
+    if (llkSelectedBlock === block) {
+        block.dom.classList.remove('selected');
+        llkSelectedBlock = null;
+        return;
+    }
+
+    if (!llkSelectedBlock) {
+        block.dom.classList.add('selected');
+        llkSelectedBlock = block;
+        return;
+    }
+
+    let block1 = llkSelectedBlock;
+    let block2 = block;
+
+    if (block1.icon !== block2.icon) {
+        block1.dom.classList.remove('selected');
+        block2.dom.classList.add('selected');
+        llkSelectedBlock = block2;
+        return;
+    }
+
+    let path = findLlkPath(block1, block2);
+    
+    if (path) {
+        llkIsAnimating = true;
+        block2.dom.classList.add('selected');
+        
+        drawLlkPath(path);
+
+        llkScore += 20;
+        document.getElementById('llkTopScore').innerText = llkScore;
+
+        setTimeout(() => {
+            block1.dom.classList.add('pop');
+            block2.dom.classList.add('pop');
+            llkLogicalBoard[block1.r][block1.c] = 0;
+            llkLogicalBoard[block2.r][block2.c] = 0;
+            document.getElementById('llkSvgLayer').innerHTML = '';
+            llkSelectedBlock = null;
+            
+            setTimeout(() => {
+                block1.dom.remove();
+                block2.dom.remove();
+                
+                // 执行移动逻辑
+                applyLlkGravity();
+                
+                setTimeout(() => {
+                    llkIsAnimating = false;
+                    checkLlkGameOver();
+                }, 200); // 等待移动动画完成
+            }, 200);
+        }, 300);
+    } else {
+        block1.dom.classList.remove('selected');
+        block2.dom.classList.add('selected');
+        llkSelectedBlock = block2;
+    }
+}
+
+// 根据关卡执行不同的移动逻辑
+function applyLlkGravity() {
+    if (llkCurrentLevel === 1) return; // 第一关不移动
+
+    if (llkCurrentLevel === 2) {
+        // 向下掉落
+        for (let c = 1; c <= LLK_COLS; c++) {
+            let emptySpaces = 0;
+            for (let r = LLK_ROWS; r >= 1; r--) {
+                if (llkLogicalBoard[r][c] === 0) {
+                    emptySpaces++;
+                } else if (emptySpaces > 0) {
+                    let block = llkLogicalBoard[r][c];
+                    llkLogicalBoard[r + emptySpaces][c] = block;
+                    llkLogicalBoard[r][c] = 0;
+                    block.r += emptySpaces;
+                    updateLlkBlockPosition(block);
+                }
+            }
+        }
+    } else if (llkCurrentLevel === 3) {
+        // 向左平移
+        for (let r = 1; r <= LLK_ROWS; r++) {
+            let emptySpaces = 0;
+            for (let c = 1; c <= LLK_COLS; c++) {
+                if (llkLogicalBoard[r][c] === 0) {
+                    emptySpaces++;
+                } else if (emptySpaces > 0) {
+                    let block = llkLogicalBoard[r][c];
+                    llkLogicalBoard[r][c - emptySpaces] = block;
+                    llkLogicalBoard[r][c] = 0;
+                    block.c -= emptySpaces;
+                    updateLlkBlockPosition(block);
+                }
+            }
+        }
+    } else if (llkCurrentLevel === 4) {
+        // 向右平移
+        for (let r = 1; r <= LLK_ROWS; r++) {
+            let emptySpaces = 0;
+            for (let c = LLK_COLS; c >= 1; c--) {
+                if (llkLogicalBoard[r][c] === 0) {
+                    emptySpaces++;
+                } else if (emptySpaces > 0) {
+                    let block = llkLogicalBoard[r][c];
+                    llkLogicalBoard[r][c + emptySpaces] = block;
+                    llkLogicalBoard[r][c] = 0;
+                    block.c += emptySpaces;
+                    updateLlkBlockPosition(block);
+                }
+            }
+        }
+    } else if (llkCurrentLevel === 5) {
+        // 向上平移
+        for (let c = 1; c <= LLK_COLS; c++) {
+            let emptySpaces = 0;
+            for (let r = 1; r <= LLK_ROWS; r++) {
+                if (llkLogicalBoard[r][c] === 0) {
+                    emptySpaces++;
+                } else if (emptySpaces > 0) {
+                    let block = llkLogicalBoard[r][c];
+                    llkLogicalBoard[r - emptySpaces][c] = block;
+                    llkLogicalBoard[r][c] = 0;
+                    block.r -= emptySpaces;
+                    updateLlkBlockPosition(block);
+                }
+            }
+        }
+    } else if (llkCurrentLevel === 6) {
+        // 向中间靠拢
+        let mid = Math.floor(LLK_COLS / 2);
+        for (let r = 1; r <= LLK_ROWS; r++) {
+            // 左半边向右
+            let emptySpacesL = 0;
+            for (let c = mid; c >= 1; c--) {
+                if (llkLogicalBoard[r][c] === 0) {
+                    emptySpacesL++;
+                } else if (emptySpacesL > 0) {
+                    let block = llkLogicalBoard[r][c];
+                    llkLogicalBoard[r][c + emptySpacesL] = block;
+                    llkLogicalBoard[r][c] = 0;
+                    block.c += emptySpacesL;
+                    updateLlkBlockPosition(block);
+                }
+            }
+            // 右半边向左
+            let emptySpacesR = 0;
+            for (let c = mid + 1; c <= LLK_COLS; c++) {
+                if (llkLogicalBoard[r][c] === 0) {
+                    emptySpacesR++;
+                } else if (emptySpacesR > 0) {
+                    let block = llkLogicalBoard[r][c];
+                    llkLogicalBoard[r][c - emptySpacesR] = block;
+                    llkLogicalBoard[r][c] = 0;
+                    block.c -= emptySpacesR;
+                    updateLlkBlockPosition(block);
+                }
+            }
+        }
+    }
+}
+
+function findLlkPath(b1, b2) {
+    if (isLlkClearStraight(b1, b2)) return [b1, b2];
+
+    let corner1 = { r: b1.r, c: b2.c };
+    if (llkLogicalBoard[corner1.r][corner1.c] === 0 && isLlkClearStraight(b1, corner1) && isLlkClearStraight(b2, corner1)) {
+        return [b1, corner1, b2];
+    }
+    let corner2 = { r: b2.r, c: b1.c };
+    if (llkLogicalBoard[corner2.r][corner2.c] === 0 && isLlkClearStraight(b1, corner2) && isLlkClearStraight(b2, corner2)) {
+        return [b1, corner2, b2];
+    }
+
+    for (let c = 0; c <= LLK_COLS + 1; c++) {
+        let p1 = { r: b1.r, c: c };
+        let p2 = { r: b2.r, c: c };
+        if (llkLogicalBoard[p1.r][p1.c] === 0 && llkLogicalBoard[p2.r][p2.c] === 0) {
+            if (isLlkClearStraight(b1, p1) && isLlkClearStraight(b2, p2) && isLlkClearStraight(p1, p2)) {
+                return [b1, p1, p2, b2];
+            }
+        }
+    }
+    for (let r = 0; r <= LLK_ROWS + 1; r++) {
+        let p1 = { r: r, c: b1.c };
+        let p2 = { r: r, c: b2.c };
+        if (llkLogicalBoard[p1.r][p1.c] === 0 && llkLogicalBoard[p2.r][p2.c] === 0) {
+            if (isLlkClearStraight(b1, p1) && isLlkClearStraight(b2, p2) && isLlkClearStraight(p1, p2)) {
+                return [b1, p1, p2, b2];
+            }
+        }
+    }
+    return null;
+}
+
+function isLlkClearStraight(p1, p2) {
+    if (p1.r === p2.r) {
+        let min = Math.min(p1.c, p2.c);
+        let max = Math.max(p1.c, p2.c);
+        for (let c = min + 1; c < max; c++) {
+            if (llkLogicalBoard[p1.r][c] !== 0) return false;
+        }
+        return true;
+    } else if (p1.c === p2.c) {
+        let min = Math.min(p1.r, p2.r);
+        let max = Math.max(p1.r, p2.r);
+        for (let r = min + 1; r < max; r++) {
+            if (llkLogicalBoard[r][p1.c] !== 0) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+function drawLlkPath(path) {
+    const svgLayer = document.getElementById('llkSvgLayer');
+    svgLayer.innerHTML = '';
+    let pointsStr = path.map(p => {
+        let x = (p.c - 1 + 0.5) * LLK_CELL_SIZE;
+        let y = (p.r - 1 + 0.5) * LLK_CELL_SIZE;
+        return `${x},${y}`;
+    }).join(' ');
+
+    const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+    polyline.setAttribute('points', pointsStr);
+    polyline.setAttribute('fill', 'none');
+    polyline.setAttribute('stroke', '#1677ff');
+    polyline.setAttribute('stroke-width', '6');
+    polyline.setAttribute('stroke-linejoin', 'round');
+    polyline.setAttribute('stroke-linecap', 'round');
+    polyline.style.filter = 'drop-shadow(0 0 4px rgba(22, 119, 255, 0.8))';
+    
+    svgLayer.appendChild(polyline);
+}
+
+function hintLianliankanBoard() {
+    if (llkIsAnimating || llkIsGameOver) return;
+    
+    const hintCost = 0.50;
+    if (!currentAlipayLoginId) {
+        showLlkToast("请先登录支付宝！");
+        return;
+    }
+    
+    let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+    if (balance < hintCost) {
+        showLlkToast(`余额不足！提示需要 ¥${hintCost.toFixed(2)}`);
+        return;
+    }
+    
+    // 寻找一对可以消除的方块
+    for (let r1 = 1; r1 <= LLK_ROWS; r1++) {
+        for (let c1 = 1; c1 <= LLK_COLS; c1++) {
+            let b1 = llkLogicalBoard[r1][c1];
+            if (b1 === 0) continue;
+            for (let r2 = 1; r2 <= LLK_ROWS; r2++) {
+                for (let c2 = 1; c2 <= LLK_COLS; c2++) {
+                    let b2 = llkLogicalBoard[r2][c2];
+                    if (b2 === 0 || b1 === b2 || b1.icon !== b2.icon) continue;
+                    
+                    let path = findLlkPath(b1, b2);
+                    if (path) {
+                        // 扣款
+                        balance -= hintCost;
+                        ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+                        addAlipayRecord(currentAlipayLoginId, 'out', '连连看提示', hintCost);
+                        if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                            renderAlipayData();
+                        }
+                        
+                        b1.dom.classList.add('selected');
+                        b2.dom.classList.add('selected');
+                        setTimeout(() => {
+                            if (llkSelectedBlock !== b1) b1.dom.classList.remove('selected');
+                            if (llkSelectedBlock !== b2) b2.dom.classList.remove('selected');
+                        }, 1000);
+                        
+                        showLlkToast(`已扣除 ¥${hintCost.toFixed(2)}，提示成功`);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    showLlkToast("当前没有可以消除的方块，请洗牌！");
+}
+
+function shuffleLianliankanBoard() {
+    if (llkIsAnimating || llkIsGameOver) return;
+    
+    // 扣费逻辑 (设定洗牌一次 1.00 元)
+    const shuffleCost = 1.00;
+    if (!currentAlipayLoginId) {
+        showLlkToast("请先登录支付宝！");
+        return;
+    }
+    
+    let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+    if (balance < shuffleCost) {
+        showLlkToast(`余额不足！洗牌需要 ¥${shuffleCost.toFixed(2)}`);
+        return;
+    }
+    
+    if (!confirm(`重新洗牌将扣除 ¥${shuffleCost.toFixed(2)} 余额，是否继续？`)) {
+        return;
+    }
+    
+    // 扣款
+    balance -= shuffleCost;
+    ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+    addAlipayRecord(currentAlipayLoginId, 'out', '连连看洗牌', shuffleCost);
+    
+    // 刷新我的页面余额
+    if (document.getElementById('alipay-page-me').classList.contains('active')) {
+        renderAlipayData();
+    }
+
+    let remainingBlocks = [];
+    for (let r = 1; r <= LLK_ROWS; r++) {
+        for (let c = 1; c <= LLK_COLS; c++) {
+            if (llkLogicalBoard[r][c] !== 0) {
+                remainingBlocks.push(llkLogicalBoard[r][c]);
+            }
+        }
+    }
+
+    if (remainingBlocks.length === 0) return;
+
+    let icons = remainingBlocks.map(b => b.icon);
+    icons.sort(() => Math.random() - 0.5);
+
+    remainingBlocks.forEach((b, i) => {
+        b.icon = icons[i];
+        b.dom.querySelector('.llk-block-inner').innerText = b.icon;
+        b.dom.classList.remove('selected');
+    });
+    
+    llkSelectedBlock = null;
+    showLlkToast(`已扣除 ¥${shuffleCost.toFixed(2)}，重新洗牌成功`);
+}
+
+function checkLlkGameOver() {
+    let remaining = 0;
+    for (let r = 1; r <= LLK_ROWS; r++) {
+        for (let c = 1; c <= LLK_COLS; c++) {
+            if (llkLogicalBoard[r][c] !== 0) remaining++;
+        }
+    }
+
+    if (remaining === 0) {
+        llkIsGameOver = true;
+        clearInterval(llkTimerInterval); // 过关清除定时器
+        
+        if (llkCurrentLevel < LLK_MAX_LEVEL) {
+            let currentReward = (llkScore / 100).toFixed(2);
+            document.getElementById('llkGameOverTitle').innerText = '过关！';
+            document.getElementById('llkGameOverSub').innerText = `当前累计奖励 ¥${currentReward}\n准备好迎接更难的挑战了吗？`;
+            let btn = document.getElementById('llkGameOverBtn');
+            btn.innerText = '进入下一关';
+            btn.onclick = () => initLianliankanGame(llkCurrentLevel + 1);
+            document.getElementById('llkGameOverOverlay').classList.add('show');
+        } else {
+            // 结算金额：100分 = 1元
+            llkFinalReward = (llkScore / 100).toFixed(2);
+            
+            document.getElementById('llkGameOverTitle').innerText = '恭喜通关！';
+            document.getElementById('llkGameOverSub').innerText = `太强了！获得奖励 ¥${llkFinalReward}`;
+            let btn = document.getElementById('llkGameOverBtn');
+            btn.innerText = '领取奖励并重置';
+            btn.onclick = () => {
+                if (parseFloat(llkFinalReward) > 0 && currentAlipayLoginId) {
+                    let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+                    balance += parseFloat(llkFinalReward);
+                    ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+                    addAlipayRecord(currentAlipayLoginId, 'in', '连连看奖励', llkFinalReward);
+                    
+                    if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                        renderAlipayData();
+                    }
+                }
+                showLlkToast(`成功领取 ¥${llkFinalReward} 元！`);
+                llkScore = 0; // 清空分数
+                setTimeout(() => { initLianliankanGame(1); }, 1500);
+            };
+            document.getElementById('llkGameOverOverlay').classList.add('show');
+        }
+    }
+}
+
+function showLlkToast(msg) {
+    const toast = document.getElementById('llkToast');
+    toast.innerText = msg;
+    toast.classList.add('show');
+    setTimeout(() => { toast.classList.remove('show'); }, 2500);
+}
+
+// ==========================================
+// 羊了个羊 游戏逻辑
+// ==========================================
+let ylgyTiles = []; 
+let ylgySlot = [];  
+let ylgyHistoryStack = []; 
+let ylgyScore = 0;
+let ylgyIsGameOver = false;
+let ylgyCurrentLevel = 1; 
+
+const YLGY_TILE_SIZE = 48; 
+const YLGY_BOARD_SIZE = 360; // 扩大游戏区域
+const YLGY_SLOT_CAPACITY = 7;
+const ylgyIcons = ['🍎','🍊','🍇','🍉','🍓','🍌','🍒','🍑','🍍','🥝','🥑','🌽'];
+
+function openYanglegeyangGame() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    document.getElementById('yanglegeyangPanel').classList.add('show');
+    initYanglegeyangGame(1);
+}
+
+function closeYanglegeyangGame() {
+    document.getElementById('yanglegeyangPanel').classList.remove('show');
+    
+    // 中途退出结算
+    if (ylgyScore > 0) {
+        let reward = (ylgyScore / 100).toFixed(2);
+        if (parseFloat(reward) > 0 && currentAlipayLoginId) {
+            let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+            balance += parseFloat(reward);
+            ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+            addAlipayRecord(currentAlipayLoginId, 'in', '羊了个羊奖励', reward);
+            if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                renderAlipayData();
+            }
+            alert(`游戏结束，共赚取 ${reward} 元，已存入支付宝余额！`);
+        }
+        ylgyScore = 0;
+    }
+}
+
+function initYanglegeyangGame(level = 1) {
+    ylgyCurrentLevel = level;
+    const boardDOM = document.getElementById('ylgyBoard');
+    boardDOM.innerHTML = '';
+    ylgyTiles = [];
+    ylgySlot = [];
+    ylgyHistoryStack = [];
+    ylgyIsGameOver = false;
+    
+    if (level === 1) ylgyScore = 0; 
+    
+    document.getElementById('ylgyGameOverOverlay').classList.remove('show');
+    document.getElementById('ylgyLevelTitle').innerText = `第 ${ylgyCurrentLevel} 关`;
+
+    let deck = [];
+    
+    if (ylgyCurrentLevel === 1) {
+        let level1Icons = ylgyIcons.slice(0, 3);
+        level1Icons.forEach(icon => {
+            for (let i = 0; i < 3; i++) deck.push(icon);
+        });
+        deck.sort(() => Math.random() - 0.5);
+
+        let startX = (YLGY_BOARD_SIZE - YLGY_TILE_SIZE * 3) / 2;
+        let startY = (YLGY_BOARD_SIZE - YLGY_TILE_SIZE * 3) / 2;
+        
+        for (let i = 0; i < deck.length; i++) {
+            let row = Math.floor(i / 3);
+            let col = i % 3;
+            ylgyTiles.push({
+                id: i, icon: deck[i],
+                x: startX + col * YLGY_TILE_SIZE,
+                y: startY + row * YLGY_TILE_SIZE,
+                z: 0, status: 0, dom: null
+            });
+        }
+    } else {
+        ylgyIcons.forEach(icon => {
+            for (let i = 0; i < 12; i++) deck.push(icon);
+        });
+        deck.sort(() => Math.random() - 0.5);
+
+        for (let i = 0; i < deck.length; i++) {
+            let step = YLGY_TILE_SIZE / 2;
+            let maxXSteps = Math.floor((YLGY_BOARD_SIZE - YLGY_TILE_SIZE) / step);
+            let maxYSteps = Math.floor((YLGY_BOARD_SIZE - YLGY_TILE_SIZE) / step);
+            
+            let x = (Math.floor(Math.random() * (maxXSteps - 2)) + 1) * step;
+            let y = (Math.floor(Math.random() * (maxYSteps - 2)) + 1) * step;
+            let z = Math.floor(i / 24); 
+
+            ylgyTiles.push({
+                id: i, icon: deck[i],
+                x: x, y: y, z: z, status: 0, dom: null
+            });
+        }
+    }
+
+    ylgyTiles.forEach(t => {
+        const dom = document.createElement('div');
+        dom.className = 'ylgy-tile';
+        dom.innerText = t.icon;
+        dom.style.left = t.x + 'px';
+        dom.style.top = t.y + 'px';
+        dom.style.zIndex = t.z;
+        
+        dom.addEventListener('mousedown', () => handleYlgyTileClick(t));
+        dom.addEventListener('touchstart', (e) => { e.preventDefault(); handleYlgyTileClick(t); }, {passive: false});
+        
+        t.dom = dom;
+        boardDOM.appendChild(dom);
+    });
+
+    updateYlgyCoveredState();
+}
+
+function updateYlgyCoveredState() {
+    ylgyTiles.forEach(t1 => {
+        if (t1.status !== 0) return; 
+        
+        let isCovered = false;
+        for (let t2 of ylgyTiles) {
+            if (t2.status === 0 && t2.z > t1.z) {
+                if (Math.abs(t1.x - t2.x) < YLGY_TILE_SIZE && Math.abs(t1.y - t2.y) < YLGY_TILE_SIZE) {
+                    isCovered = true;
+                    break;
+                }
+            }
+        }
+        
+        if (isCovered) {
+            t1.dom.classList.add('covered');
+        } else {
+            t1.dom.classList.remove('covered');
+        }
+    });
+}
+
+function handleYlgyTileClick(tile) {
+    if (ylgyIsGameOver || tile.status !== 0 || tile.dom.classList.contains('covered')) return;
+    if (ylgySlot.length >= YLGY_SLOT_CAPACITY) return;
+
+    ylgyHistoryStack.push(tile);
+
+    tile.status = 1; 
+    ylgySlot.push(tile);
+    
+    rearrangeYlgySlot();
+    updateYlgyCoveredState();
+
+    setTimeout(() => {
+        checkYlgyMatches();
+    }, 150);
+}
+
+function rearrangeYlgySlot() {
+    ylgySlot.sort((a, b) => a.icon.localeCompare(b.icon));
+    const slotContainer = document.getElementById('ylgySlotContainer');
+    const boardDOM = document.getElementById('ylgyBoard');
+    const slotRect = slotContainer.getBoundingClientRect();
+    const boardRect = boardDOM.getBoundingClientRect();
+    
+    ylgySlot.forEach((t, index) => {
+        let targetX = slotRect.left - boardRect.left + 7 + index * YLGY_TILE_SIZE;
+        let targetY = slotRect.top - boardRect.top + 5;
+        
+        t.dom.style.left = targetX + 'px';
+        t.dom.style.top = targetY + 'px';
+        t.dom.style.zIndex = 100 + index; 
+        t.dom.style.boxShadow = '0 2px 5px rgba(0,0,0,0.1)';
+        t.dom.style.transform = 'translateY(0)';
+    });
+}
+
+function checkYlgyMatches() {
+    let counts = {};
+    ylgySlot.forEach(t => counts[t.icon] = (counts[t.icon] || 0) + 1);
+
+    let matchedIcon = null;
+    for (let icon in counts) {
+        if (counts[icon] >= 3) {
+            matchedIcon = icon;
+            break;
+        }
+    }
+
+    if (matchedIcon) {
+        let matchedTiles = ylgySlot.filter(t => t.icon === matchedIcon).slice(0, 3);
+        
+        matchedTiles.forEach(t => {
+            t.status = 2; 
+            t.dom.classList.add('pop');
+        });
+
+        ylgySlot = ylgySlot.filter(t => !matchedTiles.includes(t));
+        ylgyHistoryStack = [];
+
+        ylgyScore += 30;
+
+        setTimeout(() => {
+            matchedTiles.forEach(t => t.dom.remove());
+            rearrangeYlgySlot();
+            checkYlgyWinOrLose();
+        }, 150);
+    } else {
+        checkYlgyWinOrLose();
+    }
+}
+
+function undoYlgyMove() {
+    if (ylgyIsGameOver) return;
+    if (ylgyHistoryStack.length === 0) {
+        showYlgyToast("没有可以撤回的步骤了");
+        return;
+    }
+    
+    let tile = ylgyHistoryStack.pop();
+    let index = ylgySlot.indexOf(tile);
+    if (index > -1) {
+        ylgySlot.splice(index, 1);
+    }
+    
+    tile.status = 0;
+    tile.dom.style.left = tile.x + 'px';
+    tile.dom.style.top = tile.y + 'px';
+    tile.dom.style.zIndex = tile.z;
+    tile.dom.style.boxShadow = '0 4px 0 #d1d5db, 0 5px 5px rgba(0,0,0,0.15)';
+    
+    rearrangeYlgySlot();
+    updateYlgyCoveredState();
+}
+
+function shuffleYlgyTiles() {
+    if (ylgyIsGameOver) return;
+    
+    const shuffleCost = 1.00;
+    if (!currentAlipayLoginId) {
+        showYlgyToast("请先登录支付宝！");
+        return;
+    }
+    
+    let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+    if (balance < shuffleCost) {
+        showYlgyToast(`余额不足！洗牌需要 ¥${shuffleCost.toFixed(2)}`);
+        return;
+    }
+    
+    if (!confirm(`重新洗牌将扣除 ¥${shuffleCost.toFixed(2)} 余额，是否继续？`)) return;
+    
+    balance -= shuffleCost;
+    ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+    addAlipayRecord(currentAlipayLoginId, 'out', '羊了个羊洗牌', shuffleCost);
+    
+    if (document.getElementById('alipay-page-me').classList.contains('active')) {
+        renderAlipayData();
+    }
+
+    let boardTiles = ylgyTiles.filter(t => t.status === 0);
+    if (boardTiles.length === 0) return;
+
+    let icons = boardTiles.map(t => t.icon);
+    icons.sort(() => Math.random() - 0.5);
+
+    boardTiles.forEach((t, i) => {
+        t.icon = icons[i];
+        t.dom.innerText = t.icon;
+    });
+    
+    showYlgyToast(`已扣除 ¥${shuffleCost.toFixed(2)}，洗牌成功！`);
+}
+
+function checkYlgyWinOrLose() {
+    let remainingOnBoard = ylgyTiles.filter(t => t.status === 0).length;
+
+    if (remainingOnBoard === 0 && ylgySlot.length === 0) {
+        ylgyIsGameOver = true;
+        
+        if (ylgyCurrentLevel === 1) {
+            let reward = (ylgyScore / 100).toFixed(2);
+            document.getElementById('ylgyGameOverTitle').innerText = '热身结束！';
+            document.getElementById('ylgyGameOverSub').innerText = `当前累计奖励 ¥${reward}\n准备好迎接真正的挑战了吗？`;
+            let btn = document.getElementById('ylgyGameOverBtn');
+            btn.innerText = '进入第二关';
+            btn.onclick = () => initYanglegeyangGame(2);
+            document.getElementById('ylgyGameOverOverlay').classList.add('show');
+        } else {
+            let reward = (ylgyScore / 100).toFixed(2);
+            
+            document.getElementById('ylgyGameOverTitle').innerText = '恭喜通关！';
+            document.getElementById('ylgyGameOverSub').innerText = `太强了！获得奖励 ¥${reward}`;
+            let btn = document.getElementById('ylgyGameOverBtn');
+            btn.innerText = '领取奖励并重置';
+            btn.onclick = () => {
+                if (currentAlipayLoginId) {
+                    let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+                    balance += parseFloat(reward);
+                    ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+                    addAlipayRecord(currentAlipayLoginId, 'in', '羊了个羊奖励', reward);
+                    if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                        renderAlipayData();
+                    }
+                }
+                showYlgyToast(`成功领取 ¥${reward} 元！`);
+                ylgyScore = 0; // 清空分数
+                setTimeout(() => { initYanglegeyangGame(1); }, 1500);
+            };
+            document.getElementById('ylgyGameOverOverlay').classList.add('show');
+        }
+    } else if (ylgySlot.length >= YLGY_SLOT_CAPACITY) {
+        ylgyIsGameOver = true;
+        let reward = (ylgyScore / 100).toFixed(2);
+        document.getElementById('ylgyGameOverTitle').innerText = '槽位已满！';
+        document.getElementById('ylgyGameOverSub').innerText = `很遗憾，挑战失败\n结算奖励 ¥${reward}`;
+        let btn = document.getElementById('ylgyGameOverBtn');
+        btn.innerText = '领取奖励并重置';
+        btn.onclick = () => {
+            if (parseFloat(reward) > 0 && currentAlipayLoginId) {
+                let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+                balance += parseFloat(reward);
+                ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+                addAlipayRecord(currentAlipayLoginId, 'in', '羊了个羊奖励', reward);
+                if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                    renderAlipayData();
+                }
+            }
+            ylgyScore = 0; // 清空分数
+            initYanglegeyangGame(1);
+        };
+        document.getElementById('ylgyGameOverOverlay').classList.add('show');
+    }
+}
+
+function showYlgyToast(msg) {
+    const toast = document.getElementById('ylgyToast');
+    toast.innerText = msg;
+    toast.classList.add('show');
+    setTimeout(() => { toast.classList.remove('show'); }, 2000);
+}
+
+// 清空账单记录
+function clearAlipayHistory() {
+    if (!currentAlipayLoginId) return;
+    if (confirm('确定要清空支付宝账单记录吗？（余额不会清空）')) {
+        ChatDB.setItem(`alipay_history_${currentAlipayLoginId}`, '[]');
+        renderAlipayData();
+    }
+}
+
+// --- 设置页面逻辑 ---
+function openAlipaySettings() {
+    document.getElementById('alipaySettingsPage').classList.remove('hidden');
+    renderAlipaySwitchAccounts();
+}
+
+function closeAlipaySettings() {
+    document.getElementById('alipaySettingsPage').classList.add('hidden');
+}
+
+// ==========================================
+// 沙威玛传奇 游戏逻辑
+// ==========================================
+const swmFoodData = {
+    'bread': { svg: '<ellipse cx="12" cy="12" rx="8" ry="10"></ellipse>', fill: '#f0c880', stroke: '#d4a352' },
+    'meat': { svg: '<path d="M4 10c4-4 12-4 16 0M4 14c4-4 12-4 16 0M4 18c4-4 12-4 16 0"></path>', fill: '#8a3a18', stroke: '#5c220b' },
+    'fries': { svg: '<rect x="6" y="6" width="3" height="12" rx="1"></rect><rect x="10.5" y="4" width="3" height="14" rx="1"></rect><rect x="15" y="8" width="3" height="10" rx="1"></rect>', fill: '#ffb300', stroke: '#d48806' },
+    'garlic': { svg: '<path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path>', fill: '#fff9e6', stroke: '#d4a352' },
+    'pickle': { svg: '<rect x="7" y="4" width="10" height="16" rx="5"></rect><line x1="10" y1="8" x2="14" y2="8"></line><line x1="10" y1="12" x2="14" y2="12"></line>', fill: '#2d6a30', stroke: '#1b401d' },
+    'tomato': { svg: '<circle cx="12" cy="13" r="8"></circle><path d="M12 5v3M9 6l3 2M15 6l-3 2" stroke="#2d6a30" stroke-width="2"></path>', fill: '#e53935', stroke: '#b71c1c' },
+    'syrup': { svg: '<path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path>', fill: '#880e4f', stroke: '#4a0024' },
+    'cola': { svg: '<path d="M6 5h12l-1 17H7L6 5z"></path><line x1="12" y1="5" x2="15" y2="1" stroke="#111" stroke-width="2"></line>', fill: '#3e2723', stroke: '#111' }
+};
+
+const swmAvatars = ['🧔', '👱‍♀️', '👴', '👦', '👩‍🦰', '👮‍♂️', '👨‍🍳', '👩‍⚕️'];
+
+let swmGameState = {
+    day: 1,
+    coins: 0,
+    meatInTray: 0,
+    friesState: 'empty', // empty, frying, cooked, burnt
+    friesInTray: 0,
+    drinkState: 'empty', // empty, pouring, ready
+    plate: [],
+    plateStatus: 'empty', // empty, bread, rolled, packaged
+    upgrades: { autoCut: false, syrup: false, priceBonus: 0 }
+};
+
+let swmSessionEarnings = 0;
+
+let swmCustomers = [
+    { active: false, order: { sandwich: [], drink: false }, patience: 100, timer: null },
+    { active: false, order: { sandwich: [], drink: false }, patience: 100, timer: null }
+];
+
+let swmAutoCutInterval = null;
+
+function openShawarmaGame() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    document.getElementById('shawarmaPanel').classList.add('show');
+    swmInit();
+}
+
+function closeShawarmaGame() {
+    document.getElementById('shawarmaPanel').classList.remove('show');
+    clearInterval(swmAutoCutInterval);
+    swmCustomers.forEach(c => clearInterval(c.timer));
+    
+    if (typeof swmSessionEarnings !== 'undefined' && swmSessionEarnings > 0 && currentAlipayLoginId) {
+        let alipayBalance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+        alipayBalance += swmSessionEarnings;
+        ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, alipayBalance.toFixed(2));
+        addAlipayRecord(currentAlipayLoginId, 'in', '沙威玛传奇营业收入', swmSessionEarnings);
+        if (document.getElementById('alipay-page-me').classList.contains('active')) {
+            renderAlipayData();
+        }
+        alert(`本次营业结束，共赚取 ${swmSessionEarnings} 元，已存入支付宝余额！`);
+        swmSessionEarnings = 0;
+    }
+}
+
+function swmInit() {
+    swmSessionEarnings = 0;
+    swmGameState = {
+        day: 1, coins: 0, meatInTray: 0, friesState: 'empty', friesInTray: 0, drinkState: 'empty',
+        plate: [], plateStatus: 'empty', upgrades: { autoCut: false, syrup: false, priceBonus: 0 }
+    };
+    swmCustomers.forEach(c => { c.active = false; clearInterval(c.timer); });
+    document.getElementById('swmCustomer0').classList.remove('active');
+    document.getElementById('swmCustomer1').classList.remove('active');
+    swmTrashFood();
+    swmResetFryerUI();
+    document.getElementById('swmDrinkFill').style.height = '0%';
+    
+    swmUpdateUI();
+    swmSpawnCustomer(0);
+    setTimeout(() => swmSpawnCustomer(1), 3000);
+    
+    clearInterval(swmAutoCutInterval);
+    swmAutoCutInterval = setInterval(() => {
+        if(swmGameState.upgrades.autoCut && swmGameState.meatInTray < 5) {
+            swmCutMeat(true);
+        }
+    }, 2000);
+}
+
+function swmUpdateUI() {
+    document.getElementById('swmCoinText').innerText = swmGameState.coins;
+    document.getElementById('swmDayDisplay').innerText = `DAY ${swmGameState.day}`;
+    
+    const meatTray = document.getElementById('swmMeatTray');
+    meatTray.innerHTML = '';
+    for(let i=0; i<swmGameState.meatInTray; i++) {
+        meatTray.innerHTML += '<div class="swm-meat-piece"></div>';
+    }
+
+    const friesTray = document.getElementById('swmFriesTray');
+    friesTray.innerHTML = '';
+    for(let i=0; i<swmGameState.friesInTray; i++) {
+        friesTray.innerHTML += '<div class="swm-fries-piece"></div>';
+    }
+}
+
+function swmSpawnCustomer(index) {
+    const c = swmCustomers[index];
+    c.active = true;
+    c.patience = 100;
+    
+    c.order.sandwich = ['bread', 'meat'];
+    const possibleExtras = ['garlic', 'pickle', 'tomato'];
+    if(swmGameState.upgrades.syrup) possibleExtras.push('syrup');
+    
+    const maxIng = Math.min(4, 1 + Math.floor(swmGameState.day / 2));
+    const extraCount = Math.floor(Math.random() * maxIng) + 1;
+    for(let i=0; i<extraCount; i++) {
+        c.order.sandwich.push(possibleExtras[Math.floor(Math.random() * possibleExtras.length)]);
+    }
+    
+    c.order.drink = Math.random() < 0.3;
+
+    const bubble = document.getElementById(`swmReqBubble${index}`);
+    bubble.innerHTML = '';
+    
+    const counts = {};
+    c.order.sandwich.forEach(i => counts[i] = (counts[i] || 0) + 1);
+    let sandwichHtml = `<div style="border:1px solid #ccc; border-radius:8px; padding:2px 4px; display:flex; gap:2px;">`;
+    for (const [key, count] of Object.entries(counts)) {
+        const food = swmFoodData[key];
+        sandwichHtml += `<div class="swm-req-icon"><svg viewBox="0 0 24 24" fill="${food.fill}" stroke="${food.stroke}" stroke-width="1.5">${food.svg}</svg></div>`;
+    }
+    sandwichHtml += `</div>`;
+    bubble.innerHTML += sandwichHtml;
+
+    if(c.order.drink) {
+        bubble.innerHTML += `<div class="swm-req-icon"><svg viewBox="0 0 24 24" fill="${swmFoodData['cola'].fill}" stroke="${swmFoodData['cola'].stroke}" stroke-width="1.5">${swmFoodData['cola'].svg}</svg></div>`;
+    }
+
+    document.getElementById(`swmAvatar${index}`).innerText = swmAvatars[Math.floor(Math.random() * swmAvatars.length)];
+    document.getElementById(`swmCustomer${index}`).classList.add('active');
+
+    clearInterval(c.timer);
+    c.timer = setInterval(() => {
+        c.patience -= (1 + swmGameState.day * 0.2);
+        swmUpdatePatienceBar(index);
+        if(c.patience <= 0) {
+            clearInterval(c.timer);
+            document.getElementById(`swmCustomer${index}`).classList.remove('active');
+            swmShowToast("顾客等太久走啦！");
+            setTimeout(() => swmSpawnCustomer(index), 2000);
+        }
+    }, 1000);
+}
+
+function swmUpdatePatienceBar(index) {
+    const bar = document.getElementById(`swmPatience${index}`);
+    const p = swmCustomers[index].patience;
+    bar.style.width = Math.max(0, p) + '%';
+    bar.className = 'swm-patience-fill';
+    if(p < 30) bar.classList.add('low');
+    else if(p < 60) bar.classList.add('medium');
+}
+
+let swmManualCutClicks = 0;
+function swmCutMeat(isAuto = false) {
+    if(swmGameState.meatInTray >= 5) return;
+    
+    const spit = document.getElementById('swmMeatSpit');
+    spit.style.transform = 'scaleX(0.9)';
+    setTimeout(() => spit.style.transform = 'scaleX(1)', 100);
+
+    if(isAuto) {
+        swmGameState.meatInTray++;
+        swmUpdateUI();
+    } else {
+        swmManualCutClicks++;
+        if(swmManualCutClicks >= 3) {
+            swmManualCutClicks = 0;
+            swmGameState.meatInTray++;
+            swmUpdateUI();
+        }
+    }
+}
+
+function swmTakeMeat() {
+    if(swmGameState.meatInTray > 0) {
+        if(swmAddIngredientToBoard('meat')) {
+            swmGameState.meatInTray--;
+            swmUpdateUI();
+        }
+    }
+}
+
+let swmFryTimer;
+function swmHandleFryer() {
+    if(swmGameState.friesState === 'empty') {
+        swmGameState.friesState = 'frying';
+        const pot = document.getElementById('swmFryerPot');
+        const text = document.getElementById('swmFryerText');
+        pot.classList.add('frying');
+        text.innerText = '炸制中';
+
+        swmFryTimer = setTimeout(() => {
+            swmGameState.friesState = 'cooked';
+            pot.classList.remove('frying');
+            document.getElementById('swmFryerOil').style.background = '#ffb300';
+            text.innerText = '熟了!';
+            
+            swmFryTimer = setTimeout(() => {
+                if(swmGameState.friesState === 'cooked') {
+                    swmGameState.friesState = 'burnt';
+                    document.getElementById('swmFryerOil').style.background = '#333333';
+                    text.innerText = '糊了!';
+                }
+            }, 5000);
+        }, 3000);
+    } else if(swmGameState.friesState === 'cooked') {
+        clearTimeout(swmFryTimer);
+        swmGameState.friesState = 'empty';
+        swmGameState.friesInTray = Math.min(5, swmGameState.friesInTray + 3);
+        swmResetFryerUI();
+        swmUpdateUI();
+    } else if(swmGameState.friesState === 'burnt') {
+        swmGameState.friesState = 'empty';
+        swmResetFryerUI();
+        swmShowToast("糊掉的薯条被扔了");
+    }
+}
+
+function swmResetFryerUI() {
+    const pot = document.getElementById('swmFryerPot');
+    pot.classList.remove('frying');
+    document.getElementById('swmFryerOil').style.height = '0%';
+    document.getElementById('swmFryerOil').style.background = 'rgba(255, 193, 7, 0.6)';
+    document.getElementById('swmFryerText').innerText = '下锅';
+}
+
+function swmTakeFries() {
+    if(swmGameState.friesInTray > 0) {
+        if(swmAddIngredientToBoard('fries')) {
+            swmGameState.friesInTray--;
+            swmUpdateUI();
+        }
+    }
+}
+
+function swmHandleDrink() {
+    const fill = document.getElementById('swmDrinkFill');
+    if(swmGameState.drinkState === 'empty') {
+        swmGameState.drinkState = 'pouring';
+        fill.style.height = '100%';
+        setTimeout(() => {
+            swmGameState.drinkState = 'ready';
+        }, 2000);
+    } else if(swmGameState.drinkState === 'ready') {
+        let served = false;
+        for(let i=0; i<2; i++) {
+            const c = swmCustomers[i];
+            if(c.active && c.order.drink) {
+                c.order.drink = false;
+                served = true;
+                swmShowFloatingText('+5', `swmCustomer${i}`);
+                swmGameState.coins += 5;
+                swmUpdateUI();
+                
+                const bubble = document.getElementById(`swmReqBubble${i}`);
+                if(bubble.lastChild.innerHTML.includes('M6 5h12')) {
+                    bubble.removeChild(bubble.lastChild);
+                }
+                
+                swmCheckOrderComplete(i);
+                break;
+            }
+        }
+        
+        if(served) {
+            swmGameState.drinkState = 'empty';
+            fill.style.transition = 'none';
+            fill.style.height = '0%';
+            setTimeout(() => fill.style.transition = 'height 2s linear', 50);
+        } else {
+            swmShowToast("没有顾客需要饮料！");
+        }
+    }
+}
+
+function swmAddIngredient(item) {
+    swmAddIngredientToBoard(item);
+}
+
+function swmAddIngredientToBoard(item) {
+    if(swmGameState.plateStatus === 'rolled' || swmGameState.plateStatus === 'packaged') {
+        swmShowToast("已经卷起来了！");
+        return false;
+    }
+    
+    const base = document.getElementById('swmWrapBase');
+    
+    if(item === 'bread') {
+        if(swmGameState.plateStatus !== 'empty') {
+            swmShowToast("砧板上已经有东西了！");
+            return false;
+        }
+        swmGameState.plateStatus = 'bread';
+        base.classList.add('has-bread');
+        document.getElementById('swmBoardHint').style.display = 'none';
+        swmGameState.plate.push('bread');
+        return true;
+    }
+
+    if(swmGameState.plateStatus !== 'bread') {
+        swmShowToast("请先放一张饼皮！");
+        return false;
+    }
+
+    if(swmGameState.plate.length >= 8) {
+        swmShowToast("放不下啦！");
+        return false;
+    }
+
+    swmGameState.plate.push(item);
+    const food = swmFoodData[item];
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("class", "swm-added-item");
+    svg.setAttribute("fill", food.fill);
+    svg.setAttribute("stroke", food.stroke);
+    svg.setAttribute("stroke-width", "1.5");
+    svg.innerHTML = food.svg;
+    base.appendChild(svg);
+    return true;
+}
+
+function swmRollWrap() {
+    if(swmGameState.plateStatus !== 'bread') return swmShowToast("无法操作！");
+    if(!swmGameState.plate.includes('meat')) return swmShowToast("必须加烤肉！");
+    
+    swmGameState.plateStatus = 'rolled';
+    const base = document.getElementById('swmWrapBase');
+    base.innerHTML = '<div style="font-weight:900; color:#fff; font-size:16px;">沙威玛</div>';
+    base.className = 'swm-wrap-base rolled';
+}
+
+function swmPackageWrap() {
+    if(swmGameState.plateStatus !== 'rolled') return swmShowToast("请先卷起来！");
+    
+    swmGameState.plateStatus = 'packaged';
+    const base = document.getElementById('swmWrapBase');
+    base.innerHTML = '<div style="font-weight:900; color:#111; font-size:16px; background:#fff; padding:2px 8px; border-radius:8px;">已包装</div>';
+    base.className = 'swm-wrap-base packaged';
+}
+
+function swmTrashFood() {
+    swmGameState.plate = [];
+    swmGameState.plateStatus = 'empty';
+    const base = document.getElementById('swmWrapBase');
+    base.className = 'swm-wrap-base';
+    base.innerHTML = '<span class="swm-board-hint" id="swmBoardHint">放饼皮</span>';
+}
+
+function swmServeCustomer(index) {
+    if(swmGameState.plateStatus !== 'packaged') {
+        return swmShowToast("请先完成沙威玛的包装！");
+    }
+
+    const c = swmCustomers[index];
+    if(!c.active) return;
+
+    const sortedOrder = [...c.order.sandwich].sort().join(',');
+    const sortedPlate = [...swmGameState.plate].sort().join(',');
+
+    if(sortedOrder === sortedPlate) {
+        c.order.sandwich = []; 
+        
+        let reward = swmGameState.plate.length * 5 + swmGameState.upgrades.priceBonus;
+        swmGameState.coins += reward;
+        swmShowFloatingText(`+${reward}`, `swmCustomer${index}`);
+        
+        swmTrashFood(); 
+        swmCheckOrderComplete(index);
+    } else {
+        swmShowToast("配方不对哦！");
+    }
+}
+
+function swmCheckOrderComplete(index) {
+    const c = swmCustomers[index];
+    if(c.order.sandwich.length === 0 && !c.order.drink) {
+        clearInterval(c.timer);
+        
+        const patienceBonus = Math.floor(c.patience / 10);
+        let totalReward = patienceBonus;
+        if(patienceBonus > 0) {
+            swmGameState.coins += patienceBonus;
+            setTimeout(() => swmShowFloatingText(`+${patienceBonus} 小费`, `swmCustomer${index}`), 500);
+        }
+        
+        // 核心：将赚到的钱记录到本次营业总收益中，退出时统一结算
+        // 假设这单总共赚了 (沙威玛钱 + 饮料钱 + 小费)，为了简化，我们直接给收益加 10 元作为完成一单的奖励
+        swmSessionEarnings += 10;
+        
+        swmUpdateUI();
+        document.getElementById(`swmCustomer${index}`).classList.remove('active');
+        
+        if(swmGameState.coins >= swmGameState.day * 100) {
+            swmGameState.day++;
+            swmShowLevelUp();
+        }
+        
+        setTimeout(() => swmSpawnCustomer(index), 1500);
+    }
+}
+
+function swmOpenShop() { document.getElementById('swmShopModal').classList.add('show'); }
+function swmCloseShop() { document.getElementById('swmShopModal').classList.remove('show'); }
+
+function swmBuyUpgrade(type, price) {
+    if(swmGameState.coins >= price) {
+        swmGameState.coins -= price;
+        swmGameState.upgrades[type] = true;
+        if(type === 'price') swmGameState.upgrades.priceBonus = 5;
+        
+        swmUpdateUI();
+        
+        const btn = document.getElementById(`swm-upg-${type}`);
+        btn.innerText = '已购买';
+        btn.classList.add('sold');
+        
+        if(type === 'syrup') {
+            const grid = document.getElementById('swmIngredientsGrid');
+            grid.innerHTML += `
+                <div class="swm-ing-box" style="border-color: #880e4f;" onclick="swmAddIngredient('syrup')">
+                    <svg viewBox="0 0 24 24" fill="#880e4f" stroke="#4a0024" stroke-width="1.5"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path></svg>
+                    <span class="swm-ing-name">石榴糖浆</span>
+                </div>
+            `;
+        }
+    } else {
+        swmShowToast("金币不足！");
+    }
+}
+
+function swmShowFloatingText(text, targetId) {
+    const target = document.getElementById(targetId);
+    const rect = target.getBoundingClientRect();
+    
+    const floatEl = document.createElement('div');
+    floatEl.className = 'swm-floating-text';
+    floatEl.innerText = text;
+    floatEl.style.left = (rect.left + rect.width / 2 - 15) + 'px';
+    floatEl.style.top = (rect.top + 20) + 'px';
+    
+    document.body.appendChild(floatEl);
+    setTimeout(() => floatEl.remove(), 1000);
+}
+
+function swmShowLevelUp() {
+    const overlay = document.getElementById('swmLevelUpOverlay');
+    document.getElementById('swmLevelUpTitle').innerText = `DAY ${swmGameState.day}`;
+    overlay.classList.add('show');
+    setTimeout(() => overlay.classList.remove('show'), 2000);
+}
+
+let swmToastTimer;
+function swmShowToast(msg) {
+    const toast = document.getElementById('swmToastMsg');
+    toast.innerText = msg;
+    toast.classList.add('show');
+    clearTimeout(swmToastTimer);
+    swmToastTimer = setTimeout(() => toast.classList.remove('show'), 1500);
+}
+
+// 渲染快捷切换账号列表
+function renderAlipaySwitchAccounts() {
+
+    const listEl = document.getElementById('alipaySwitchAccountList');
+    listEl.innerHTML = '';
+    
+    let allEntities = [];
+    if (typeof getAllEntities === 'function') {
+        allEntities = getAllEntities();
+    } else {
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        allEntities = chars.concat(accounts);
+    }
+
+    // 过滤掉当前正在登录的账号，并且只显示用户账号
+    const otherAccounts = allEntities.filter(acc => acc.isAccount && acc.id !== currentAlipayLoginId);
+
+    if (otherAccounts.length === 0) {
+        listEl.innerHTML = '<div style="padding: 16px 20px; font-size: 14px; color: #888; text-align: center;">暂无其他账号可切换</div>';
+        return;
+    }
+
+    otherAccounts.forEach(acc => {
+        const item = document.createElement('div');
+        item.className = 'alipay-settings-item';
+        
+        item.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <div style="width: 32px; height: 32px; border-radius: 8px; background-color: #eee; background-image: url('${acc.avatarUrl || ''}'); background-size: cover; background-position: center;"></div>
+                <span>${acc.netName || acc.name || '未命名'}</span>
+            </div>
+            <svg viewBox="0 0 24 24" width="16" height="16" stroke="#ccc" stroke-width="2" fill="none"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        `;
+        
+        item.onclick = () => {
+            alipayLogin(acc.id);
+            closeAlipaySettings();
+            alert(`已切换至账号: ${acc.netName || acc.name}`);
+        };
+        
+        listEl.appendChild(item);
+    });
+}
+
+// ==========================================
+// 每日签到逻辑
+// ==========================================
+function openAlipayCheckin() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    document.getElementById('alipay-page-checkin').classList.add('active');
+    renderAlipayCheckin();
+}
+
+function closeAlipayCheckin() {
+    document.getElementById('alipay-page-checkin').classList.remove('active');
+}
+
+function renderAlipayCheckin() {
+    const data = JSON.parse(ChatDB.getItem(`alipay_checkin_data_${currentAlipayLoginId}`) || '{"lastCheckinDate":"","streak":0,"history":[]}');
+    
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth()+1).padStart(2,'0')}-${String(yesterday.getDate()).padStart(2,'0')}`;
+
+    // 检查断签：如果最后签到日期既不是今天也不是昨天，且连续签到大于0，则断签重置
+    if (data.lastCheckinDate !== todayStr && data.lastCheckinDate !== yesterdayStr && data.streak > 0) {
+        data.streak = 0;
+        ChatDB.setItem(`alipay_checkin_data_${currentAlipayLoginId}`, JSON.stringify(data));
+    }
+
+    document.getElementById('aliCheckinStreak').innerText = data.streak;
+    // 进度条按 7 天一个周期计算
+    const progress = Math.min(100, ((data.streak % 7) / 7) * 100);
+    document.getElementById('aliCheckinProgress').style.width = `${progress === 0 && data.streak > 0 ? 100 : progress}%`;
+
+    const btn = document.getElementById('aliCheckinBtn');
+    if (data.lastCheckinDate === todayStr) {
+        btn.innerText = '今日已签到';
+        btn.style.background = '#ccc';
+        btn.style.boxShadow = 'none';
+        btn.style.pointerEvents = 'none';
+    } else {
+        btn.innerText = '立即签到';
+        btn.style.background = 'var(--ali-text-main)';
+        btn.style.boxShadow = '0 8px 20px rgba(0,0,0,0.15)';
+        btn.style.pointerEvents = 'auto';
+    }
+
+    // 渲染日历
+    document.getElementById('aliCalendarMonth').innerText = `${now.getFullYear()}年${now.getMonth()+1}月`;
+    const grid = document.getElementById('aliCalendarGrid');
+    grid.innerHTML = '';
+
+    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).getDay();
+    const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+
+    // 填充空白天数
+    for (let i = 0; i < firstDay; i++) {
+        grid.innerHTML += `<div class="ali-cal-day empty"></div>`;
+    }
+
+    // 填充实际天数
+    for (let i = 1; i <= daysInMonth; i++) {
+        const dateStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(i).padStart(2,'0')}`;
+        let className = 'ali-cal-day';
+        if (data.history.includes(dateStr)) {
+            className += ' signed';
+        } else if (dateStr === todayStr) {
+            className += ' today';
+        } else if (i > now.getDate()) {
+            className += ' future';
+        }
+        grid.innerHTML += `<div class="${className}">${i}</div>`;
+    }
+}
+
+function doAlipayCheckin() {
+    if (!currentAlipayLoginId) return;
+    let data = JSON.parse(ChatDB.getItem(`alipay_checkin_data_${currentAlipayLoginId}`) || '{"lastCheckinDate":"","streak":0,"history":[]}');
+    
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+    
+    if (data.lastCheckinDate === todayStr) return;
+
+    data.lastCheckinDate = todayStr;
+    data.streak += 1;
+    if (!data.history.includes(todayStr)) {
+        data.history.push(todayStr);
+    }
+    
+    ChatDB.setItem(`alipay_checkin_data_${currentAlipayLoginId}`, JSON.stringify(data));
+
+    // 发放奖励
+    let reward = 2; // 基础奖励 2 元
+    let msg = `签到成功！获得 ${reward} 元奖励。`;
+    
+    if (data.streak % 7 === 0) {
+        reward += 10; // 连续7天额外奖励 10 元
+        msg = `连续签到 ${data.streak} 天！获得大礼包 ${reward} 元！`;
+    }
+
+    let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+    balance += reward;
+    ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+    addAlipayRecord(currentAlipayLoginId, 'in', '每日签到奖励', reward);
+
+    alert(msg);
+    renderAlipayCheckin();
+    
+    // 如果我的页面是激活的，刷新余额
+    if (document.getElementById('alipay-page-me').classList.contains('active')) {
+        renderAlipayData();
+    }
+}
+
+// ==========================================
+// 俄罗斯方块 游戏逻辑
+// ==========================================
+let tetrisCanvas, tetrisCtx, tetrisNextCanvas, tetrisNextCtx;
+let tetrisArena, tetrisPlayer;
+let tetrisDropCounter = 0;
+let tetrisDropInterval = 1000;
+let tetrisLastTime = 0;
+let tetrisIsGameOver = false;
+let tetrisAnimationId;
+
+const TETRIS_SHAPES = [
+    [],
+    [[0,0,0,0], [1,1,1,1], [0,0,0,0], [0,0,0,0]], // I
+    [[2,0,0], [2,2,2], [0,0,0]], // J
+    [[0,0,3], [3,3,3], [0,0,0]], // L
+    [[4,4], [4,4]], // O
+    [[0,5,5], [5,5,0], [0,0,0]], // S
+    [[0,6,0], [6,6,6], [0,0,0]], // T
+    [[7,7,0], [0,7,7], [0,0,0]]  // Z
+];
+
+const TETRIS_COLORS = [
+    null,
+    '#00f0ff', // I - Neon Blue
+    '#0055ff', // J - Deep Blue
+    '#ff9500', // L - Orange
+    '#ffe600', // O - Yellow
+    '#39ff14', // S - Neon Green
+    '#b026ff', // T - Purple
+    '#ff007f'  // Z - Neon Pink
+];
+
+function openTetrisGame() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    document.getElementById('tetrisPanel').classList.add('show');
+    tetrisInit();
+}
+
+function closeTetrisGame() {
+    document.getElementById('tetrisPanel').classList.remove('show');
+    cancelAnimationFrame(tetrisAnimationId);
+    
+    // 退出时结算奖励
+    if (tetrisPlayer && tetrisPlayer.reward && !tetrisIsGameOver) {
+        let reward = parseFloat(tetrisPlayer.reward);
+        if (reward > 0 && currentAlipayLoginId) {
+            let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+            balance += reward;
+            ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+            addAlipayRecord(currentAlipayLoginId, 'in', '俄罗斯方块奖励', reward);
+            
+            if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                renderAlipayData();
+            }
+            alert(`游戏结束，共赚取 ${reward} 元，已存入支付宝余额！`);
+            tetrisPlayer.reward = '0.00';
+        }
+    }
+}
+
+function tetrisInit() {
+    if (!tetrisCanvas) {
+        tetrisCanvas = document.getElementById('tetrisCanvas');
+        tetrisCtx = tetrisCanvas.getContext('2d');
+        tetrisNextCanvas = document.getElementById('tetrisNextCanvas');
+        tetrisNextCtx = tetrisNextCanvas.getContext('2d');
+        
+        tetrisCtx.scale(20, 20);
+        tetrisNextCtx.scale(15, 15);
+        
+        tetrisBindControls();
+    }
+    
+    tetrisArena = tetrisCreateMatrix(10, 20);
+    tetrisPlayer = {
+        pos: {x: 0, y: 0},
+        matrix: null,
+        nextMatrix: null,
+        score: 0,
+        level: 1,
+        lines: 0,
+        reward: '0.00'
+    };
+    
+    tetrisResetGame();
+}
+
+function tetrisCreateMatrix(w, h) {
+    const matrix = [];
+    while (h--) {
+        matrix.push(new Array(w).fill(0));
+    }
+    return matrix;
+}
+
+function tetrisDrawMatrix(matrix, offset, ctx = tetrisCtx) {
+    matrix.forEach((row, y) => {
+        row.forEach((value, x) => {
+            if (value !== 0) {
+                ctx.fillStyle = TETRIS_COLORS[value];
+                ctx.fillRect(x + offset.x, y + offset.y, 1, 1);
+                
+                ctx.fillStyle = 'rgba(255,255,255,0.3)';
+                ctx.fillRect(x + offset.x, y + offset.y, 1, 0.2);
+                ctx.fillRect(x + offset.x, y + offset.y, 0.2, 1);
+                
+                ctx.fillStyle = 'rgba(0,0,0,0.3)';
+                ctx.fillRect(x + offset.x, y + offset.y + 0.8, 1, 0.2);
+                ctx.fillRect(x + offset.x + 0.8, y + offset.y, 0.2, 1);
+            }
+        });
+    });
+}
+
+function tetrisCollide(arena, player) {
+    const m = player.matrix;
+    const o = player.pos;
+    for (let y = 0; y < m.length; ++y) {
+        for (let x = 0; x < m[y].length; ++x) {
+            if (m[y][x] !== 0 &&
+               (arena[y + o.y] && arena[y + o.y][x + o.x]) !== 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function tetrisMerge(arena, player) {
+    player.matrix.forEach((row, y) => {
+        row.forEach((value, x) => {
+            if (value !== 0) {
+                arena[y + player.pos.y][x + player.pos.x] = value;
+            }
+        });
+    });
+}
+
+function tetrisArenaSweep() {
+    let rowCount = 0;
+    outer: for (let y = tetrisArena.length - 1; y >= 0; --y) {
+        for (let x = 0; x < tetrisArena[y].length; ++x) {
+            if (tetrisArena[y][x] === 0) {
+                continue outer;
+            }
+        }
+        const row = tetrisArena.splice(y, 1)[0].fill(0);
+        tetrisArena.unshift(row);
+        ++y;
+        rowCount++;
+    }
+    
+    if (rowCount > 0) {
+        const baseScores = [0, 100, 300, 500, 800];
+        tetrisPlayer.score += baseScores[rowCount] * tetrisPlayer.level;
+        tetrisPlayer.lines += rowCount;
+        
+        if (tetrisPlayer.lines >= tetrisPlayer.level * 10) {
+            tetrisPlayer.level++;
+            tetrisDropInterval = Math.max(100, 1000 - (tetrisPlayer.level - 1) * 100);
+            tetrisShowToast(`LEVEL UP!<br>SPEED INCREASED`);
+        }
+        
+        // 核心修改：降低赚钱门槛，100分 = 1元 (消除1行得100分)
+        tetrisPlayer.reward = (tetrisPlayer.score / 100).toFixed(2);
+        tetrisUpdateScore();
+    }
+}
+
+function tetrisCreatePiece() {
+    const pieces = 'IJLOSTZ';
+    const type = pieces[Math.floor(Math.random() * pieces.length)];
+    const index = pieces.indexOf(type) + 1;
+    return JSON.parse(JSON.stringify(TETRIS_SHAPES[index]));
+}
+
+function tetrisPlayerReset() {
+    if (!tetrisPlayer.nextMatrix) {
+        tetrisPlayer.nextMatrix = tetrisCreatePiece();
+    }
+    tetrisPlayer.matrix = tetrisPlayer.nextMatrix;
+    tetrisPlayer.nextMatrix = tetrisCreatePiece();
+    
+    tetrisPlayer.pos.y = 0;
+    tetrisPlayer.pos.x = Math.floor(tetrisArena[0].length / 2) - Math.floor(tetrisPlayer.matrix[0].length / 2);
+    
+    if (tetrisCollide(tetrisArena, tetrisPlayer)) {
+        tetrisIsGameOver = true;
+        document.getElementById('tetrisGameOverScreen').classList.add('show');
+        
+        let reward = parseFloat(tetrisPlayer.reward);
+        if(reward > 0) {
+            if (!currentAlipayLoginId) {
+                tetrisShowToast(`GAME OVER<br>未登录，无法获得奖励`);
+            } else {
+                tetrisShowToast(`GAME OVER<br>EARNED ¥${tetrisPlayer.reward}`);
+                
+                // 核心修改：将奖励真实打入支付宝余额，并生成账单
+                let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+                balance += reward;
+                ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+                addAlipayRecord(currentAlipayLoginId, 'in', '俄罗斯方块奖励', reward);
+                
+                // 如果当前停留在支付宝“我的”页面，实时刷新余额显示
+                if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                    renderAlipayData();
+                }
+                tetrisPlayer.reward = '0.00'; // 防止重复领取
+            }
+        }
+    }
+    tetrisDrawNext();
+}
+
+function tetrisPlayerDrop() {
+    tetrisPlayer.pos.y++;
+    if (tetrisCollide(tetrisArena, tetrisPlayer)) {
+        tetrisPlayer.pos.y--;
+        tetrisMerge(tetrisArena, tetrisPlayer);
+        tetrisPlayerReset();
+        tetrisArenaSweep();
+    }
+    tetrisDropCounter = 0;
+}
+
+function tetrisPlayerMove(offset) {
+    tetrisPlayer.pos.x += offset;
+    if (tetrisCollide(tetrisArena, tetrisPlayer)) {
+        tetrisPlayer.pos.x -= offset;
+    }
+}
+
+function tetrisPlayerRotate() {
+    const pos = tetrisPlayer.pos.x;
+    let offset = 1;
+    tetrisRotate(tetrisPlayer.matrix);
+    while (tetrisCollide(tetrisArena, tetrisPlayer)) {
+        tetrisPlayer.pos.x += offset;
+        offset = -(offset + (offset > 0 ? 1 : -1));
+        if (offset > tetrisPlayer.matrix[0].length) {
+            tetrisRotate(tetrisPlayer.matrix, -1);
+            tetrisPlayer.pos.x = pos;
+            return;
+        }
+    }
+}
+
+function tetrisRotate(matrix, dir = 1) {
+    for (let y = 0; y < matrix.length; ++y) {
+        for (let x = 0; x < y; ++x) {
+            [matrix[x][y], matrix[y][x]] = [matrix[y][x], matrix[x][y]];
+        }
+    }
+    if (dir > 0) {
+        matrix.forEach(row => row.reverse());
+    } else {
+        matrix.reverse();
+    }
+}
+
+function tetrisPlayerHardDrop() {
+    while (!tetrisCollide(tetrisArena, tetrisPlayer)) {
+        tetrisPlayer.pos.y++;
+    }
+    tetrisPlayer.pos.y--;
+    tetrisMerge(tetrisArena, tetrisPlayer);
+    tetrisPlayerReset();
+    tetrisArenaSweep();
+    tetrisDropCounter = 0;
+}
+
+function tetrisDraw() {
+    tetrisCtx.fillStyle = '#000';
+    tetrisCtx.fillRect(0, 0, tetrisCanvas.width, tetrisCanvas.height);
+
+    tetrisDrawMatrix(tetrisArena, {x: 0, y: 0});
+    tetrisDrawMatrix(tetrisPlayer.matrix, tetrisPlayer.pos);
+}
+
+function tetrisDrawNext() {
+    tetrisNextCtx.fillStyle = '#000';
+    tetrisNextCtx.fillRect(0, 0, tetrisNextCanvas.width, tetrisNextCanvas.height);
+    
+    const offset = {
+        x: 2 - tetrisPlayer.nextMatrix[0].length / 2,
+        y: 2 - tetrisPlayer.nextMatrix.length / 2
+    };
+    tetrisDrawMatrix(tetrisPlayer.nextMatrix, offset, tetrisNextCtx);
+}
+
+function tetrisUpdateScore() {
+    document.getElementById('tetrisScoreVal').innerText = tetrisPlayer.score;
+    document.getElementById('tetrisLevelVal').innerText = tetrisPlayer.level;
+    document.getElementById('tetrisLinesVal').innerText = tetrisPlayer.lines;
+    document.getElementById('tetrisRewardVal').innerText = `¥${tetrisPlayer.reward}`;
+}
+
+function tetrisUpdate(time = 0) {
+    if (tetrisIsGameOver) return;
+    
+    const deltaTime = time - tetrisLastTime;
+    tetrisLastTime = time;
+    tetrisDropCounter += deltaTime;
+    
+    if (tetrisDropCounter > tetrisDropInterval) {
+        tetrisPlayerDrop();
+    }
+    
+    tetrisDraw();
+    tetrisAnimationId = requestAnimationFrame(tetrisUpdate);
+}
+
+function tetrisResetGame() {
+    tetrisArena.forEach(row => row.fill(0));
+    tetrisPlayer.score = 0;
+    tetrisPlayer.level = 1;
+    tetrisPlayer.lines = 0;
+    tetrisPlayer.reward = '0.00';
+    tetrisDropInterval = 1000;
+    tetrisUpdateScore();
+    tetrisIsGameOver = false;
+    document.getElementById('tetrisGameOverScreen').classList.remove('show');
+    tetrisPlayerReset();
+    tetrisUpdate();
+}
+
+let tetrisToastTimer;
+function tetrisShowToast(msg) {
+    const toast = document.getElementById('tetrisToastMsg');
+    toast.innerHTML = msg;
+    toast.classList.add('show');
+    clearTimeout(tetrisToastTimer);
+    tetrisToastTimer = setTimeout(() => toast.classList.remove('show'), 2000);
+}
+
+function tetrisBindControls() {
+    function bindBtn(id, action, continuous = false) {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        let interval = null;
+        
+        const startAction = (e) => {
+            e.preventDefault();
+            if (tetrisIsGameOver) return;
+            
+            // 核心修复：防止多点触控或鼠标/触摸同时触发导致产生多个无法清除的定时器
+            if (interval !== null) {
+                clearInterval(interval);
+                interval = null;
+            }
+            
+            if (action) action();
+            
+            if (continuous && action) {
+                interval = setInterval(action, 80); // 稍微调快一点连续移动的速度，手感更好
+            }
+        };
+        
+        const stopAction = (e) => {
+            e.preventDefault();
+            if (interval !== null) {
+                clearInterval(interval);
+                interval = null;
+            }
+        };
+
+        btn.addEventListener('touchstart', startAction, {passive: false});
+        btn.addEventListener('touchend', stopAction);
+        btn.addEventListener('touchcancel', stopAction); // 增加 touchcancel 防止手指滑出屏幕导致未触发 touchend
+        btn.addEventListener('mousedown', startAction);
+        btn.addEventListener('mouseup', stopAction);
+        btn.addEventListener('mouseleave', stopAction);
+    }
+
+    bindBtn('tetrisBtnLeft', () => tetrisPlayerMove(-1), true);
+    bindBtn('tetrisBtnRight', () => tetrisPlayerMove(1), true);
+    bindBtn('tetrisBtnDown', () => tetrisPlayerDrop(), true);
+    bindBtn('tetrisBtnUp', null, false); // 上键仅占位，不绑定任何动作
+    bindBtn('tetrisBtnRotate', () => tetrisPlayerRotate(), false); // A键旋转
+    bindBtn('tetrisBtnDrop', () => tetrisPlayerHardDrop(), false); // B键直接下落
+}
+// ==========================================
+// 2048 游戏逻辑 (重写版，流畅灵敏)
+// ==========================================
+let game2048Board = [];
+let game2048Score = 0;
+let game2048Reward = 0.00;
+let game2048Cells = [];
+let game2048TouchStartX = 0;
+let game2048TouchStartY = 0;
+let game2048TouchMoved = false;
+const G2048_SIZE = 4;
+
+// 打开2048游戏
+function open2048Game() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    document.getElementById('game2048Panel').classList.add('show');
+    init2048Game();
+}
+
+// 关闭2048游戏
+function close2048Game() {
+    document.getElementById('game2048Panel').classList.remove('show');
+    // 移除监听器，避免内存泄漏
+    document.removeEventListener('keydown', handle2048Keydown);
+    const board = document.getElementById('game2048Board');
+    if (board) {
+        board.removeEventListener('touchstart', on2048TouchStart);
+        board.removeEventListener('touchmove', on2048TouchMove);
+        board.removeEventListener('touchend', on2048TouchEnd);
+        board.removeEventListener('touchcancel', on2048TouchEnd);
+    }
+    // 退出结算奖励
+    if (game2048Score > 0 && currentAlipayLoginId) {
+        let reward = (game2048Score / 200).toFixed(2);
+        if (parseFloat(reward) > 0) {
+            let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+            balance += parseFloat(reward);
+            ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+            addAlipayRecord(currentAlipayLoginId, 'in', '2048游戏奖励', reward);
+            
+            if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                renderAlipayData();
+            }
+            alert(`游戏结束，共赚取 ${reward} 元，已存入支付宝余额！`);
+        }
+    }
+    game2048Score = 0;
+    game2048Reward = 0.00;
+}
+
+// 初始化2048游戏
+function init2048Game() {
+    game2048Board = Array.from({length: G2048_SIZE}, () => Array(G2048_SIZE).fill(0));
+    game2048Score = 0;
+    game2048Reward = 0.00;
+    game2048Cells = document.querySelectorAll('#game2048Board .grid-cell');
+    
+    update2048UI();
+    add2048RandomNumber();
+    add2048RandomNumber();
+    
+    // 先移除旧的监听器，防止重复绑定
+    document.removeEventListener('keydown', handle2048Keydown);
+    document.addEventListener('keydown', handle2048Keydown);
+    
+    const board = document.getElementById('game2048Board');
+    if (board) {
+        board.removeEventListener('touchstart', on2048TouchStart);
+        board.removeEventListener('touchmove', on2048TouchMove);
+        board.removeEventListener('touchend', on2048TouchEnd);
+        board.removeEventListener('touchcancel', on2048TouchEnd);
+        board.addEventListener('touchstart', on2048TouchStart, { passive: false });
+        board.addEventListener('touchmove', on2048TouchMove, { passive: false });
+        board.addEventListener('touchend', on2048TouchEnd, { passive: false });
+        board.addEventListener('touchcancel', on2048TouchEnd, { passive: false });
+    }
+}
+
+// 更新2048界面
+function update2048UI() {
+    document.getElementById('game2048Score').innerText = game2048Score;
+    game2048Reward = (game2048Score / 200).toFixed(2);
+    document.getElementById('game2048Reward').innerText = `¥${game2048Reward}`;
+
+    for (let r = 0; r < G2048_SIZE; r++) {
+        for (let c = 0; c < G2048_SIZE; c++) {
+            const value = game2048Board[r][c];
+            const index = r * G2048_SIZE + c;
+            const cell = game2048Cells[index];
+            cell.innerText = value || '';
+            cell.className = 'grid-cell';
+            if (value) {
+                cell.classList.add(`grid-cell-${value}`);
+            }
+        }
+    }
+}
+
+// 随机生成数字2/4
+function add2048RandomNumber() {
+    const emptyCells = [];
+    for (let i = 0; i < G2048_SIZE; i++) {
+        for (let j = 0; j < G2048_SIZE; j++) {
+            if (game2048Board[i][j] === 0) {
+                emptyCells.push([i, j]);
+            }
+        }
+    }
+    if (emptyCells.length === 0) return false;
+    const [row, col] = emptyCells[Math.floor(Math.random() * emptyCells.length)];
+    game2048Board[row][col] = Math.random() < 0.9 ? 2 : 4;
+    update2048UI();
+    return true;
+}
+
+// 检查游戏是否结束
+function check2048GameOver() {
+    for (let i = 0; i < G2048_SIZE; i++) {
+        for (let j = 0; j < G2048_SIZE; j++) {
+            if (game2048Board[i][j] === 0) return false;
+            if (j < G2048_SIZE - 1 && game2048Board[i][j] === game2048Board[i][j+1]) return false;
+            if (i < G2048_SIZE - 1 && game2048Board[i][j] === game2048Board[i+1][j]) return false;
+        }
+    }
+    return true;
+}
+
+// 左移一行
+function move2048RowLeft(arr) {
+    let filtered = arr.filter(v => v !== 0);
+    for (let i = 0; i < filtered.length - 1; i++) {
+        if (filtered[i] === filtered[i+1]) {
+            filtered[i] *= 2;
+            game2048Score += filtered[i];
+            filtered[i+1] = 0;
+        }
+    }
+    filtered = filtered.filter(v => v !== 0);
+    while (filtered.length < G2048_SIZE) filtered.push(0);
+    return filtered;
+}
+
+// 棋盘旋转 一次旋转90度顺时针
+function rotate2048Board() {
+    const n = G2048_SIZE;
+    const newBoard = Array.from({length: n}, () => Array(n).fill(0));
+    for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+            newBoard[j][n - 1 - i] = game2048Board[i][j];
+        }
+    }
+    game2048Board = newBoard;
+}
+
+// 执行方向移动
+function do2048Move(direction) {
+    const copyBefore = JSON.stringify(game2048Board);
+    switch (direction) {
+        case 'left':
+            for (let i = 0; i < G2048_SIZE; i++) game2048Board[i] = move2048RowLeft(game2048Board[i]);
+            break;
+        case 'right':
+            for (let i = 0; i < G2048_SIZE; i++) game2048Board[i] = move2048RowLeft([...game2048Board[i]].reverse()).reverse();
+            break;
+        case 'up':
+            rotate2048Board(); // 向上转一次
+            rotate2048Board(); // 再转一次就是向下，实际上向上等于顺时针转两次再左移？我们需要标准实现：向上 = 逆时针转一次，左移，顺时针转一次
+            // 用更简单的方法：上 = 先转置再对每行左移？ 为保持一致，我们用旋转三次的方法等价于逆时针一次
+            // 统一采用旋转技巧：上 = 逆时针90度 = 顺时针旋转3次
+            rotate2048Board(); // 第三次
+            for (let i = 0; i < G2048_SIZE; i++) game2048Board[i] = move2048RowLeft(game2048Board[i]);
+            rotate2048Board(); // 回转一次 回到原始方向
+            break;
+        case 'down':
+            rotate2048Board(); // 顺时针一次
+            for (let i = 0; i < G2048_SIZE; i++) game2048Board[i] = move2048RowLeft(game2048Board[i]);
+            for (let k = 0; k < 3; k++) rotate2048Board(); // 转回三次
+            break;
+    }
+    if (JSON.stringify(game2048Board) !== copyBefore) {
+        add2048RandomNumber();
+        update2048UI();
+        if (check2048GameOver()) {
+            setTimeout(() => {
+                alert('Game Over! 奖励已自动结算。');
+                // 自动结算奖励 (不退出面板，用户可手动领取)
+            }, 100);
+        }
+    }
+}
+
+// 键盘控制
+function handle2048Keydown(e) {
+    if (!document.getElementById('game2048Panel').classList.contains('show')) return;
+    e.preventDefault();
+    switch (e.key) {
+        case 'ArrowLeft': do2048Move('left'); break;
+        case 'ArrowRight': do2048Move('right'); break;
+        case 'ArrowUp': do2048Move('up'); break;
+        case 'ArrowDown': do2048Move('down'); break;
+    }
+}
+
+// 触屏事件处理函数 (非被动，以阻止页面滚动)
+function on2048TouchStart(e) {
+    e.preventDefault();
+    const touch = e.touches[0];
+    game2048TouchStartX = touch.clientX;
+    game2048TouchStartY = touch.clientY;
+    game2048TouchMoved = false;
+}
+
+function on2048TouchMove(e) {
+    e.preventDefault();
+    game2048TouchMoved = true;
+}
+
+function on2048TouchEnd(e) {
+    e.preventDefault();
+    if (!game2048TouchStartX || !game2048TouchStartY) return;
+    const touch = e.changedTouches[0];
+    const dx = touch.clientX - game2048TouchStartX;
+    const dy = touch.clientY - game2048TouchStartY;
+    const absDx = Math.abs(dx);
+    const absDy = Math.abs(dy);
+    const threshold = 15; // 极低阈值，手指轻轻滑动即可触发
+
+    if (absDx < threshold && absDy < threshold) return; // 忽略轻触
+
+    if (absDx > absDy) {
+        do2048Move(dx > 0 ? 'right' : 'left');
+    } else {
+        do2048Move(dy > 0 ? 'down' : 'up');
+    }
+    game2048TouchStartX = 0;
+    game2048TouchStartY = 0;
+}
+
+// 领取奖励 (保持不变)
+function get2048Reward() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    if (parseFloat(game2048Reward) <= 0) return alert('暂无奖励可领取！');
+    
+    let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+    balance += parseFloat(game2048Reward);
+    ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+    addAlipayRecord(currentAlipayLoginId, 'in', '2048游戏奖励', game2048Reward);
+    
+    if (document.getElementById('alipay-page-me').classList.contains('active')) {
+        renderAlipayData();
+    }
+    
+    alert(`成功领取 ${game2048Reward} 元，已存入支付宝余额！`);
+    game2048Score = 0;
+    game2048Reward = 0.00;
+    update2048UI();
+}
+// ==========================================
+// 滑动拼图 游戏逻辑
+// ==========================================
+let puzzleGridSize = 4;
+let puzzleTiles = [];
+let puzzleEmptyRow, puzzleEmptyCol;
+let puzzleMoveCount = 0;
+let puzzleIsActive = false;
+let puzzleIsComplete = false;
+let puzzleImageUrl = '';
+let puzzleReward = 0.00;
+
+// 打开拼图面板
+function openPuzzleGame() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    document.getElementById('puzzleGamePanel').classList.add('show');
+    if (!puzzleImageUrl) {
+        puzzleImageUrl = generatePuzzleDefaultImage();
+    }
+    buildPuzzleBoard();
+    updatePuzzleLayoutButtons();
+    resetPuzzleState();
+    document.getElementById('puzzlePauseOverlay').classList.add('show');
+    document.getElementById('puzzleBtnText').innerText = '开始游戏';
+    document.getElementById('puzzleBtnIcon').innerText = '▶';
+    puzzleIsActive = false;
+    updateAllPuzzleTiles();  // 修复：原先的 updatePuzzleUI 不存在
+}
+
+// 关闭拼图面板
+function closePuzzleGame() {
+    document.getElementById('puzzleGamePanel').classList.remove('show');
+    // 退出时结算奖励
+    if (puzzleIsActive && puzzleMoveCount > 0) {
+        let reward = calculatePuzzleReward();
+        if (reward > 0 && currentAlipayLoginId) {
+            let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+            balance += reward;
+            ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+            addAlipayRecord(currentAlipayLoginId, 'in', '滑动拼图奖励', reward);
+            if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                renderAlipayData();
+            }
+        }
+    }
+    puzzleIsActive = false;
+}
+
+// 生成默认黑白灰图片
+function generatePuzzleDefaultImage() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 600; canvas.height = 600;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, 600, 600);
+    ctx.fillStyle = '#e8e8ec'; ctx.beginPath(); ctx.arc(200, 180, 160, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#d0d0d5'; ctx.beginPath(); ctx.arc(420, 400, 140, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#1a1a1a'; ctx.fillRect(40, 40, 16, 16);
+    ctx.fillStyle = '#3a3a3c'; ctx.fillRect(540, 40, 20, 20);
+    return canvas.toDataURL('image/jpeg', 0.9);
+}
+
+// 构建拼图板
+function buildPuzzleBoard() {
+    const grid = document.getElementById('puzzleGrid');
+    grid.innerHTML = '';
+    puzzleTiles = [];
+    for (let r = 0; r < puzzleGridSize; r++) {
+        for (let c = 0; c < puzzleGridSize; c++) {
+            if (r === puzzleGridSize - 1 && c === puzzleGridSize - 1) continue;
+            const el = document.createElement('div');
+            el.className = 'puzzle-tile';
+            el.addEventListener('pointerdown', (e) => onPuzzleTileClick(e, el));
+            grid.appendChild(el);
+            puzzleTiles.push({
+                id: r * puzzleGridSize + c,
+                targetRow: r, targetCol: c,
+                currentRow: r, currentCol: c,
+                el: el
+            });
+        }
+    }
+    puzzleEmptyRow = puzzleGridSize - 1;
+    puzzleEmptyCol = puzzleGridSize - 1;
+    updateAllPuzzleTiles();
+}
+
+// 更新布局按钮高亮
+function updatePuzzleLayoutButtons() {
+    document.querySelectorAll('.puzzle-layout-option').forEach(btn => {
+        btn.classList.toggle('active', parseInt(btn.dataset.size) === puzzleGridSize);
+    });
+}
+
+// 重置游戏状态
+function resetPuzzleState() {
+    puzzleMoveCount = 0;
+    puzzleIsComplete = false;
+    puzzleReward = 0.00;
+    document.getElementById('puzzleMoveCount').innerText = '0';
+    document.getElementById('puzzleReward').innerText = '¥0.00';
+}
+
+// 更新所有拼图块
+function updateAllPuzzleTiles() {
+    const grid = document.getElementById('puzzleGrid');
+    if (!grid) return;
+    const boardSize = grid.clientWidth;
+    const rawTileSize = boardSize / puzzleGridSize;
+    const tileSize = Math.floor(rawTileSize);  // 强制向下取整，避免亚像素
+    
+    const emptyIndicator = document.getElementById('puzzleEmptyIndicator');
+    
+    puzzleTiles.forEach(t => {
+        const left = t.currentCol * tileSize;
+        const top = t.currentRow * tileSize;
+        t.el.style.left = left + 'px';
+        t.el.style.top = top + 'px';
+        t.el.style.width = tileSize + 'px';
+        t.el.style.height = tileSize + 'px';
+        t.el.style.backgroundImage = `url('${puzzleImageUrl}')`;
+        t.el.style.backgroundSize = `${boardSize}px ${boardSize}px`;
+        t.el.style.backgroundPosition = `-${t.targetCol * tileSize}px -${t.targetRow * tileSize}px`;
+        
+        const isCorrect = (t.currentRow === t.targetRow && t.currentCol === t.targetCol);
+        t.el.classList.toggle('correct', isCorrect);
+        const canMove = puzzleIsActive && !puzzleIsComplete && isAdjacentToPuzzleEmpty(t);
+        t.el.classList.toggle('movable', canMove);
+    });
+    
+    emptyIndicator.style.left = (puzzleEmptyCol * tileSize) + 'px';
+    emptyIndicator.style.top = (puzzleEmptyRow * tileSize) + 'px';
+    emptyIndicator.style.width = tileSize + 'px';
+    emptyIndicator.style.height = tileSize + 'px';
+}
+function isAdjacentToPuzzleEmpty(tile) {
+    return Math.abs(tile.currentRow - puzzleEmptyRow) + Math.abs(tile.currentCol - puzzleEmptyCol) === 1;
+}
+
+function movePuzzleTile(tile) {
+    if (!puzzleIsActive || puzzleIsComplete) return false;
+    if (!isAdjacentToPuzzleEmpty(tile)) return false;
+    const oldRow = tile.currentRow, oldCol = tile.currentCol;
+    tile.currentRow = puzzleEmptyRow;
+    tile.currentCol = puzzleEmptyCol;
+    puzzleEmptyRow = oldRow;
+    puzzleEmptyCol = oldCol;
+    puzzleMoveCount++;
+    document.getElementById('puzzleMoveCount').innerText = puzzleMoveCount;
+    puzzleReward = calculatePuzzleReward();
+    document.getElementById('puzzleReward').innerText = '¥' + puzzleReward.toFixed(2);
+    updateAllPuzzleTiles();
+    checkPuzzleComplete();
+    return true;
+}
+
+function calculatePuzzleReward() {
+    if (puzzleMoveCount === 0) return 0;
+    const base = 1.50; // 提高基础奖励
+    const extra = Math.max(0, (puzzleGridSize * puzzleGridSize * 3 - puzzleMoveCount) * 0.1); // 提高步数奖励
+    return Math.max(0, Math.round((base + extra) * 100) / 100);
+}
+
+function checkPuzzleComplete() {
+    const allOk = puzzleTiles.every(t => t.currentRow === t.targetRow && t.currentCol === t.targetCol);
+    if (allOk && puzzleMoveCount > 0 && puzzleIsActive) {
+        puzzleIsComplete = true;
+        puzzleIsActive = false;
+        document.getElementById('puzzleBtnText').innerText = '开始游戏';
+        document.getElementById('puzzleBtnIcon').innerText = '▶';
+        document.getElementById('puzzlePauseOverlay').classList.remove('show');
+        updateAllPuzzleTiles();
+        if (puzzleReward > 0 && currentAlipayLoginId) {
+            let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+            balance += puzzleReward;
+            ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+            addAlipayRecord(currentAlipayLoginId, 'in', '滑动拼图奖励', puzzleReward);
+            if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                renderAlipayData();
+            }
+            alert(`拼图完成！获得 ${puzzleReward.toFixed(2)} 元奖励！`);
+        }
+    }
+}
+
+function shufflePuzzleSilent(moves = 150) {
+    puzzleTiles.forEach(t => { t.currentRow = t.targetRow; t.currentCol = t.targetCol; });
+    puzzleEmptyRow = puzzleGridSize - 1;
+    puzzleEmptyCol = puzzleGridSize - 1;
+    const totalMoves = Math.max(80, moves * puzzleGridSize);
+    let lastDr = 0, lastDc = 0;
+    for (let i = 0; i < totalMoves; i++) {
+        const dirs = [];
+        if (puzzleEmptyRow > 0) dirs.push({ dr: -1, dc: 0 });
+        if (puzzleEmptyRow < puzzleGridSize - 1) dirs.push({ dr: 1, dc: 0 });
+        if (puzzleEmptyCol > 0) dirs.push({ dr: 0, dc: -1 });
+        if (puzzleEmptyCol < puzzleGridSize - 1) dirs.push({ dr: 0, dc: 1 });
+        const filtered = dirs.filter(d => !(d.dr === -lastDr && d.dc === -lastDc));
+        const pick = filtered.length > 0 ? filtered[Math.floor(Math.random() * filtered.length)] : dirs[0];
+        const tileRow = puzzleEmptyRow + pick.dr;
+        const tileCol = puzzleEmptyCol + pick.dc;
+        const tile = puzzleTiles.find(t => t.currentRow === tileRow && t.currentCol === tileCol);
+        if (tile) {
+            tile.currentRow = puzzleEmptyRow;
+            tile.currentCol = puzzleEmptyCol;
+            puzzleEmptyRow = tileRow;
+            puzzleEmptyCol = tileCol;
+        }
+        lastDr = pick.dr; lastDc = pick.dc;
+    }
+    updateAllPuzzleTiles();
+}
+
+function shufflePuzzleManually() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    resetPuzzleState();
+    shufflePuzzleSilent(180);
+    puzzleIsActive = true;
+    document.getElementById('puzzleBtnText').innerText = '暂停游戏';
+    document.getElementById('puzzleBtnIcon').innerText = '⏸';
+    document.getElementById('puzzlePauseOverlay').classList.remove('show');
+    updateAllPuzzleTiles();
+}
+
+function togglePuzzleGame() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    if (puzzleIsComplete) {
+        resetPuzzleState();
+        shufflePuzzleSilent(180);
+        puzzleIsActive = true;
+        document.getElementById('puzzleBtnText').innerText = '暂停游戏';
+        document.getElementById('puzzleBtnIcon').innerText = '⏸';
+        document.getElementById('puzzlePauseOverlay').classList.remove('show');
+        updateAllPuzzleTiles();
+        return;
+    }
+    if (puzzleIsActive) {
+        puzzleIsActive = false;
+        document.getElementById('puzzleBtnText').innerText = '开始游戏';
+        document.getElementById('puzzleBtnIcon').innerText = '▶';
+        document.getElementById('puzzlePauseOverlay').classList.add('show');
+    } else {
+        const allSame = puzzleTiles.every(t => t.currentRow === t.targetRow && t.currentCol === t.targetCol);
+        if (allSame) {
+            shufflePuzzleSilent(180);
+            resetPuzzleState();
+        }
+        puzzleIsActive = true;
+        document.getElementById('puzzleBtnText').innerText = '暂停游戏';
+        document.getElementById('puzzleBtnIcon').innerText = '⏸';
+        document.getElementById('puzzlePauseOverlay').classList.remove('show');
+    }
+    updateAllPuzzleTiles();
+}
+
+function onPuzzleTileClick(e, el) {
+    e.preventDefault();
+    const tile = puzzleTiles.find(t => t.el === el);
+    if (tile) movePuzzleTile(tile);
+}
+
+function resetPuzzleGame() {
+    puzzleTiles.forEach(t => { t.currentRow = t.targetRow; t.currentCol = t.targetCol; });
+    puzzleEmptyRow = puzzleGridSize - 1;
+    puzzleEmptyCol = puzzleGridSize - 1;
+    resetPuzzleState();
+    puzzleIsActive = false;
+    document.getElementById('puzzleBtnText').innerText = '开始游戏';
+    document.getElementById('puzzleBtnIcon').innerText = '▶';
+    document.getElementById('puzzlePauseOverlay').classList.add('show');
+    updateAllPuzzleTiles();
+}
+
+function uploadPuzzleImage() {
+    document.getElementById('puzzleImageInput').click();
+}
+
+function handlePuzzleImageUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const img = new Image();
+        img.onload = function() {
+            const canvas = document.createElement('canvas');
+            const size = Math.min(img.width, img.height);
+            canvas.width = 600; canvas.height = 600;
+            const ctx = canvas.getContext('2d');
+            const sx = (img.width - size) / 2;
+            const sy = (img.height - size) / 2;
+            ctx.drawImage(img, sx, sy, size, size, 0, 0, 600, 600);
+            puzzleImageUrl = canvas.toDataURL('image/jpeg', 0.92);
+            updateAllPuzzleTiles();
+            resetPuzzleGame();
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+    event.target.value = '';
+}
+
+// 预览原图
+function previewPuzzleImage() {
+    const overlay = document.getElementById('puzzlePreviewOverlay');
+    const img = document.getElementById('puzzlePreviewImg');
+    img.src = puzzleImageUrl;
+    overlay.classList.add('show');
+}
+
+// 布局切换委托
+document.addEventListener('click', function(e) {
+    if (e.target.classList.contains('puzzle-layout-option')) {
+        const newSize = parseInt(e.target.dataset.size);
+        if (newSize !== puzzleGridSize) {
+            puzzleGridSize = newSize;
+            buildPuzzleBoard();
+            updatePuzzleLayoutButtons();
+            resetPuzzleState();
+            puzzleIsActive = false;
+            document.getElementById('puzzleBtnText').innerText = '开始游戏';
+            document.getElementById('puzzleBtnIcon').innerText = '▶';
+            document.getElementById('puzzlePauseOverlay').classList.add('show');
+            updateAllPuzzleTiles();
+        }
+    }
+});
+
+// 暂停遮罩点击继续
+(function() {
+    const pauseEl = document.getElementById('puzzlePauseOverlay');
+    if (pauseEl) {
+        pauseEl.addEventListener('click', function() {
+            if (!puzzleIsActive && !puzzleIsComplete) {
+                togglePuzzleGame();
+            }
+        });
+    }
+})();
+
+// 窗口大小变化时刷新
+window.addEventListener('resize', () => {
+    if (document.getElementById('puzzleGamePanel').classList.contains('show')) {
+        updateAllPuzzleTiles();
+    }
+    if (document.getElementById('pianoPanel').classList.contains('show')) {
+        resizePianoCanvas();
+    }
+});
+
+// ==========================================
+// 钢琴节奏 游戏逻辑
+// ==========================================
+const PIANO_SVG_STAR = `<svg class="piano-rank-icon" viewBox="0 0 24 24" fill="#FFCC00" stroke="#E6B800" stroke-width="1"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>`;
+const PIANO_SVG_MOON = `<svg class="piano-rank-icon" viewBox="0 0 24 24" fill="#FFCC00" stroke="#E6B800" stroke-width="1"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`;
+const PIANO_SVG_CROWN = `<svg class="piano-rank-icon" viewBox="0 0 24 24" fill="#FFCC00" stroke="#E6B800" stroke-width="1"><path d="M2 22h20v-2H2v2zm2-4h16l-2-10-4 4-4-8-4 8-4-4-2 10z"></path></svg>`;
+
+const PIANO_FREQUENCIES = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25];
+const PIANO_SONGS = [
+    { id: 'star', name: '小星星 (Twinkle Star)', melody: [0,0,4,4,5,5,4, 3,3,2,2,1,1,0, 4,4,3,3,2,2,1, 4,4,3,3,2,2,1, 0,0,4,4,5,5,4, 3,3,2,2,1,1,0] },
+    { id: 'joy', name: '欢乐颂 (Ode to Joy)', melody: [2,2,3,4,4,3,2,1,0,0,1,2,2,1,1, 2,2,3,4,4,3,2,1,0,0,1,2,1,0,0] }
+];
+
+let pianoSelectedSongId = 'star';
+let pianoAudioCtx;
+let pianoCurrentMelody = [];
+let pianoNoteIndex = 0;
+
+let pianoCanvas, pianoCtx;
+let pianoWidth, pianoHeight;
+let pianoCols = 4;
+let pianoColWidth, pianoRowHeight;
+let pianoRows = [];
+let pianoSpeed = 0;
+let pianoBaseSpeed = 0;
+let pianoScore = 0;
+let pianoIsPlaying = false;
+let pianoIsWaitingForFirstTap = true;
+let pianoAnimationId;
+let pianoLastRankPoints = 0;
+
+let PIANO_CUSTOM_PLAYLISTS = [];
+
+function openPianoGame() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    document.getElementById('pianoPanel').classList.add('show');
+    showPianoPage('piano-home-page');
+    
+    syncMusicAppSongsToPiano();
+    renderPianoSongList();
+    
+    if (!pianoCanvas) {
+        pianoCanvas = document.getElementById('pianoGameCanvas');
+        pianoCtx = pianoCanvas.getContext('2d');
+        resizePianoCanvas();
+        pianoBindEvents();
+    }
+}
+
+function closePianoGame() {
+    document.getElementById('pianoPanel').classList.remove('show');
+    pianoIsPlaying = false;
+    if (typeof pianoBgmPlayer !== 'undefined') {
+        clearTimeout(pianoBgmPlayer.pauseTimer);
+        pianoBgmPlayer.pause();
+    }
+    cancelAnimationFrame(pianoAnimationId);
+}
+
+function showPianoPage(pageId) {
+    document.querySelectorAll('.piano-page').forEach(p => p.classList.remove('active'));
+    document.getElementById(pageId).classList.add('active');
+}
+
+function getPianoRankHtml(score) {
+    if (score < 60) return '<span style="color:#ccc; font-size:12px;">暂无评级</span>';
+    
+    // 核心修改：动态递增难度算法 (60, 130, 210, 300...)
+    // 根据公式 Sn = 5n^2 + 55n 逆推当前点数 n
+    let points = Math.floor((-11 + Math.sqrt(121 + 0.8 * score)) / 2);
+    
+    let crowns = Math.floor(points / 9);
+    let remAfterCrowns = points % 9;
+    let moons = Math.floor(remAfterCrowns / 3);
+    let stars = remAfterCrowns % 3;
+    
+    let html = '';
+    for(let i=0; i<crowns; i++) html += PIANO_SVG_CROWN;
+    for(let i=0; i<moons; i++) html += PIANO_SVG_MOON;
+    for(let i=0; i<stars; i++) html += PIANO_SVG_STAR;
+    
+    return html;
+}
+
+function syncMusicAppSongsToPiano() {
+    PIANO_CUSTOM_PLAYLISTS = []; 
+    
+    const musicLoginId = ChatDB.getItem('music_current_login_account');
+    if (!musicLoginId) return; 
+    
+    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${musicLoginId}`) || '[]');
+    
+    savedPlaylists.forEach(pl => {
+        if (pl.tracks && Array.isArray(pl.tracks) && pl.tracks.length > 0) {
+            let playlistSongs = [];
+            pl.tracks.forEach(track => {
+                playlistSongs.push({
+                    id: track.id,
+                    name: `${track.title} - ${track.artist}`,
+                    url: track.url, // 保留真实音频 URL
+                    isCustom: true
+                });
+            });
+            PIANO_CUSTOM_PLAYLISTS.push({
+                title: pl.name || '未命名歌单',
+                songs: playlistSongs
+            });
+        }
+    });
+}
+function renderPianoSongList() {
+    const listEl = document.getElementById('pianoSongList');
+    listEl.innerHTML = '';
+
+    const createGroup = (title, songs, isExpanded) => {
+        if (songs.length === 0) return;
+        const groupEl = document.createElement('div');
+        groupEl.className = `piano-group ${isExpanded ? 'expanded' : ''}`;
+        
+        const header = document.createElement('div');
+        header.className = 'piano-group-header';
+        header.innerHTML = `<span>${title} (${songs.length})</span><svg class="piano-group-arrow" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
+        header.onclick = () => groupEl.classList.toggle('expanded');
+        
+        const content = document.createElement('div');
+        content.className = 'piano-group-content';
+        
+        songs.forEach(song => {
+            let highScore = parseInt(ChatDB.getItem(`piano_hs_${currentAlipayLoginId}_${song.id}`) || '0');
+            let rankHtml = getPianoRankHtml(highScore);
+
+            const item = document.createElement('div');
+            item.className = `piano-song-item ${pianoSelectedSongId === song.id ? 'selected' : ''}`;
+            item.onclick = () => {
+                pianoSelectedSongId = song.id;
+                // 修复：只更新选中状态，不重新渲染整个列表，防止折叠栏自动展开/收起
+                document.querySelectorAll('.piano-song-item').forEach(el => el.classList.remove('selected'));
+                item.classList.add('selected');
+            };
+
+            item.innerHTML = `
+                <div class="piano-song-info">
+                    <div class="piano-song-name">${song.name}</div>
+                    <div class="piano-song-record">
+                        最高分: <span class="piano-song-record-score">${highScore}</span>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 2px;">${rankHtml}</div>
+            `;
+            content.appendChild(item);
+        });
+        
+        groupEl.appendChild(header);
+        groupEl.appendChild(content);
+        listEl.appendChild(groupEl);
+    };
+
+    createGroup('默认曲目', PIANO_SONGS, true);
+    
+    PIANO_CUSTOM_PLAYLISTS.forEach(pl => {
+        createGroup(`歌单: ${pl.title}`, pl.songs, false); // 默认不展开，避免碍事
+    });
+}
+
+function resizePianoCanvas() {
+    if (!pianoCanvas) return;
+    const container = document.getElementById('piano-game-page');
+    pianoWidth = container.clientWidth;
+    pianoHeight = container.clientHeight;
+    pianoCanvas.width = pianoWidth * window.devicePixelRatio;
+    pianoCanvas.height = pianoHeight * window.devicePixelRatio;
+    pianoCtx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    pianoColWidth = pianoWidth / pianoCols;
+    pianoRowHeight = pianoHeight / 4; 
+}
+
+function playPianoNextNote() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!pianoAudioCtx) pianoAudioCtx = new AudioContextClass();
+    if (pianoAudioCtx.state === 'suspended') pianoAudioCtx.resume();
+
+    const freq = PIANO_FREQUENCIES[pianoCurrentMelody[pianoNoteIndex % pianoCurrentMelody.length]];
+    pianoNoteIndex++;
+
+    const osc = pianoAudioCtx.createOscillator();
+    const gainNode = pianoAudioCtx.createGain();
+    
+    osc.type = 'sine'; 
+    osc.frequency.setValueAtTime(freq, pianoAudioCtx.currentTime);
+    
+    gainNode.gain.setValueAtTime(0, pianoAudioCtx.currentTime);
+    gainNode.gain.linearRampToValueAtTime(1, pianoAudioCtx.currentTime + 0.02);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, pianoAudioCtx.currentTime + 1);
+
+    osc.connect(gainNode);
+    gainNode.connect(pianoAudioCtx.destination);
+    
+    osc.start();
+    osc.stop(pianoAudioCtx.currentTime + 1);
+}
+
+function playPianoErrorSound() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!pianoAudioCtx) pianoAudioCtx = new AudioContextClass();
+    const osc = pianoAudioCtx.createOscillator();
+    const gainNode = pianoAudioCtx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(150, pianoAudioCtx.currentTime);
+    gainNode.gain.setValueAtTime(0.5, pianoAudioCtx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, pianoAudioCtx.currentTime + 0.3);
+    osc.connect(gainNode);
+    gainNode.connect(pianoAudioCtx.destination);
+    osc.start();
+    osc.stop(pianoAudioCtx.currentTime + 0.3);
+}
+
+let pianoBgmPlayer = new Audio();
+
+function playPianoTapSound() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!pianoAudioCtx) pianoAudioCtx = new AudioContextClass();
+    if (pianoAudioCtx.state === 'suspended') pianoAudioCtx.resume();
+
+    const osc = pianoAudioCtx.createOscillator();
+    const gainNode = pianoAudioCtx.createGain();
+    osc.type = 'sine'; 
+    osc.frequency.setValueAtTime(523.25, pianoAudioCtx.currentTime); // C5
+    gainNode.gain.setValueAtTime(0, pianoAudioCtx.currentTime);
+    gainNode.gain.linearRampToValueAtTime(0.3, pianoAudioCtx.currentTime + 0.01);
+    gainNode.gain.exponentialRampToValueAtTime(0.001, pianoAudioCtx.currentTime + 0.3);
+    osc.connect(gainNode);
+    gainNode.connect(pianoAudioCtx.destination);
+    osc.start();
+    osc.stop(pianoAudioCtx.currentTime + 0.3);
+}
+
+async function startPianoGame() {
+    showPianoPage('piano-game-page');
+    resizePianoCanvas();
+    
+    const diff = document.getElementById('pianoDiffSelect').value;
+    const defaultSong = PIANO_SONGS.find(s => s.id === pianoSelectedSongId);
+    let customSong = null;
+    for (let pl of PIANO_CUSTOM_PLAYLISTS) {
+        let found = pl.songs.find(s => s.id === pianoSelectedSongId);
+        if (found) {
+            customSong = found;
+            break;
+        }
+    }
+    const song = defaultSong || customSong;
+    
+    if (diff === 'easy') pianoBaseSpeed = pianoHeight * 0.008;
+    else if (diff === 'normal') pianoBaseSpeed = pianoHeight * 0.012;
+    else if (diff === 'hard') pianoBaseSpeed = pianoHeight * 0.018;
+    
+    pianoSpeed = pianoBaseSpeed;
+    
+    pianoBgmPlayer.pause();
+    pianoBgmPlayer.currentTime = 0;
+    
+    if (song && song.isCustom) {
+        // 修复：如果 URL 不存在，动态去网易云接口拉取真实播放地址
+        let realUrl = song.url;
+        if (!realUrl && typeof getMusicPlayApiUrl === 'function') {
+            try {
+                const playBaseUrl = getMusicPlayApiUrl();
+                const res = await fetch(`${playBaseUrl}/?server=netease&type=song&id=${song.id}`);
+                const data = await res.json();
+                if (data && data.length > 0 && data[0].url) {
+                    realUrl = data[0].url.replace('http://', 'https://');
+                    song.url = realUrl; // 缓存下来
+                }
+            } catch (e) {
+                console.error("获取音乐URL失败", e);
+            }
+        }
+
+        if (realUrl) {
+            pianoBgmPlayer.src = realUrl;
+            pianoCurrentMelody = [0]; // 防止 length 报错
+        } else {
+            pianoCurrentMelody = PIANO_SONGS[0].melody; // 兜底
+        }
+        pianoNoteIndex = 0;
+    } else {
+        pianoCurrentMelody = (song && song.melody) ? song.melody : PIANO_SONGS[0].melody;
+        pianoNoteIndex = 0;
+    }
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!pianoAudioCtx) pianoAudioCtx = new AudioContextClass();
+    if (pianoAudioCtx.state === 'suspended') pianoAudioCtx.resume();
+
+    pianoScore = 0;
+    pianoLastRankPoints = 0;
+    document.getElementById('pianoGameScore').innerText = pianoScore;
+    document.getElementById('pianoGameRank').innerHTML = '';
+    
+    pianoRows = [];
+    pianoIsWaitingForFirstTap = true;
+    pianoIsPlaying = true;
+
+    for (let i = 0; i < 5; i++) {
+        pianoRows.push({
+            y: pianoHeight - (i + 1) * pianoRowHeight,
+            blackCol: Math.floor(Math.random() * pianoCols),
+            clicked: false,
+            isFirst: i === 0 
+        });
+    }
+
+    cancelAnimationFrame(pianoAnimationId);
+    pianoGameLoop();
+}
+
+function pianoGameOver() {
+    pianoIsPlaying = false;
+    clearTimeout(pianoBgmPlayer.pauseTimer);
+    pianoBgmPlayer.pause();
+    playPianoErrorSound();
+    
+    const flash = document.getElementById('piano-error-flash');
+    flash.classList.add('flash');
+    setTimeout(() => flash.classList.remove('flash'), 150);
+
+    let hs = parseInt(ChatDB.getItem(`piano_hs_${currentAlipayLoginId}_${pianoSelectedSongId}`) || '0');
+    if (pianoScore > hs) {
+        ChatDB.setItem(`piano_hs_${currentAlipayLoginId}_${pianoSelectedSongId}`, pianoScore.toString());
+    }
+
+    // 结算奖励 (20分 = 1元，大幅提高收益)
+    let reward = (pianoScore / 20).toFixed(2);
+
+    setTimeout(() => {
+        document.getElementById('pianoResultScore').innerText = pianoScore;
+        document.getElementById('pianoResultRank').innerHTML = getPianoRankHtml(pianoScore);
+        document.getElementById('pianoResultReward').innerText = `¥${reward}`;
+        showPianoPage('piano-result-page');
+        
+        if (parseFloat(reward) > 0 && currentAlipayLoginId) {
+            let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+            balance += parseFloat(reward);
+            ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+            addAlipayRecord(currentAlipayLoginId, 'in', '钢琴节奏奖励', reward);
+            if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                renderAlipayData();
+            }
+        }
+    }, 500);
+}
+
+function spawnPianoRow() {
+    const highestY = pianoRows[pianoRows.length - 1].y;
+    pianoRows.push({
+        y: highestY - pianoRowHeight,
+        blackCol: Math.floor(Math.random() * pianoCols),
+        clicked: false,
+        isFirst: false
+    });
+}
+
+function drawPiano() {
+    pianoCtx.fillStyle = '#fff';
+    pianoCtx.fillRect(0, 0, pianoWidth, pianoHeight);
+
+    pianoCtx.strokeStyle = '#eee';
+    pianoCtx.lineWidth = 1;
+    for (let i = 1; i < pianoCols; i++) {
+        pianoCtx.beginPath();
+        pianoCtx.moveTo(i * pianoColWidth, 0);
+        pianoCtx.lineTo(i * pianoColWidth, pianoHeight);
+        pianoCtx.stroke();
+    }
+
+    for (let i = 0; i < pianoRows.length; i++) {
+        const row = pianoRows[i];
+        
+        if (row.clicked) pianoCtx.fillStyle = '#e0e0e0'; 
+        else pianoCtx.fillStyle = '#111'; 
+        
+        pianoCtx.fillRect(row.blackCol * pianoColWidth, row.y, pianoColWidth, pianoRowHeight);
+        
+        pianoCtx.strokeStyle = 'rgba(255,255,255,0.2)';
+        pianoCtx.lineWidth = 2;
+        pianoCtx.strokeRect(row.blackCol * pianoColWidth + 1, row.y + 1, pianoColWidth - 2, pianoRowHeight - 2);
+
+        if (row.isFirst && !row.clicked && pianoIsWaitingForFirstTap) {
+            pianoCtx.fillStyle = '#fff';
+            pianoCtx.font = 'bold 20px Arial';
+            pianoCtx.textAlign = 'center';
+            pianoCtx.textBaseline = 'middle';
+            pianoCtx.fillText('开始', row.blackCol * pianoColWidth + pianoColWidth / 2, row.y + pianoRowHeight / 2);
+        }
+    }
+}
+
+function pianoGameLoop() {
+    if (!pianoIsPlaying) return;
+
+    if (!pianoIsWaitingForFirstTap) {
+        for (let i = 0; i < pianoRows.length; i++) {
+            pianoRows[i].y += pianoSpeed;
+        }
+
+        const lowestRow = pianoRows[0];
+        if (lowestRow.y >= pianoHeight && !lowestRow.clicked) {
+            lowestRow.y = pianoHeight; 
+            drawPiano(); 
+            pianoCtx.fillStyle = 'rgba(255, 59, 48, 0.8)';
+            pianoCtx.fillRect(lowestRow.blackCol * pianoColWidth, pianoHeight - pianoRowHeight, pianoColWidth, pianoRowHeight);
+            pianoGameOver();
+            return;
+        }
+
+        if (pianoRows[0].y >= pianoHeight) {
+            pianoRows.shift();
+            spawnPianoRow();
+        }
+
+        pianoSpeed = pianoBaseSpeed + (pianoScore * 0.02);
+    }
+
+    drawPiano();
+    pianoAnimationId = requestAnimationFrame(pianoGameLoop);
+}
+
+function handlePianoInput(x, y) {
+    if (!pianoIsPlaying) return;
+
+    const clickedCol = Math.floor(x / pianoColWidth);
+    
+    let targetRowIndex = -1;
+    for (let i = 0; i < pianoRows.length; i++) {
+        if (!pianoRows[i].clicked) {
+            targetRowIndex = i;
+            break;
+        }
+    }
+
+    if (targetRowIndex === -1) return;
+    const targetRow = pianoRows[targetRowIndex];
+
+    if (clickedCol === targetRow.blackCol) {
+        targetRow.clicked = true;
+        pianoScore++;
+        
+        const scoreEl = document.getElementById('pianoGameScore');
+        scoreEl.innerText = pianoScore;
+        scoreEl.style.transform = 'scale(1.2)';
+        setTimeout(() => scoreEl.style.transform = 'scale(1)', 100);
+
+        // 累计叠加等级系统 (动态递增难度：60, 130, 210, 300...)
+        let currentPoints = 0;
+        if (pianoScore >= 60) {
+            currentPoints = Math.floor((-11 + Math.sqrt(121 + 0.8 * pianoScore)) / 2);
+        }
+        
+        if (currentPoints > pianoLastRankPoints) {
+            pianoLastRankPoints = currentPoints;
+            const rankEl = document.getElementById('pianoGameRank');
+            rankEl.innerHTML = getPianoRankHtml(pianoScore);
+            rankEl.style.transform = 'scale(1.5)';
+            setTimeout(() => rankEl.style.transform = 'scale(1)', 200);
+        }
+
+        let customSong = null;
+        for (let pl of PIANO_CUSTOM_PLAYLISTS) {
+            let found = pl.songs.find(s => s.id === pianoSelectedSongId);
+            if (found) {
+                customSong = found;
+                break;
+            }
+        }
+
+        if (customSong && customSong.url) {
+            // 性能优化：只有在真正暂停时才调用 play()，避免频繁调用导致主线程卡顿
+            if (pianoBgmPlayer.paused) {
+                pianoBgmPlayer.play().catch(e => console.log("BGM play failed", e));
+            }
+            clearTimeout(pianoBgmPlayer.pauseTimer);
+            // 优化：延长暂停判定时间到 500ms，保证连续点击时音乐平滑播放，不再卡顿
+            pianoBgmPlayer.pauseTimer = setTimeout(() => {
+                pianoBgmPlayer.pause();
+            }, 500); 
+        } else {
+            playPianoNextNote();
+        }
+
+        if (pianoIsWaitingForFirstTap) {
+            pianoIsWaitingForFirstTap = false;
+        }
+    } else {
+        drawPiano(); 
+        pianoCtx.fillStyle = 'rgba(255, 59, 48, 0.8)';
+        pianoCtx.fillRect(clickedCol * pianoColWidth, targetRow.y, pianoColWidth, pianoRowHeight);
+        pianoGameOver();
+    }
+}
+
+function pianoBindEvents() {
+    pianoCanvas.addEventListener('mousedown', (e) => {
+        const rect = pianoCanvas.getBoundingClientRect();
+        handlePianoInput(e.clientX - rect.left, e.clientY - rect.top);
+    });
+
+    pianoCanvas.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        const rect = pianoCanvas.getBoundingClientRect();
+        handlePianoInput(e.touches[0].clientX - rect.left, e.touches[0].clientY - rect.top);
+    }, { passive: false });
+}
+
+// ==========================================
+// 切水果 游戏逻辑
+// ==========================================
+let fnCanvas, fnCtx;
+let fnWidth, fnHeight;
+let fnIsPlaying = false;
+let fnScore = 0;
+let fnLives = 3;
+let fnFrameCount = 0;
+
+let fnFruits = [];
+let fnParticles = [];
+let fnFloatingTexts = [];
+let fnSwipePoints = [];
+let fnIsSwiping = false;
+let fnAnimationId;
+
+const FN_FRUIT_TYPES = [
+    { type: 'watermelon', price: 1.5, radius: 45, particleColor: '#ff4757' },
+    { type: 'strawberry', price: 2.0, radius: 35, particleColor: '#ff6b81' },
+    { type: 'banana',     price: 1.0, radius: 40, particleColor: '#feca57' },
+    { type: 'orange',     price: 0.8, radius: 38, particleColor: '#ffa502' },
+    { type: 'apple',      price: 0.5, radius: 35, particleColor: '#f1c40f' },
+    { type: 'bomb',       price: 0,   radius: 35, particleColor: '#2f3542' }
+];
+
+const fnFruitCache = {};
+let fnBgCacheCanvas;
+
+function openFruitNinjaGame() {
+    if (!currentAlipayLoginId) return alert('请先登录支付宝！');
+    document.getElementById('fruitNinjaPanel').classList.add('show');
+    fnInit();
+}
+
+function closeFruitNinjaGame() {
+    document.getElementById('fruitNinjaPanel').classList.remove('show');
+    cancelAnimationFrame(fnAnimationId);
+    fnIsPlaying = false;
+    
+    // 退出时结算奖励 (降低收益)
+    if (fnScore > 0 && currentAlipayLoginId) {
+        let reward = (fnScore * 0.5).toFixed(2);
+        if (parseFloat(reward) > 0) {
+            let balance = parseFloat(ChatDB.getItem(`alipay_balance_${currentAlipayLoginId}`) || '0');
+            balance += parseFloat(reward);
+            ChatDB.setItem(`alipay_balance_${currentAlipayLoginId}`, balance.toFixed(2));
+            addAlipayRecord(currentAlipayLoginId, 'in', '切水果奖励', reward);
+            
+            if (document.getElementById('alipay-page-me').classList.contains('active')) {
+                renderAlipayData();
+            }
+            alert(`游戏结束，共赚取 ${reward} 元，已存入支付宝余额！`);
+        }
+    }
+    fnScore = 0;
+}
+
+function fnInit() {
+    fnCanvas = document.getElementById('fnGameCanvas');
+    fnCtx = fnCanvas.getContext('2d');
+    fnResize();
+    
+    // 性能优化：延迟初始化水果缓存，且不再生成巨大的全屏背景缓存，解决初始白屏
+    if (Object.keys(fnFruitCache).length === 0) {
+        fnInitCache();
+    }
+    
+    document.getElementById('fnStartPanel').classList.remove('hidden');
+    document.getElementById('fnGameOverPanel').classList.add('hidden');
+    
+    fnBindEvents();
+}
+
+function fnResize() {
+    fnWidth = window.innerWidth;
+    fnHeight = window.innerHeight;
+    fnCanvas.width = fnWidth * window.devicePixelRatio;
+    fnCanvas.height = fnHeight * window.devicePixelRatio;
+    fnCtx.scale(window.devicePixelRatio, window.devicePixelRatio);
+}
+
+function fnInitCache() {
+    const dpr = window.devicePixelRatio || 1;
+    
+    fnBgCacheCanvas = document.createElement('canvas');
+    fnBgCacheCanvas.width = window.innerWidth;
+    fnBgCacheCanvas.height = window.innerHeight;
+    const bgCtx = fnBgCacheCanvas.getContext('2d');
+    let bgGrad = bgCtx.createRadialGradient(fnBgCacheCanvas.width/2, fnBgCacheCanvas.height/2, 0, fnBgCacheCanvas.width/2, fnBgCacheCanvas.height/2, Math.max(fnBgCacheCanvas.width, fnBgCacheCanvas.height));
+    bgGrad.addColorStop(0, '#3a2b22');
+    bgGrad.addColorStop(1, '#0a0705');
+    bgCtx.fillStyle = bgGrad;
+    bgCtx.fillRect(0, 0, fnBgCacheCanvas.width, fnBgCacheCanvas.height);
+
+    FN_FRUIT_TYPES.forEach(f => {
+        const r = f.radius;
+        const pad = 25;
+        const size = (r + pad) * 2;
+        const pixelSize = size * dpr;
+        
+        const makeCanvas = () => {
+            let c = document.createElement('canvas');
+            c.width = pixelSize;
+            c.height = pixelSize;
+            let cx = c.getContext('2d');
+            cx.scale(dpr, dpr);
+            cx.translate(size/2, size/2);
+            return { canvas: c, ctx: cx };
+        };
+
+        let full = makeCanvas();
+        fnDrawFullFruitShape(full.ctx, f, r);
+        
+        let left = makeCanvas();
+        fnDrawHalfFruit(left.ctx, f, r, true);
+        
+        let right = makeCanvas();
+        fnDrawHalfFruit(right.ctx, f, r, false);
+        
+        fnFruitCache[f.type] = { full: full.canvas, left: left.canvas, right: right.canvas, size: size };
+    });
+}
+
+function fnDrawHighlight(ctx, r, offsetX, offsetY) {
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.beginPath();
+    ctx.ellipse(offsetX, offsetY, r*0.4, r*0.2, -Math.PI/4, 0, Math.PI*2);
+    ctx.fill();
+}
+
+function fnDrawFullFruitShape(ctx, f, r) {
+    ctx.shadowColor = 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur = 15;
+    ctx.shadowOffsetY = 10;
+
+    if (f.type === 'watermelon') {
+        let grad = ctx.createRadialGradient(-r*0.3, -r*0.3, r*0.1, 0, 0, r);
+        grad.addColorStop(0, '#2ecc71');
+        grad.addColorStop(1, '#1e8449');
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI*2); ctx.fill();
+        
+        ctx.shadowColor = 'transparent';
+        ctx.strokeStyle = '#145a32';
+        ctx.lineWidth = r * 0.15;
+        ctx.lineCap = 'round';
+        for(let i = -2; i <= 2; i++) {
+            ctx.beginPath();
+            ctx.moveTo(i * r * 0.35, -r * 0.95);
+            ctx.quadraticCurveTo(i * r * 0.6, 0, i * r * 0.35, r * 0.95);
+            ctx.stroke();
+        }
+        fnDrawHighlight(ctx, r, -r*0.3, -r*0.4);
+    } else if (f.type === 'strawberry') {
+        let grad = ctx.createRadialGradient(-r*0.2, -r*0.2, r*0.1, 0, 0, r);
+        grad.addColorStop(0, '#ff4757');
+        grad.addColorStop(1, '#c0392b');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(0, r);
+        ctx.bezierCurveTo(r*1.2, r*0.3, r*0.8, -r, 0, -r*0.8);
+        ctx.bezierCurveTo(-r*0.8, -r, -r*1.2, r*0.3, 0, r);
+        ctx.fill();
+        
+        ctx.shadowColor = 'transparent';
+        ctx.fillStyle = '#f1c40f';
+        const seeds = [[-10,-15],[10,-10],[0,0],[-15,10],[15,15],[0,20],[-8,-5],[8,5]];
+        seeds.forEach(pos => {
+            ctx.beginPath(); ctx.arc(pos[0], pos[1], 2, 0, Math.PI*2); ctx.fill();
+        });
+
+        ctx.fillStyle = '#2ecc71';
+        ctx.beginPath();
+        ctx.moveTo(0, -r*0.5);
+        ctx.quadraticCurveTo(r*0.5, -r*1.2, r*0.8, -r*0.8);
+        ctx.quadraticCurveTo(0, -r*0.8, -r*0.8, -r*0.8);
+        ctx.quadraticCurveTo(-r*0.5, -r*1.2, 0, -r*0.5);
+        ctx.fill();
+        fnDrawHighlight(ctx, r, -r*0.2, -r*0.2);
+    } else if (f.type === 'banana') {
+        let grad = ctx.createRadialGradient(0, 0, r*0.2, 0, 0, r*1.5);
+        grad.addColorStop(0, '#ffeaa7');
+        grad.addColorStop(1, '#fdcb6e');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(-r*1.2, -r*0.5);
+        ctx.quadraticCurveTo(0, r*1.2, r*1.2, -r*0.5);
+        ctx.quadraticCurveTo(0, r*0.4, -r*1.2, -r*0.5);
+        ctx.fill();
+        
+        ctx.shadowColor = 'transparent';
+        ctx.fillStyle = '#2d3436';
+        ctx.beginPath(); ctx.arc(-r*1.15, -r*0.45, 4, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(r*1.15, -r*0.45, 4, 0, Math.PI*2); ctx.fill();
+    } else if (f.type === 'orange') {
+        let grad = ctx.createRadialGradient(-r*0.3, -r*0.3, r*0.1, 0, 0, r);
+        grad.addColorStop(0, '#ff9f43');
+        grad.addColorStop(1, '#e67e22');
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI*2); ctx.fill();
+        
+        ctx.shadowColor = 'transparent';
+        ctx.fillStyle = 'rgba(211, 84, 0, 0.3)';
+        const spots = [[-10,-10],[15,-5],[-5,15],[10,10],[0,-20],[-20,0]];
+        spots.forEach(pos => {
+            ctx.beginPath(); ctx.arc(pos[0], pos[1], 1.5, 0, Math.PI*2); ctx.fill();
+        });
+        fnDrawHighlight(ctx, r, -r*0.3, -r*0.3);
+    } else if (f.type === 'apple') {
+        let grad = ctx.createRadialGradient(-r*0.3, -r*0.3, r*0.1, 0, 0, r);
+        grad.addColorStop(0, '#ff4757');
+        grad.addColorStop(1, '#c0392b');
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI*2); ctx.fill();
+        
+        ctx.shadowColor = 'transparent';
+        ctx.fillStyle = '#2ecc71';
+        ctx.beginPath(); ctx.ellipse(r*0.2, -r*0.9, r*0.3, r*0.15, -Math.PI/6, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle = '#5c220b'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(0, -r*0.8); ctx.quadraticCurveTo(r*0.2, -r*1.2, r*0.3, -r*1.1); ctx.stroke();
+        fnDrawHighlight(ctx, r, -r*0.3, -r*0.3);
+    } else if (f.type === 'bomb') {
+        let grad = ctx.createRadialGradient(-r*0.3, -r*0.3, r*0.1, 0, 0, r);
+        grad.addColorStop(0, '#636e72');
+        grad.addColorStop(1, '#111');
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI*2); ctx.fill();
+        
+        ctx.shadowColor = 'transparent';
+        ctx.fillStyle = '#b2bec3';
+        ctx.fillRect(-r*0.2, -r*1.1, r*0.4, r*0.2);
+        ctx.strokeStyle = '#e74c3c'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(0, -r*1.1); ctx.quadraticCurveTo(r*0.5, -r*1.5, r*0.8, -r*1.3); ctx.stroke();
+        ctx.fillStyle = '#f1c40f';
+        ctx.beginPath(); ctx.arc(r*0.8, -r*1.3, 6, 0, Math.PI*2); ctx.fill();
+        fnDrawHighlight(ctx, r, -r*0.3, -r*0.3);
+    }
+}
+
+function fnDrawHalfFruit(ctx, f, r, isLeft) {
+    let dir = isLeft ? -1 : 1;
+    ctx.save();
+    ctx.beginPath();
+    if (isLeft) ctx.rect(-r*2, -r*2, r*2, r*4);
+    else ctx.rect(0, -r*2, r*2, r*4);
+    ctx.clip();
+    fnDrawFullFruitShape(ctx, f, r); 
+    ctx.restore();
+
+    ctx.beginPath();
+    if (f.type === 'watermelon') {
+        ctx.ellipse(0, 0, r*0.2, r*0.95, 0, 0, Math.PI*2);
+        ctx.fillStyle = '#ecf0f1'; ctx.fill(); 
+        ctx.beginPath(); ctx.ellipse(0, 0, r*0.15, r*0.85, 0, 0, Math.PI*2);
+        ctx.fillStyle = '#ff4757'; ctx.fill(); 
+        ctx.fillStyle = '#111';
+        ctx.beginPath(); ctx.arc(dir*3, -r*0.4, 2, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(dir*3, r*0.4, 2, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(dir*5, 0, 2, 0, Math.PI*2); ctx.fill();
+    } else if (f.type === 'strawberry') {
+        ctx.ellipse(0, 0, r*0.2, r*0.8, 0, 0, Math.PI*2);
+        ctx.fillStyle = '#ffb8b8'; ctx.fill();
+        ctx.beginPath(); ctx.ellipse(0, 0, r*0.1, r*0.5, 0, 0, Math.PI*2);
+        ctx.fillStyle = '#fff'; ctx.fill(); 
+    } else if (f.type === 'banana') {
+        ctx.ellipse(0, 0, r*0.15, r*0.6, 0, 0, Math.PI*2);
+        ctx.fillStyle = '#fff9c4'; ctx.fill();
+        ctx.fillStyle = '#d4c48c'; ctx.beginPath(); ctx.arc(0,0,2,0,Math.PI*2); ctx.fill();
+    } else if (f.type === 'orange') {
+        ctx.ellipse(0, 0, r*0.2, r*0.95, 0, 0, Math.PI*2);
+        ctx.fillStyle = '#fdf5e6'; ctx.fill(); 
+        ctx.beginPath(); ctx.ellipse(0, 0, r*0.15, r*0.85, 0, 0, Math.PI*2);
+        ctx.fillStyle = '#ff9f43'; ctx.fill(); 
+        ctx.strokeStyle = '#fdf5e6'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(0, -r*0.85); ctx.lineTo(0, r*0.85); ctx.stroke();
+    } else if (f.type === 'apple') {
+        ctx.ellipse(0, 0, r*0.2, r*0.95, 0, 0, Math.PI*2);
+        ctx.fillStyle = '#fdf5e6'; ctx.fill(); 
+        ctx.fillStyle = '#5c220b';
+        ctx.beginPath(); ctx.ellipse(dir*2, -5, 2, 4, 0, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(dir*2, 5, 2, 4, 0, 0, Math.PI*2); ctx.fill();
+    }
+}
+
+function startFruitNinjaGame() {
+    document.getElementById('fnStartPanel').classList.add('hidden');
+    document.getElementById('fnGameOverPanel').classList.add('hidden');
+    fnScore = 0;
+    fnLives = 3;
+    fnFruits = [];
+    fnParticles = [];
+    fnFloatingTexts = [];
+    fnSwipePoints = [];
+    fnFrameCount = 0;
+    fnIsPlaying = true;
+    fnUpdateUI();
+    fnGameLoop();
+}
+
+function fnLoseLife() {
+    fnLives--;
+    fnUpdateUI();
+    if (fnLives <= 0) {
+        fnIsPlaying = false;
+        document.getElementById('fnFinalScore').innerText = (fnScore * 0.5).toFixed(2);
+        document.getElementById('fnGameOverPanel').classList.remove('hidden');
+    }
+}
+
+function fnUpdateUI() {
+    document.getElementById('fnScoreText').innerText = fnScore.toFixed(2);
+    const hearts = document.querySelectorAll('.fn-heart');
+    hearts.forEach((h, i) => {
+        if (i < fnLives) h.classList.remove('lost');
+        else h.classList.add('lost');
+    });
+}
+
+function fnSpawnFruit() {
+    const isBomb = Math.random() < 0.15; 
+    const template = isBomb ? FN_FRUIT_TYPES[5] : FN_FRUIT_TYPES[Math.floor(Math.random() * 5)];
+    
+    const r = template.radius;
+    const x = r + Math.random() * (fnWidth - r * 2);
+    const y = fnHeight + r;
+    
+    const vx = (fnWidth / 2 - x) * (Math.random() * 0.02 + 0.01);
+    const vy = -(Math.random() * 3 + 15); 
+    
+    fnFruits.push({
+        ...template,
+        x, y, vx, vy,
+        rotation: Math.random() * Math.PI * 2,
+        rotationSpeed: (Math.random() - 0.5) * 0.15,
+        isCut: false,
+        splitDist: 0,
+        splitAngle: 0
+    });
+}
+
+function fnSpawnParticles(x, y, color) {
+    for (let i = 0; i < 15; i++) {
+        fnParticles.push({
+            x, y,
+            vx: (Math.random() - 0.5) * 12,
+            vy: (Math.random() - 0.5) * 12,
+            radius: Math.random() * 4 + 2,
+            color: color,
+            life: 1,
+            decay: Math.random() * 0.02 + 0.02
+        });
+    }
+}
+
+function fnSpawnFloatingText(x, y, text, color) {
+    fnFloatingTexts.push({ x, y, text, color, life: 1, vy: -2 });
+}
+
+function fnDrawFruitFast(f) {
+    const cache = fnFruitCache[f.type];
+    const size = cache.size;
+    
+    fnCtx.save();
+    fnCtx.translate(f.x, f.y);
+    fnCtx.rotate(f.rotation);
+
+    if (!f.isCut) {
+        fnCtx.drawImage(cache.full, -size/2, -size/2, size, size);
+    } else {
+        fnCtx.save();
+        fnCtx.translate(-f.splitDist, 0);
+        fnCtx.rotate(-f.splitAngle);
+        fnCtx.drawImage(cache.left, -size/2, -size/2, size, size);
+        fnCtx.restore();
+        
+        fnCtx.save();
+        fnCtx.translate(f.splitDist, 0);
+        fnCtx.rotate(f.splitAngle);
+        fnCtx.drawImage(cache.right, -size/2, -size/2, size, size);
+        fnCtx.restore();
+    }
+    fnCtx.restore();
+}
+
+function fnDrawTrailFast() {
+    if (fnSwipePoints.length < 2) return;
+    
+    fnCtx.beginPath();
+    fnCtx.moveTo(fnSwipePoints[0].x, fnSwipePoints[0].y);
+    for (let i = 1; i < fnSwipePoints.length; i++) {
+        fnCtx.lineTo(fnSwipePoints[i].x, fnSwipePoints[i].y);
+    }
+    
+    fnCtx.lineCap = 'round';
+    fnCtx.lineJoin = 'round';
+    
+    fnCtx.strokeStyle = 'rgba(0, 240, 255, 0.3)';
+    fnCtx.lineWidth = 14;
+    fnCtx.stroke();
+    
+    fnCtx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+    fnCtx.lineWidth = 6;
+    fnCtx.stroke();
+    
+    fnCtx.strokeStyle = '#ffffff';
+    fnCtx.lineWidth = 2;
+    fnCtx.stroke();
+}
+
+function fnLineIntersectsCircle(x1, y1, x2, y2, cx, cy, r) {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let a = dx * dx + dy * dy;
+    let b = 2 * (dx * (x1 - cx) + dy * (y1 - cy));
+    let c = (x1 - cx) * (x1 - cx) + (y1 - cy) * (y1 - cy) - r * r;
+    let det = b * b - 4 * a * c;
+    if (det < 0) return false;
+    
+    let t1 = (-b + Math.sqrt(det)) / (2 * a);
+    let t2 = (-b - Math.sqrt(det)) / (2 * a);
+    
+    if ((t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1)) return true;
+    return false;
+}
+
+function fnCheckCuts() {
+    if (fnSwipePoints.length < 2) return;
+    let p1 = fnSwipePoints[fnSwipePoints.length - 2];
+    let p2 = fnSwipePoints[fnSwipePoints.length - 1];
+
+    fnFruits.forEach(f => {
+        if (!f.isCut && fnLineIntersectsCircle(p1.x, p1.y, p2.x, p2.y, f.x, f.y, f.radius)) {
+            f.isCut = true;
+            f.vx = (Math.random() - 0.5) * 6; 
+            
+            if (f.type === 'bomb') {
+                fnSpawnParticles(f.x, f.y, '#111');
+                fnSpawnFloatingText(f.x, f.y, 'BOOM!', '#ff3b30');
+                fnLoseLife();
+                fnCanvas.style.transform = 'translate(15px, 15px)';
+                setTimeout(() => fnCanvas.style.transform = 'translate(0, 0)', 50);
+            } else {
+                fnScore += f.price;
+                fnUpdateUI();
+                fnSpawnParticles(f.x, f.y, f.particleColor);
+                fnSpawnFloatingText(f.x, f.y, `+¥${f.price.toFixed(2)}`, '#ffcc00');
+            }
+        }
+    });
+}
+
+function fnGameLoop() {
+    if (!fnIsPlaying) return;
+    fnFrameCount++;
+
+    // 性能优化：移除消耗极大的全屏 drawImage，改用纯色填充，大幅提升帧率，告别卡顿
+    fnCtx.fillStyle = '#1a120c';
+    fnCtx.fillRect(0, 0, fnWidth, fnHeight);
+
+    let spawnRate = Math.max(20, 50 - Math.floor(fnFrameCount / 300));
+    if (fnFrameCount % spawnRate === 0) fnSpawnFruit();
+
+    for (let i = fnFruits.length - 1; i >= 0; i--) {
+        let f = fnFruits[i];
+        f.x += f.vx;
+        f.y += f.vy;
+        f.vy += 0.25; 
+        f.rotation += f.rotationSpeed;
+
+        if (f.isCut) {
+            f.splitDist += 3;
+            f.splitAngle += 0.08;
+        }
+
+        fnDrawFruitFast(f);
+
+        if (f.y > fnHeight + f.radius * 2) {
+            if (!f.isCut && f.type !== 'bomb') {
+                fnLoseLife();
+            }
+            fnFruits.splice(i, 1);
+        }
+    }
+
+    for (let i = fnParticles.length - 1; i >= 0; i--) {
+        let p = fnParticles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.4; 
+        p.life -= p.decay;
+        
+        if (p.life <= 0) {
+            fnParticles.splice(i, 1);
+            continue;
+        }
+
+        fnCtx.globalAlpha = p.life;
+        fnCtx.fillStyle = p.color;
+        fnCtx.beginPath();
+        fnCtx.arc(p.x, p.y, p.radius, 0, Math.PI*2);
+        fnCtx.fill();
+        fnCtx.globalAlpha = 1;
+    }
+
+    for (let i = fnFloatingTexts.length - 1; i >= 0; i--) {
+        let ft = fnFloatingTexts[i];
+        ft.y += ft.vy;
+        ft.life -= 0.02;
+
+        if (ft.life <= 0) {
+            fnFloatingTexts.splice(i, 1);
+            continue;
+        }
+
+        fnCtx.globalAlpha = ft.life;
+        fnCtx.fillStyle = ft.color;
+        fnCtx.font = '900 26px Arial';
+        fnCtx.textAlign = 'center';
+        fnCtx.fillText(ft.text, ft.x, ft.y);
+        fnCtx.globalAlpha = 1;
+    }
+
+    if (fnSwipePoints.length > 0) {
+        fnDrawTrailFast();
+        fnSwipePoints.forEach(p => p.age++);
+        fnSwipePoints = fnSwipePoints.filter(p => p.age < 4); 
+    }
+
+    fnAnimationId = requestAnimationFrame(fnGameLoop);
+}
+
+function fnAddSwipePoint(x, y) {
+    fnSwipePoints.push({ x, y, age: 0 });
+    fnCheckCuts();
+}
+
+function fnBindEvents() {
+    fnCanvas.removeEventListener('mousedown', fnMouseDown);
+    fnCanvas.removeEventListener('mousemove', fnMouseMove);
+    window.removeEventListener('mouseup', fnMouseUp);
+    fnCanvas.removeEventListener('touchstart', fnTouchStart);
+    fnCanvas.removeEventListener('touchmove', fnTouchMove);
+    window.removeEventListener('touchend', fnTouchEnd);
+
+    fnCanvas.addEventListener('mousedown', fnMouseDown);
+    fnCanvas.addEventListener('mousemove', fnMouseMove);
+    window.addEventListener('mouseup', fnMouseUp);
+    fnCanvas.addEventListener('touchstart', fnTouchStart, {passive: false});
+    fnCanvas.addEventListener('touchmove', fnTouchMove, {passive: false});
+    window.addEventListener('touchend', fnTouchEnd);
+}
+
+function fnMouseDown(e) {
+    fnIsSwiping = true;
+    fnSwipePoints = [];
+    fnAddSwipePoint(e.clientX, e.clientY);
+}
+function fnMouseMove(e) {
+    if (fnIsSwiping) fnAddSwipePoint(e.clientX, e.clientY);
+}
+function fnMouseUp() {
+    fnIsSwiping = false;
+    fnSwipePoints = [];
+}
+function fnTouchStart(e) {
+    e.preventDefault();
+    fnIsSwiping = true;
+    fnSwipePoints = [];
+    fnAddSwipePoint(e.touches[0].clientX, e.touches[0].clientY);
+}
+function fnTouchMove(e) {
+    e.preventDefault();
+    if (fnIsSwiping) fnAddSwipePoint(e.touches[0].clientX, e.touches[0].clientY);
+}
+function fnTouchEnd() {
+    fnIsSwiping = false;
+    fnSwipePoints = [];
+}

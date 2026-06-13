@@ -1,0 +1,4384 @@
+// ==========================================
+// 查手机功能专属逻辑 (phoneCheck.js)
+// ==========================================
+
+// 初始化：保存默认的 SVG 图标，方便后续恢复
+document.addEventListener('DOMContentLoaded', () => {
+    const apps = document.querySelectorAll('.desktop-app .app-icon, .phone-dock .app-icon');
+    apps.forEach(iconEl => {
+        iconEl.setAttribute('data-default-svg', iconEl.innerHTML);
+    });
+});
+
+// 打开查手机全屏遮罩
+function openPhoneCheck() {
+    // 核心修改：拦截 Char 账号使用查手机功能
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+    const me = allEntities.find(a => a.id === currentLoginId);
+    if (me && !me.isAccount) {
+        alert('角色账号无法使用查手机功能！');
+        return;
+    }
+
+    // 新增：拦截查看其他真实用户账号的手机
+    if (typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId) {
+        const target = allEntities.find(a => a.id === currentChatRoomCharId);
+        if (target && target.isAccount) {
+            alert('无法查看其他真实用户的手机！');
+            return;
+        }
+    }
+
+    // 关闭可能存在的更多面板
+    const morePanel = document.getElementById('crMorePanel');
+    if (morePanel) morePanel.classList.remove('show');
+    
+    // 恢复全屏状态
+    const isFull = ChatDB.getItem('phone_check_fullscreen') === 'true';
+    if (isFull) {
+        document.getElementById('phoneCheckOverlay').classList.add('is-fullscreen');
+    } else {
+        document.getElementById('phoneCheckOverlay').classList.remove('is-fullscreen');
+    }
+    
+    // 动态加载当前聊天室 Char 的头像、名字以及保存的自定义装扮
+    if (typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId) {
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        const char = chars.find(c => c.id === currentChatRoomCharId);
+        
+        if (char) {
+            const avatarUrl = char.avatarUrl || '';
+            const charName = char.netName || char.name || '未知角色';
+            
+                    // 1. 恢复头像和名字
+                    const stampInner = document.querySelector('.char-stamp-inner');
+                    if (stampInner) stampInner.style.backgroundImage = `url('${avatarUrl}')`;
+                    
+                    const profileAvatar = document.getElementById('phoneCheckProfileAvatar');
+                    if (profileAvatar) profileAvatar.style.backgroundImage = `url('${avatarUrl}')`;
+                    
+                    const sidebarAvatar = document.querySelector('.sidebar-avatar');
+                    if (sidebarAvatar) sidebarAvatar.style.backgroundImage = `url('${avatarUrl}')`;
+                    
+                    const profileName = document.getElementById('phoneCheckProfileName');
+                    if (profileName) profileName.innerText = charName;
+
+        }
+
+        // 2. 恢复壁纸
+        const savedWallpaper = ChatDB.getItem(`phone_check_wallpaper_${currentChatRoomCharId}`);
+        const wallpaperEl = document.getElementById('phoneWallpaper');
+        if (wallpaperEl) {
+            if (savedWallpaper) {
+                wallpaperEl.style.backgroundImage = `url(${savedWallpaper})`;
+            } else {
+                wallpaperEl.style.backgroundImage = ''; // 恢复默认浅灰
+            }
+        }
+
+        // 3. 恢复小组件背景
+        const savedWidgetBg = ChatDB.getItem(`phone_check_widget_bg_${currentChatRoomCharId}`);
+        const widgetBgEl = document.getElementById('widgetBg');
+        if (widgetBgEl) {
+            if (savedWidgetBg) {
+                widgetBgEl.style.backgroundImage = `url(${savedWidgetBg})`;
+            } else {
+                widgetBgEl.style.backgroundImage = ''; // 恢复默认白色
+            }
+        }
+
+        // 4. 恢复自定义图标
+        const savedIcons = JSON.parse(ChatDB.getItem(`phone_check_icons_${currentChatRoomCharId}`) || '{}');
+        const apps = document.querySelectorAll('.desktop-app .app-icon, .phone-dock .app-icon');
+        apps.forEach(iconEl => {
+            const appId = iconEl.id;
+            if (savedIcons[appId]) {
+                iconEl.innerHTML = '';
+                iconEl.style.backgroundImage = `url(${savedIcons[appId]})`;
+                iconEl.style.backgroundSize = 'cover';
+                iconEl.style.backgroundPosition = 'center';
+            } else {
+                // 如果没有自定义图标，恢复默认 SVG
+                iconEl.style.backgroundImage = '';
+                if (iconEl.hasAttribute('data-default-svg')) {
+                    iconEl.innerHTML = iconEl.getAttribute('data-default-svg');
+                }
+            }
+        });
+    }
+
+    document.getElementById('phoneCheckOverlay').classList.add('show');
+}
+
+// 关闭查手机全屏遮罩
+function closePhoneCheck() {
+    document.getElementById('phoneCheckOverlay').classList.remove('show');
+    document.getElementById('charSidebar').classList.remove('open');
+}
+
+// 切换侧边栏
+function toggleSidebar() {
+    document.getElementById('charSidebar').classList.toggle('open');
+}
+
+// 切换全屏模式 (带持久化)
+function togglePhoneFullscreen() {
+    const overlay = document.getElementById('phoneCheckOverlay');
+    overlay.classList.toggle('is-fullscreen');
+    const isFull = overlay.classList.contains('is-fullscreen');
+    ChatDB.setItem('phone_check_fullscreen', isFull ? 'true' : 'false');
+    toggleSidebar(); // 切换后收起侧边栏
+}
+
+// ==========================================
+// 壁纸与背景上传逻辑 (带持久化)
+// ==========================================
+function triggerWallpaperUpload() {
+    document.getElementById('wallpaperUploadInput').click();
+}
+
+function handleWallpaperUpload(event) {
+    const file = event.target.files[0];
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const result = e.target.result;
+            document.getElementById('phoneWallpaper').style.backgroundImage = `url(${result})`;
+            
+            // 保存到数据库
+            if (typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId) {
+                ChatDB.setItem(`phone_check_wallpaper_${currentChatRoomCharId}`, result);
+            }
+        }
+        reader.readAsDataURL(file);
+    }
+    event.target.value = '';
+}
+
+function triggerWidgetBgUpload() {
+    document.getElementById('widgetBgUploadInput').click();
+}
+
+function handleWidgetBgUpload(event) {
+    const file = event.target.files[0];
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const result = e.target.result;
+            document.getElementById('widgetBg').style.backgroundImage = `url(${result})`;
+            
+            // 保存到数据库
+            if (typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId) {
+                ChatDB.setItem(`phone_check_widget_bg_${currentChatRoomCharId}`, result);
+            }
+        }
+        reader.readAsDataURL(file);
+    }
+    event.target.value = '';
+}
+
+// ==========================================
+// 图标更换逻辑 (带持久化与保存确认)
+// ==========================================
+let currentEditingIconId = null;
+let tempIconData = null; // 暂存上传的图标数据
+
+function openIconModal() {
+    const grid = document.getElementById('iconModalGrid');
+    grid.innerHTML = '';
+    tempIconData = null; // 打开时清空暂存
+    
+    // 获取桌面和Dock的图标
+    const apps = document.querySelectorAll('.desktop-app .app-icon, .phone-dock .app-icon');
+    
+    apps.forEach((iconEl, index) => {
+        const parentApp = iconEl.closest('.desktop-app');
+        const nameEl = parentApp ? parentApp.querySelector('.app-name') : null;
+        const name = nameEl ? nameEl.innerText : `Dock App ${index - 3}`;
+        const appId = iconEl.id;
+
+        const item = document.createElement('div');
+        item.className = 'icon-modal-item';
+        item.dataset.appId = appId; // 记录 ID 方便后续查找
+        item.innerHTML = `
+            <div class="icon-modal-preview">${iconEl.innerHTML}</div>
+            <div class="icon-modal-name">${name}</div>
+        `;
+        
+        // 复制背景图
+        if (iconEl.style.backgroundImage) {
+            item.querySelector('.icon-modal-preview').style.backgroundImage = iconEl.style.backgroundImage;
+            item.querySelector('.icon-modal-preview').innerHTML = '';
+        }
+
+        item.onclick = () => {
+            currentEditingIconId = appId;
+            document.getElementById('iconUploadInput').click();
+        };
+        grid.appendChild(item);
+    });
+
+    // 新增：恢复默认图标按键
+    const resetItem = document.createElement('div');
+    resetItem.className = 'icon-modal-item';
+    resetItem.innerHTML = `
+        <div class="icon-modal-preview" style="background: #ffffff; border: none;">
+            <svg viewBox="0 0 24 24" width="24" height="24" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><polyline points="3 3 3 8 8 8"></polyline></svg>
+        </div>
+        <div class="icon-modal-name" style="color: #000000; font-weight: bold;">恢复默认</div>
+    `;
+    resetItem.onclick = () => {
+        if(confirm('确定要恢复所有图标为默认样式吗？')) {
+            resetDefaultIcons();
+        }
+    };
+    grid.appendChild(resetItem);
+
+    document.getElementById('iconModalOverlay').classList.add('show');
+    document.getElementById('charSidebar').classList.remove('open'); // 收起侧边栏
+}
+
+// 新增：恢复默认图标逻辑
+function resetDefaultIcons() {
+    if (typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId) {
+        // 清除数据库中的自定义图标记录
+        ChatDB.removeItem(`phone_check_icons_${currentChatRoomCharId}`);
+        
+        // 恢复桌面和 Dock 上的图标
+        const apps = document.querySelectorAll('.desktop-app .app-icon, .phone-dock .app-icon');
+        apps.forEach(iconEl => {
+            iconEl.style.backgroundImage = '';
+            if (iconEl.hasAttribute('data-default-svg')) {
+                iconEl.innerHTML = iconEl.getAttribute('data-default-svg');
+            }
+        });
+    }
+    closeIconModal();
+}
+
+function closeIconModal() {
+    tempIconData = null;
+    currentEditingIconId = null;
+    document.getElementById('iconModalOverlay').classList.remove('show');
+}
+
+function handleIconUpload(event) {
+    const file = event.target.files[0];
+    if (file && currentEditingIconId) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            tempIconData = e.target.result;
+            // 仅更新弹窗内的预览图，不直接修改桌面
+            const items = document.querySelectorAll('.icon-modal-item');
+            items.forEach(item => {
+                if (item.dataset.appId === currentEditingIconId) {
+                    const preview = item.querySelector('.icon-modal-preview');
+                    preview.innerHTML = '';
+                    preview.style.backgroundImage = `url(${tempIconData})`;
+                    preview.style.backgroundSize = 'cover';
+                    preview.style.backgroundPosition = 'center';
+                }
+            });
+        }
+        reader.readAsDataURL(file);
+    }
+    event.target.value = '';
+}
+
+function saveIconChanges() {
+    if (currentEditingIconId && tempIconData) {
+        const targetIcon = document.getElementById(currentEditingIconId);
+        if (targetIcon) {
+            targetIcon.innerHTML = ''; // 清空 SVG
+            targetIcon.style.backgroundImage = `url(${tempIconData})`;
+            targetIcon.style.backgroundSize = 'cover';
+            targetIcon.style.backgroundPosition = 'center';
+            
+            // 保存到数据库
+            if (typeof currentChatRoomCharId !== 'undefined' && currentChatRoomCharId) {
+                let savedIcons = JSON.parse(ChatDB.getItem(`phone_check_icons_${currentChatRoomCharId}`) || '{}');
+                savedIcons[currentEditingIconId] = tempIconData;
+                ChatDB.setItem(`phone_check_icons_${currentChatRoomCharId}`, JSON.stringify(savedIcons));
+            }
+        }
+    }
+    closeIconModal();
+}
+// ==========================================
+// 查手机 - TikTok 交互逻辑
+// ==========================================
+
+function openPhoneTiktok() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    
+    // 动态加载当前角色的头像和名字到 TikTok 个人主页
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (char) {
+        const avatarUrl = char.avatarUrl || 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100&auto=format&fit=crop';
+        const charName = char.netName || char.name || 'User';
+        
+        // 替换头像 (仅限个人主页，不影响推荐流的路人)
+        document.querySelectorAll('.tk-profile-avatar-large').forEach(el => {
+            el.style.backgroundImage = `url('${avatarUrl}')`;
+        });
+        
+        // 替换名字 (仅限个人主页)
+        document.querySelectorAll('.tk-profile-title, .tk-profile-handle').forEach(el => {
+            if (el.classList.contains('tk-profile-handle')) {
+                el.innerText = '@' + charName;
+            } else {
+                el.innerText = charName;
+            }
+        });
+    }
+
+    document.getElementById('phoneTiktokApp').classList.add('show');
+    switchTiktokTab('home'); // 默认打开首页
+    
+    // 尝试渲染已有数据
+    renderTkHomeFeed();
+    renderTkSearch();
+    renderTkProfileFeed();
+    renderTkInbox();
+    renderTkDrafts();
+}
+
+function closePhoneTiktok() {
+    document.getElementById('phoneTiktokApp').classList.remove('show');
+}
+
+function switchTiktokTab(tabId) {
+    // 隐藏所有页面
+    document.querySelectorAll('.tk-page').forEach(p => p.classList.remove('active'));
+    // 取消所有底部导航高亮
+    document.querySelectorAll('.tk-nav-item').forEach(n => n.classList.remove('active'));
+    
+    // 显示目标页面
+    document.getElementById('tk-page-' + tabId).classList.add('active');
+    // 高亮对应导航
+    document.getElementById('tk-nav-' + tabId).classList.add('active');
+}
+
+// ==========================================
+// TikTok API 生成与渲染逻辑
+// ==========================================
+
+async function generateTiktokDataAPI() {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    // 1. 获取当前登录用户的面具 (Persona)
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    // 2. 获取世界书
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => {
+        activeWbs.push(entry.content);
+    });
+
+    // 3. 获取最近 30 条聊天记录
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    // 4. 构建 Prompt
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    
+    if (activeWbs.length > 0) {
+        prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    }
+    
+    if (recentHistory) {
+        prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+    }
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成该角色手机里 TikTok (抖音) 的相关数据。
+【核心生成要求】：
+1. 首页推荐 (foryou)：生成 3-5 个视频。必须是其他NPC/路人发布的视频（绝对不能是你自己）。内容必须和最近聊天的话题相关，或者是你潜意识里关注的事物。必须生成 5 条具体的网友评论。
+2. 个人主页 (profile)：生成你自己发布的 4 个视频。这些视频的文案(desc)和画面(videoContent)都必须和 ${userRealName} 有关，表达对 ${userRealName} 的真实情绪，或者是记录 ${userRealName} 相关的事情！必须生成 5 条具体的网友评论。
+3. 抖音热搜 (trending)：生成 4-6 个热搜标题。符合当前世界观或你的兴趣。
+4. 私信消息 (inbox)：生成 2-4 条私信。【重点】：私信内容必须是路人或熟人对你在个人主页 (profile) 发布的视频的反应或搭讪！
+
+必须返回合法的 JSON，结构如下：
+{
+  "foryou": [
+    {
+      "author": "路人作者名",
+      "videoContent": "视频画面内容的详细描述",
+      "desc": "视频文案",
+      "likes": "1.2M",
+      "commentsCount": "45K",
+      "music": "音乐名",
+      "comments": [
+        {"user": "网友A", "content": "评论内容"}
+      ]
+    }
+  ],
+  "trending": [
+    {"title": "热搜标题", "hot": "123W"}
+  ],
+  "profile": [
+    {
+      "videoContent": "视频画面内容的详细描述(必须与${userRealName}有关)",
+      "desc": "视频文案(必须与${userRealName}有关)",
+      "likes": "10K",
+      "commentsCount": "120",
+      "comments": [
+        {"user": "网友B", "content": "评论内容"}
+      ]
+    }
+  ],
+  "inbox": [
+    {
+      "name": "发件人(路人/熟人)",
+      "lastMsg": "最后一条消息",
+      "time": "1h",
+      "history": [
+        {"role": "other", "content": "针对你发布的某个视频的搭讪或反应"},
+        {"role": "me", "content": "你的回复"}
+      ]
+    }
+  ],
+  "drafts": [
+    {"desc": "草稿描述，例如：尝试了新的猫咪特效，太搞笑了"}
+  ]
+}`;
+
+    showToast('正在生成 TikTok 数据...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            ChatDB.setItem(`tiktok_data_${currentChatRoomCharId}`, JSON.stringify(parsed));
+            
+            // 渲染所有页面
+            renderTkHomeFeed();
+            renderTkSearch();
+            renderTkProfileFeed();
+            renderTkInbox();
+            renderTkDrafts();
+            
+            hideToast();
+            alert('TikTok 数据生成成功！');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}
+
+// 渲染 Search 抖音热搜
+function renderTkSearch() {
+    const list = document.getElementById('tkSearchList');
+    const dataStr = ChatDB.getItem(`tiktok_data_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    
+    const data = JSON.parse(dataStr);
+    if (!data.trending || data.trending.length === 0) return;
+
+    list.innerHTML = '';
+    data.trending.forEach((item, index) => {
+        const el = document.createElement('div');
+        el.className = 'tk-search-item';
+        let rankClass = index === 0 ? 'top1' : (index === 1 ? 'top2' : (index === 2 ? 'top3' : ''));
+        el.innerHTML = `
+            <div class="tk-search-rank ${rankClass}">${index + 1}</div>
+            <div class="tk-search-info">
+                <div class="tk-search-title">${item.title}</div>
+                <div class="tk-search-hot">${item.hot} 热度</div>
+            </div>
+        `;
+        list.appendChild(el);
+    });
+}
+
+// 渲染 Home 推荐视频流
+function renderTkHomeFeed() {
+    const container = document.getElementById('tkHomeFeed');
+    const dataStr = ChatDB.getItem(`tiktok_data_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    
+    const data = JSON.parse(dataStr);
+    if (!data.foryou || data.foryou.length === 0) return;
+
+    container.innerHTML = '';
+    data.foryou.forEach((video, index) => {
+        const avatarUrl = typeof window.getRandomNpcAvatar === 'function' ? window.getRandomNpcAvatar() : 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100&auto=format&fit=crop';
+        const item = document.createElement('div');
+        item.className = 'tk-video-item';
+        item.innerHTML = `
+            <div class="tk-video-content-display" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; padding: 20px; z-index: 1; pointer-events: none;">
+                <div style="width: 250px; text-align: center; color: rgba(255,255,255,0.8); font-size: 16px; word-wrap: break-word; white-space: normal;">
+                    [视频画面]<br>${video.videoContent || '无画面描述'}
+                </div>
+            </div>
+            <div class="tk-right-actions" style="z-index: 2;">
+                <div class="tk-avatar-wrapper" style="background-image: url('${avatarUrl}'); background-size: cover; background-position: center;"><div class="tk-avatar-plus">+</div></div>
+                <div class="tk-action-item"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><span class="tk-action-text">${video.likes}</span></div>
+                <div class="tk-action-item" onclick="openTkComments('foryou', ${index})"><svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM9 11H7V9h2v2zm4 0h-2V9h2v2zm4 0h-2V9h2v2z"/></svg><span class="tk-action-text">${video.commentsCount}</span></div>
+                <div class="tk-action-item"><svg viewBox="0 0 24 24"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg><span class="tk-action-text">Save</span></div>
+                                                <div class="tk-action-item" onclick="shareToChar('tiktok_foryou', ${index})"><svg viewBox="0 0 24 24"><path d="M14 5l7 7-7 7v-4.1c-5 0-8.5 1.6-11 5.1 1-5 4-10 11-11V5z"/></svg><span class="tk-action-text">Share</span></div>
+
+                <div class="tk-record-disc"><div class="tk-record-disc-inner"></div></div>
+            </div>
+            <div class="tk-bottom-info">
+                <div class="tk-username">@${video.author}</div>
+                <div class="tk-description">${video.desc}</div>
+                <div class="tk-music-ticker">
+                    <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+                    <div class="tk-marquee"><span>Original Sound - ${video.music || video.author}</span></div>
+                </div>
+            </div>
+        `;
+        container.appendChild(item);
+    });
+}
+
+// 渲染 Profile 个人作品网格
+function renderTkProfileFeed() {
+    const grid = document.getElementById('tkProfileGrid');
+    const dataStr = ChatDB.getItem(`tiktok_data_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    
+    const data = JSON.parse(dataStr);
+    if (!data.profile || data.profile.length === 0) return;
+
+    grid.innerHTML = '';
+    data.profile.forEach((video, index) => {
+        const item = document.createElement('div');
+        item.className = 'tk-grid-item';
+        item.innerHTML = `<div style="padding: 5px; font-size: 10px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;">[画面] ${video.videoContent || video.desc}</div>`;
+        item.onclick = () => openTkProfileVideo(index); // 点击进入视频详情
+        grid.appendChild(item);
+    });
+}
+
+// 新增：打开个人作品视频详情
+function openTkProfileVideo(index) {
+    const dataStr = ChatDB.getItem(`tiktok_data_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    const data = JSON.parse(dataStr);
+    const video = data.profile[index];
+    if (!video) return;
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    const authorName = char ? (char.netName || char.name) : 'User';
+
+    const container = document.getElementById('tkProfileVideoContainer');
+    container.innerHTML = `
+        <div class="tk-video-item" style="height: 100%; width: 100%;">
+            <div class="tk-video-content-display" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; padding: 20px; z-index: 1; pointer-events: none;">
+                <div style="width: 250px; text-align: center; color: rgba(255,255,255,0.8); font-size: 16px; word-wrap: break-word; white-space: normal;">
+                    [视频画面]<br>${video.videoContent || '无画面描述'}
+                </div>
+            </div>
+            <div class="tk-right-actions" style="z-index: 2;">
+                <div class="tk-avatar-wrapper"><div class="tk-avatar-plus">+</div></div>
+                <div class="tk-action-item"><svg viewBox="0 0 24 24"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg><span class="tk-action-text">${video.likes}</span></div>
+                <div class="tk-action-item" onclick="openTkComments('profile', ${index})"><svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM9 11H7V9h2v2zm4 0h-2V9h2v2zm4 0h-2V9h2v2z"/></svg><span class="tk-action-text">${video.commentsCount}</span></div>
+                <div class="tk-action-item"><svg viewBox="0 0 24 24"><path d="M17 3H7c-1.1 0-2 .9-2 2v16l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg><span class="tk-action-text">Save</span></div>
+                                                <div class="tk-action-item" onclick="shareToChar('tiktok_foryou', ${index})"><svg viewBox="0 0 24 24"><path d="M14 5l7 7-7 7v-4.1c-5 0-8.5 1.6-11 5.1 1-5 4-10 11-11V5z"/></svg><span class="tk-action-text">Share</span></div>
+
+                <div class="tk-record-disc"><div class="tk-record-disc-inner"></div></div>
+            </div>
+            <div class="tk-bottom-info" style="z-index: 2;">
+                <div class="tk-username">@${authorName}</div>
+                <div class="tk-description">${video.desc}</div>
+                <div class="tk-music-ticker">
+                    <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+                    <div class="tk-marquee"><span>Original Sound - ${authorName}</span></div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // 恢复头像
+    const avatarUrl = char && char.avatarUrl ? char.avatarUrl : 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100&auto=format&fit=crop';
+    const avatarEls = container.querySelectorAll('.tk-avatar-wrapper, .tk-record-disc-inner');
+    avatarEls.forEach(el => el.style.backgroundImage = `url('${avatarUrl}')`);
+
+    document.getElementById('tkProfileVideoModal').classList.add('show');
+}
+
+function closeTkProfileVideo() {
+    document.getElementById('tkProfileVideoModal').classList.remove('show');
+}
+
+// 渲染 Inbox 私信列表
+function renderTkInbox() {
+    const list = document.getElementById('tkInboxList');
+    const dataStr = ChatDB.getItem(`tiktok_data_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    
+    const data = JSON.parse(dataStr);
+    if (!data.inbox || data.inbox.length === 0) return;
+
+    list.innerHTML = '';
+    data.inbox.forEach((msg, index) => {
+        const avatarUrl = typeof window.getRandomNpcAvatar === 'function' ? window.getRandomNpcAvatar() : 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100&auto=format&fit=crop';
+        const item = document.createElement('div');
+        item.className = 'tk-inbox-item';
+        item.onclick = () => openTkChatRoom(index);
+        item.innerHTML = `
+            <div class="tk-inbox-avatar" style="background-image: url('${avatarUrl}'); background-size: cover; background-position: center;"></div>
+            <div class="tk-inbox-info">
+                <div class="tk-inbox-name">${msg.name}</div>
+                <div class="tk-inbox-desc">${msg.lastMsg}</div>
+            </div>
+            <div class="tk-inbox-right">${msg.time || '1h'}</div>
+        `;
+        list.appendChild(item);
+    });
+}
+
+// 打开评论区
+function openTkComments(type, index) {
+    const list = document.getElementById('tkCommentsList');
+    const dataStr = ChatDB.getItem(`tiktok_data_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    
+    const data = JSON.parse(dataStr);
+    const video = data[type][index];
+    if (!video || !video.comments) return;
+
+    list.innerHTML = '';
+    video.comments.forEach(c => {
+        const avatarUrl = typeof window.getRandomNpcAvatar === 'function' ? window.getRandomNpcAvatar() : 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100&auto=format&fit=crop';
+        const item = document.createElement('div');
+        item.className = 'tk-comment-item';
+        item.innerHTML = `
+            <div class="tk-comment-avatar" style="background-image: url('${avatarUrl}'); background-size: cover; background-position: center;"></div>
+            <div class="tk-comment-content">
+                <div class="tk-comment-user">${c.user}</div>
+                <div class="tk-comment-text">${c.content}</div>
+            </div>
+        `;
+        list.appendChild(item);
+    });
+
+    document.getElementById('tkCommentsPanel').classList.add('show');
+}
+
+function closeTkComments() {
+    document.getElementById('tkCommentsPanel').classList.remove('show');
+}
+
+// 打开私信聊天室
+function openTkChatRoom(index) {
+    const historyEl = document.getElementById('tkChatHistory');
+    const dataStr = ChatDB.getItem(`tiktok_data_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    
+    const data = JSON.parse(dataStr);
+    const chat = data.inbox[index];
+    if (!chat || !chat.history) return;
+
+    document.getElementById('tkChatTitle').innerText = chat.name;
+    historyEl.innerHTML = '';
+
+    chat.history.forEach(msg => {
+        const bubble = document.createElement('div');
+        bubble.className = `tk-chat-bubble ${msg.role === 'me' ? 'tk-chat-right' : 'tk-chat-left'}`;
+        bubble.innerText = msg.content;
+        historyEl.appendChild(bubble);
+    });
+
+    document.getElementById('tkChatRoom').classList.add('show');
+    setTimeout(() => { historyEl.scrollTop = historyEl.scrollHeight; }, 100);
+}
+
+function closeTkChatRoom() {
+    document.getElementById('tkChatRoom').classList.remove('show');
+}
+
+// 打开相机页面 (点击加号触发)
+function openTiktokCamera() {
+    document.getElementById('tk-page-camera').classList.add('show');
+}
+
+// 关闭相机页面
+function closeTiktokCamera() {
+    document.getElementById('tk-page-camera').classList.remove('show');
+}
+// ==========================================
+// 相机页面中间草稿箱逻辑 (左右翻看)
+// ==========================================
+let currentTkDraftIndex = 0;
+let tkDraftsList = [];
+
+function renderTkDrafts() {
+    const dataStr = ChatDB.getItem(`tiktok_data_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    
+    const data = JSON.parse(dataStr);
+    tkDraftsList = data.drafts || [];
+    currentTkDraftIndex = 0;
+    updateTkDraftDisplay();
+}
+
+function updateTkDraftDisplay() {
+    const textEl = document.getElementById('tkCamDraftText');
+    if (!textEl) return;
+    
+    if (tkDraftsList.length === 0) {
+        textEl.innerText = "暂无草稿，请点击主页右上角生成";
+    } else {
+        textEl.innerText = tkDraftsList[currentTkDraftIndex].desc;
+    }
+}
+
+function prevTkDraft() {
+    if (tkDraftsList.length <= 1) return;
+    currentTkDraftIndex = (currentTkDraftIndex - 1 + tkDraftsList.length) % tkDraftsList.length;
+    updateTkDraftDisplay();
+}
+
+function nextTkDraft() {
+    if (tkDraftsList.length <= 1) return;
+    currentTkDraftIndex = (currentTkDraftIndex + 1) % tkDraftsList.length;
+    updateTkDraftDisplay();
+}
+// ==========================================
+// 查手机 - 备忘录 APP 交互逻辑
+// ==========================================
+
+// 打开备忘录 APP
+function openPhoneNotes() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    document.getElementById('phoneNotesApp').classList.add('show');
+    renderPhoneNotesList(); // 打开时尝试渲染已有数据
+}
+
+// 关闭备忘录 APP (点击大标题触发)
+function closePhoneNotes() {
+    document.getElementById('phoneNotesApp').classList.remove('show');
+}
+
+// 打开备忘录详情页
+function openNoteDetail(index) {
+    const dataStr = ChatDB.getItem(`phone_notes_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    const data = JSON.parse(dataStr);
+    const note = data[index];
+    if (!note) return;
+
+    const editor = document.getElementById('noteDetailEditor');
+    editor.innerHTML = `
+        <div class="note-editor-time">${note.detailTime}</div>
+        <div class="note-editor-title">${note.detailTitle}</div>
+        <div style="white-space: pre-wrap;">${note.detailContent}</div>
+    `;
+
+    document.getElementById('noteDetailPage').classList.add('show');
+}
+
+// 关闭备忘录详情页
+function closeNoteDetail() {
+    document.getElementById('noteDetailPage').classList.remove('show');
+}
+
+// 渲染备忘录列表
+function renderPhoneNotesList() {
+    const grid = document.getElementById('phoneNotesGrid');
+    const dataStr = ChatDB.getItem(`phone_notes_${currentChatRoomCharId}`);
+    
+    if (!dataStr) {
+        grid.innerHTML = '<div style="grid-column: 1 / 3; text-align: center; color: #888; font-size: 13px; margin-top: 40px;">点击右上角按钮生成备忘录内容</div>';
+        return;
+    }
+
+    const data = JSON.parse(dataStr);
+    grid.innerHTML = '';
+
+    data.forEach((item, index) => {
+        const folder = document.createElement('div');
+        // 交替使用浅棕色和深棕色样式
+        const styleClass = index % 2 === 0 ? 'notes-style-1' : 'notes-style-2';
+        folder.className = `notes-folder-item ${styleClass}`;
+        folder.onclick = () => openNoteDetail(index);
+        
+        folder.innerHTML = `
+            <div class="notes-folder-icon-wrapper">
+                <!-- 小熊耳朵 (在最底层) -->
+                <div class="notes-bear-ear left"></div>
+                <div class="notes-bear-ear right"></div>
+                
+                <div class="notes-folder-tab"></div>
+                <div class="notes-folder-paper notes-folder-paper-1"></div>
+                <div class="notes-folder-paper notes-folder-paper-2"></div>
+                <div class="notes-folder-body">
+                    <div class="notes-cute-face">
+                        <div class="notes-eyes-row"><div class="notes-eye"></div><div class="notes-eye"></div></div>
+                        <div class="notes-mouth-bg">
+                            <div class="notes-mouth-line top"></div>
+                            <div class="notes-mouth-line left"></div>
+                            <div class="notes-mouth-line right"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="notes-folder-text-info">
+                <div class="notes-folder-title">${item.title}</div>
+                <div class="notes-folder-count">${item.count}</div>
+            </div>
+        `;
+        grid.appendChild(folder);
+    });
+}
+
+// 调用 API 生成备忘录数据
+async function generatePhoneNotesAPI() {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    // 1. 获取当前登录用户的面具 (Persona)
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    // 2. 获取世界书
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => {
+        activeWbs.push(entry.content);
+    });
+
+    // 3. 获取最近 30 条聊天记录
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    // 4. 构建 Prompt
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    
+    if (activeWbs.length > 0) {
+        prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    }
+    
+    if (recentHistory) {
+        prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+    }
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成你手机里“备忘录”APP的相关数据。
+备忘录的内容应该非常私密、真实，可以包含你对 ${userRealName} 的吐槽、暗恋、计划，或者你自己的日常琐事、购物清单、日记等。
+必须返回合法的 JSON 数组，包含 4-6 个文件夹（每个文件夹对应一篇详细的备忘录），结构如下：
+[
+  {
+    "title": "文件夹标题(如: 购物清单)",
+    "count": "3 个备忘录",
+    "detailTitle": "备忘录详细标题",
+    "detailTime": "2023年10月25日 14:30",
+    "detailContent": "备忘录的具体内容，可以包含换行符\\n，内容要符合该角色的人设和日常生活。"
+  }
+]`;
+
+    showToast('正在生成备忘录...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            ChatDB.setItem(`phone_notes_${currentChatRoomCharId}`, JSON.stringify(parsed));
+            
+            renderPhoneNotesList();
+            hideToast();
+            alert('备忘录数据生成成功！');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}
+
+// ==========================================
+// 查手机 - Shopping APP 交互逻辑
+// ==========================================
+
+// 打开 Shopping APP
+function openPhoneShop() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    
+    // 动态加载当前角色的头像和名字到我的页面
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (char) {
+        const avatarUrl = char.avatarUrl || 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100&auto=format&fit=crop';
+        const charName = char.netName || char.name || 'User';
+        
+        const profileAvatar = document.getElementById('shopProfileAvatar');
+        if (profileAvatar) profileAvatar.style.backgroundImage = `url('${avatarUrl}')`;
+        
+        const profileName = document.getElementById('shopProfileName');
+        if (profileName) profileName.innerText = charName;
+    }
+
+    document.getElementById('phoneShopApp').classList.add('show');
+    switchShopTab('home'); // 默认打开首页
+    renderPhoneShop(); // 尝试渲染已有数据
+}
+
+// 关闭 Shopping APP (点击大标题触发)
+function closePhoneShop() {
+    document.getElementById('phoneShopApp').classList.remove('show');
+}
+
+// 切换底部 Tab
+function switchShopTab(tabId) {
+    // 隐藏所有页面
+    document.querySelectorAll('.shop-page').forEach(page => {
+        page.classList.remove('active');
+    });
+    // 取消所有导航高亮
+    document.querySelectorAll('.shop-nav-item').forEach(nav => {
+        nav.classList.remove('active');
+    });
+
+    // 显示目标页面并高亮导航
+    document.getElementById('shop-page-' + tabId).classList.add('active');
+    document.getElementById('shop-nav-' + tabId).classList.add('active');
+}
+
+// 渲染 Shopping APP 数据
+function renderPhoneShop() {
+    const dataStr = ChatDB.getItem(`phone_shop_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    
+    const data = JSON.parse(dataStr);
+    
+    // 1. 渲染首页推荐
+    const homeGrid = document.getElementById('shopHomeGrid');
+    if (data.home && data.home.length > 0) {
+        homeGrid.innerHTML = '';
+        data.home.forEach(item => {
+            const card = document.createElement('div');
+            card.className = 'shop-item-card';
+            // 绑定点击事件，打开商品详情
+            card.onclick = () => openShopItemDetail(item);
+            card.innerHTML = `
+                <div class="shop-item-img">
+                    <div class="chat-desc-img-120" style="width: 100% !important; height: 100% !important; border: none; border-radius: 0;"><div class="img-text">${item.imageDesc}</div></div>
+                </div>
+                <div class="shop-item-info">
+                    <div class="shop-item-title">${item.title}</div>
+                    <div class="shop-item-bottom">
+                        <div class="shop-item-price">${item.price}</div>
+                        <div class="shop-item-add"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></div>
+                    </div>
+                </div>
+            `;
+            homeGrid.appendChild(card);
+        });
+    }
+
+    // 2. 渲染购物车
+    const cartList = document.getElementById('shopCartList');
+    if (data.cart && data.cart.length > 0) {
+        cartList.innerHTML = '';
+        let total = 0;
+        data.cart.forEach(item => {
+            total += parseFloat(item.price) * (item.qty || 1);
+            const card = document.createElement('div');
+            card.className = 'shop-cart-item';
+            card.onclick = () => openShopItemDetail(item); // 购物车商品也可以点击查看
+            card.innerHTML = `
+                <div class="shop-checkbox active" onclick="event.stopPropagation(); this.classList.toggle('active')"></div>
+                <div class="shop-cart-img">
+                    <div class="chat-desc-img-120" style="width: 100% !important; height: 100% !important; border: none; border-radius: 10px; padding: 4px;"><div class="img-text" style="font-size: 10px;">${item.imageDesc}</div></div>
+                </div>
+                <div class="shop-cart-info">
+                    <div class="shop-cart-title">${item.title}</div>
+                    <div class="shop-cart-sku">${item.sku || '默认规格'}</div>
+                    <div class="shop-cart-price-row">
+                        <div class="shop-cart-price">${item.price}</div>
+                        <div class="shop-cart-qty" onclick="event.stopPropagation()"><span>-</span><span>${item.qty || 1}</span><span>+</span></div>
+                    </div>
+                </div>
+            `;
+            cartList.appendChild(card);
+        });
+        document.getElementById('shopCartTotal').innerText = `¥${total.toFixed(2)}`;
+    }
+
+    // 3. 渲染最近购买订单
+    const orderList = document.getElementById('shopRecentOrdersList');
+    if (data.orders && data.orders.length > 0) {
+        orderList.innerHTML = '';
+        data.orders.forEach(item => {
+            const card = document.createElement('div');
+            card.className = 'shop-recent-order-item';
+            card.onclick = () => openShopItemDetail(item); // 订单商品也可以点击查看
+            card.innerHTML = `
+                <div class="shop-recent-img">
+                    <div class="chat-desc-img-120" style="width: 100% !important; height: 100% !important; border: none; border-radius: 8px; padding: 4px;"><div class="img-text" style="font-size: 10px;">${item.imageDesc}</div></div>
+                </div>
+                <div class="shop-recent-info">
+                    <div class="shop-recent-title">${item.title}</div>
+                    <div class="shop-recent-status">${item.status}</div>
+                </div>
+                <div class="shop-recent-price">¥${item.price}</div>
+            `;
+            orderList.appendChild(card);
+        });
+    }
+}
+
+// 调用 API 生成 Shopping 数据 (一次性生成所有商品及详情)
+async function generatePhoneShopAPI() {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    // 1. 获取当前登录用户的面具 (Persona)
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    // 2. 获取世界书
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => {
+        activeWbs.push(entry.content);
+    });
+
+    // 3. 获取最近 30 条聊天记录
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    // 4. 构建 Prompt
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    
+    if (activeWbs.length > 0) {
+        prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    }
+    
+    if (recentHistory) {
+        prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+    }
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成你手机里“Shopping (商城/外卖)”APP的相关数据。
+商品内容应该符合该角色的消费习惯、兴趣爱好、经济水平，或者可能包含准备买给 ${userRealName} 的礼物。
+
+【重要新增要求】：这个 APP 不仅可以买实物商品，还可以点外卖！请在生成的首页推荐、购物车、最近订单中，**务必混合包含一些外卖/餐饮相关的条目**（例如：奶茶、烧烤、炸鸡、咖啡、轻食等）。外卖订单的状态可以是“派送中”、“已送达”等。
+
+【重要要求】：对于每一个商品或外卖，你必须同时生成一段详细的 "description" (商品详情)。
+这段详情需要包含：
+1. 商品的卖点、材质、口味、功能介绍（符合商城或外卖平台的语气）。
+2. 买家秀评价（可以编造几个有趣的评价）。
+3. 【最重要】：以 ${char.name} 的内心独白形式，写一段为什么想买这个东西的想法（比如：觉得很适合 ${userRealName} 想买来送礼，或者是自己最近刚好需要，或者是半夜饿了想吃宵夜）。
+
+必须返回合法的 JSON 对象，结构如下：
+{
+  "home": [ // 首页推荐商品 (4-6个)
+    {
+      "title": "商品名称", 
+      "price": "199.00", 
+      "imageDesc": "图片画面的详细文字描述",
+      "desc": "商品本身的卖点、材质、功能介绍等客观描述，可以使用 \\n 进行换行分段。",
+      "reviews": [
+        {"user": "买家A", "content": "评价内容..."}
+      ],
+      "thought": "角色想买这个东西的内心独白"
+    }
+  ],
+  "cart": [ // 购物车商品 (1-3个)
+    {
+      "title": "商品名称", 
+      "sku": "颜色/尺码等规格", 
+      "price": "99.00", 
+      "qty": 1, 
+      "imageDesc": "图片画面的详细文字描述",
+      "desc": "商品本身的卖点、材质、功能介绍等客观描述，可以使用 \\n 进行换行分段。",
+      "reviews": [
+        {"user": "买家A", "content": "评价内容..."}
+      ],
+      "thought": "角色想买这个东西的内心独白"
+    }
+  ],
+  "orders": [ // 最近购买订单 (2-4个)
+    {
+      "title": "商品名称", 
+      "status": "待发货/待收货/已完成", 
+      "price": "299.00", 
+      "imageDesc": "图片画面的详细文字描述",
+      "desc": "商品本身的卖点、材质、功能介绍等客观描述，可以使用 \\n 进行换行分段。",
+      "reviews": [
+        {"user": "买家A", "content": "评价内容..."}
+      ],
+      "thought": "角色想买这个东西的内心独白"
+    }
+  ]
+}`;
+
+    showToast('正在生成商城数据(包含详情，请耐心等待)...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            ChatDB.setItem(`phone_shop_${currentChatRoomCharId}`, JSON.stringify(parsed));
+            
+            renderPhoneShop();
+            hideToast();
+            alert('商城数据生成成功！');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}
+
+// ==========================================
+// 商品详情全屏页逻辑 (直接读取本地数据，秒开)
+// ==========================================
+
+function openShopItemDetail(item) {
+    // 填充基础信息
+    document.getElementById('shopDetailTitle').innerText = item.title;
+    document.getElementById('shopDetailPrice').innerText = `¥${item.price}`;
+    // 使用新的类名，解除文字省略限制，允许滚动
+    document.getElementById('shopDetailImg').innerHTML = `<div class="shop-detail-full-text">${item.imageDesc}</div>`;
+    
+    // 处理新的结构化数据 (兼容旧数据)
+    const descEl = document.getElementById('shopDetailDesc');
+    const thoughtSection = document.getElementById('shopDetailThoughtSection');
+    const thoughtContent = document.getElementById('shopDetailThought');
+    const reviewSection = document.getElementById('shopDetailReviewSection');
+    const reviewList = document.getElementById('shopDetailReviews');
+    const reviewCount = document.getElementById('shopDetailReviewCount');
+
+    // 重置显示状态
+    thoughtSection.style.display = 'none';
+    reviewSection.style.display = 'none';
+    descEl.innerHTML = '';
+    reviewList.innerHTML = '';
+
+    if (item.desc || item.reviews || item.thought) {
+        // 新数据格式
+        if (item.thought) {
+            thoughtContent.innerText = item.thought;
+            thoughtSection.style.display = 'block';
+        }
+        
+        if (item.reviews && item.reviews.length > 0) {
+            reviewCount.innerText = `(${item.reviews.length})`;
+            item.reviews.forEach(review => {
+                const reviewItem = document.createElement('div');
+                reviewItem.className = 'shop-detail-review-item';
+                reviewItem.innerHTML = `
+                    <div class="shop-detail-review-user">
+                        <div class="shop-detail-review-avatar"></div>
+                        <div class="shop-detail-review-name">${review.user}</div>
+                    </div>
+                    <div class="shop-detail-review-text">${review.content}</div>
+                `;
+                reviewList.appendChild(reviewItem);
+            });
+            reviewSection.style.display = 'block';
+        }
+
+        if (item.desc) {
+            descEl.innerHTML = item.desc.replace(/\n/g, '<br>');
+        } else {
+            descEl.innerHTML = '<div style="color:#888;">暂无详细描述</div>';
+        }
+    } else if (item.description) {
+        // 兼容旧数据格式
+        descEl.innerHTML = item.description.replace(/\n/g, '<br>');
+    } else {
+        descEl.innerHTML = '<div style="color:#888;">暂无详细描述</div>';
+    }
+    
+    // 显示全屏页
+    document.getElementById('shopDetailPage').classList.add('show');
+}
+
+function closeShopItemDetail() {
+    document.getElementById('shopDetailPage').classList.remove('show');
+}
+
+// 劫持 openPhoneShop，在打开时尝试渲染已有数据
+const _originalOpenPhoneShop = openPhoneShop;
+openPhoneShop = function() {
+    _originalOpenPhoneShop();
+    renderPhoneShop();
+};
+// ==========================================
+// 查手机 - 相册与录音 APP 交互逻辑
+// ==========================================
+
+// 打开相册与录音 APP
+function openPhoneGallery() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+
+    document.getElementById('phoneGalleryApp').classList.add('show');
+    switchPgTab('album'); // 默认打开相册页
+    renderPhoneGallery(); // 尝试渲染已有数据
+}
+
+// 关闭相册与录音 APP
+function closePhoneGallery() {
+    document.getElementById('phoneGalleryApp').classList.remove('show');
+}
+
+// 切换底部 Tab
+function switchPgTab(tabName) {
+    // 隐藏所有页面，移除所有导航高亮
+    document.querySelectorAll('.pg-page').forEach(page => page.classList.remove('active'));
+    document.querySelectorAll('.pg-nav-item:not(.pg-add-btn)').forEach(nav => nav.classList.remove('active'));
+
+    // 显示目标页面，高亮目标导航
+    document.getElementById('pg-page-' + tabName).classList.add('active');
+    document.getElementById('pg-nav-' + tabName).classList.add('active');
+
+    // 更改 Header 标题并带上淡入淡出动画
+    const titleEl = document.getElementById('pg-header-title');
+    titleEl.style.opacity = 0;
+    setTimeout(() => {
+        titleEl.innerText = tabName === 'album' ? 'Gallery' : 'Voice Memos';
+        titleEl.style.opacity = 1;
+    }, 200);
+}
+
+// 渲染相册与录音数据
+function renderPhoneGallery() {
+    const dataStr = ChatDB.getItem(`phone_gallery_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    const data = JSON.parse(dataStr);
+
+    // 1. 渲染相册 Recent Memories (取前3个相册的封面)
+    const stackEl = document.getElementById('pg-album-stack');
+    if (stackEl && data.recentMemories && data.recentMemories.length > 0) {
+        stackEl.innerHTML = '';
+        const recent = data.recentMemories.slice(0, 3);
+        recent.forEach((mem, idx) => {
+            let zIndex = 3 - idx;
+            let rotate = idx === 0 ? '-5deg' : (idx === 1 ? '2deg' : '8deg');
+            let left = idx * 40 + 'px';
+            // 增加 onclick 事件，点击打开弹窗
+            stackEl.innerHTML += `
+                <div class="chat-desc-img-120" onclick="openPgRecentDetail(${idx})" style="width: 100px !important; height: 100px !important; border-radius: 16px; border: 3px solid #2c2c2e; position: absolute; box-shadow: 0 10px 20px rgba(0,0,0,0.3); left: ${left}; z-index: ${zIndex}; transform: rotate(${rotate}); padding: 8px; background: #f0f0f0; cursor: pointer;">
+                    <div class="img-text" style="font-size: 10px; color: #666;">${mem.desc}</div>
+                </div>
+            `;
+        });
+    }
+
+    // 2. 渲染相册列表
+    const gridEl = document.getElementById('pg-gallery-grid');
+    if (gridEl && data.albums) {
+        gridEl.innerHTML = '';
+        data.albums.forEach((album, idx) => {
+            gridEl.innerHTML += `
+                <div class="pg-grid-item" onclick="openPgAlbumDetail(${idx})">
+                    <div class="chat-desc-img-120 pg-grid-img" style="width: 100% !important; height: auto !important; aspect-ratio: 1; border-radius: 20px; padding: 10px; background: #eee; cursor: pointer;">
+                        <div class="img-text" style="font-size: 12px; color: #555;">${album.coverDesc}</div>
+                    </div>
+                    <div class="pg-grid-info">
+                        <span class="pg-grid-title">${album.title}</span>
+                        <span class="pg-grid-count">${album.time}</span> <!-- 这里改成了显示时间 -->
+                    </div>
+                </div>
+            `;
+        });
+    }
+
+    // 3. 渲染录音列表
+    const timelineEl = document.getElementById('pg-timeline-container');
+    if (timelineEl && data.records) {
+        timelineEl.innerHTML = '<div class="pg-timeline-line"></div>';
+        data.records.forEach((record, idx) => {
+            timelineEl.innerHTML += `
+                <div class="pg-task-row" onclick="playPgRecord(${idx})">
+                    <div class="pg-timeline-node" id="pg-record-node-${idx}"></div>
+                    <div class="pg-task-card">
+                        <div class="pg-task-header">
+                            <div class="pg-task-title">${record.title}</div>
+                            <div class="pg-task-time">${record.time}</div>
+                        </div>
+                        <div class="pg-task-desc">
+                            <div class="pg-play-btn-small">
+                                <svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                            </div>
+                            ${record.duration} • ${record.size}
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+    }
+}
+
+// 打开相册详情弹窗 (Albums)
+function openPgAlbumDetail(index) {
+    const dataStr = ChatDB.getItem(`phone_gallery_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    const data = JSON.parse(dataStr);
+    const album = data.albums[index];
+    if (!album) return;
+
+    document.getElementById('pgAlbumDetailTitle').innerText = album.title;
+    document.getElementById('pgAlbumDetailCount').innerText = album.time;
+    document.getElementById('pgAlbumDetailDesc').innerText = album.coverDesc;
+    
+    document.getElementById('pgAlbumDetailOverlay').classList.add('show');
+}
+
+// 打开最近照片详情弹窗 (Recent Memories)
+function openPgRecentDetail(index) {
+    const dataStr = ChatDB.getItem(`phone_gallery_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    const data = JSON.parse(dataStr);
+    const mem = data.recentMemories[index];
+    if (!mem) return;
+
+    document.getElementById('pgAlbumDetailTitle').innerText = "Recent Memory";
+    document.getElementById('pgAlbumDetailCount').innerText = mem.time;
+    document.getElementById('pgAlbumDetailDesc').innerText = mem.desc;
+    
+    document.getElementById('pgAlbumDetailOverlay').classList.add('show');
+}
+
+// 关闭相册详情弹窗
+function closePgAlbumDetail() {
+    document.getElementById('pgAlbumDetailOverlay').classList.remove('show');
+}
+
+// 播放录音联动
+function playPgRecord(index) {
+    const dataStr = ChatDB.getItem(`phone_gallery_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    const data = JSON.parse(dataStr);
+    const record = data.records[index];
+    if (!record) return;
+
+    // 1. 更新顶部卡片信息
+    document.getElementById('pg-record-hero-title').innerText = record.title;
+    document.getElementById('pg-record-hero-time').innerText = record.duration;
+    document.getElementById('pg-record-status-text').innerText = 'Playing';
+    
+    // 2. 更新录音具体内容
+    const contentEl = document.getElementById('pg-record-hero-content');
+    if (contentEl) {
+        contentEl.innerText = `"${record.content}"`;
+    }
+    
+    // 3. 开启波浪动画和红点闪烁
+    document.getElementById('pg-sound-wave').classList.add('playing');
+    document.getElementById('pg-record-dot').style.animation = 'pgPulse 1.5s infinite';
+    document.getElementById('pg-record-dot').style.opacity = '1';
+
+    // 4. 更新时间轴节点的高亮状态
+    document.querySelectorAll('.pg-timeline-node').forEach(node => node.classList.remove('active'));
+    const activeNode = document.getElementById(`pg-record-node-${index}`);
+    if (activeNode) activeNode.classList.add('active');
+}
+
+// 调用 API 生成相册与录音数据
+async function generatePhoneGalleryAPI() {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    // 1. 获取当前登录用户的面具 (Persona)
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    // 2. 获取世界书
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => {
+        activeWbs.push(entry.content);
+    });
+
+    // 3. 获取最近 30 条聊天记录
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    // 4. 构建 Prompt
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    
+    if (activeWbs.length > 0) {
+        prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    }
+    
+    if (recentHistory) {
+        prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+    }
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成你手机里“相册(Gallery)”和“录音(Voice Memos)”APP的相关数据。
+内容应该非常私密、真实，可以包含你对 ${userRealName} 的偷拍、合照、或者是你自己的日常照片；录音可以是你的随手记、唱歌、或者是想对 ${userRealName} 说的话。
+{
+  "recentMemories": [ // 3张最近的照片 (与下方相册内容不同)
+    {
+      "time": "照片时间(如: Today)",
+      "desc": "照片画面的详细文字描述，例如：一张在咖啡馆偷拍 ${userRealName} 侧脸的照片"
+    }
+  ],
+  "albums": [ // 4-6个相册文件夹
+    {
+      "title": "相册名称(如: Favorites, 偷拍的某人)",
+      "time": "相册创建或最新更新时间(如: 2023-10-25)",
+      "coverDesc": "相册封面的详细文字描述"
+    }
+  ],
+  "records": [ // 3-5条录音记录
+    {
+      "title": "录音标题(如: 睡前想说的话, 随便哼的歌)",
+      "time": "录音时间(如: Today, 9:00 AM 或 Yesterday, 8:30 PM)",
+      "duration": "录音时长(如: 00:03:45)",
+      "size": "文件大小(如: 2.4 MB)",
+      "content": "录音的具体文本内容，比如角色的自言自语、哼唱的歌词等，要符合人设，字数在20-50字左右。"
+    }
+  ]
+}`;
+
+    showToast('正在生成数据...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            ChatDB.setItem(`phone_gallery_${currentChatRoomCharId}`, JSON.stringify(parsed));
+            
+            renderPhoneGallery();
+            hideToast();
+            alert('数据生成成功！');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}
+// ==========================================
+// 查手机 - Browser APP 交互逻辑 (带本地存储)
+// ==========================================
+let browserTabs = [];
+let browserActiveTabId = null;
+let browserCurrentView = 'home';
+let browserSearchHistoryData = [];
+
+function openPhoneBrowser() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    
+    // 1. 从本地存储读取数据
+    const savedTabs = ChatDB.getItem(`browser_tabs_${currentChatRoomCharId}`);
+    const savedHistory = ChatDB.getItem(`browser_history_${currentChatRoomCharId}`);
+
+    if (savedTabs) {
+        browserTabs = JSON.parse(savedTabs);
+    } else {
+        browserTabs = [{ id: Date.now(), history: ['home'], currentIndex: 0 }];
+    }
+
+    if (savedHistory) {
+        browserSearchHistoryData = JSON.parse(savedHistory);
+    } else {
+        browserSearchHistoryData = [];
+    }
+
+    browserActiveTabId = browserTabs[0].id;
+    browserCurrentView = 'home';
+
+    document.getElementById('phoneBrowserApp').classList.add('show');
+    
+    // 2. 渲染界面
+    browserRenderCurrentTab();
+    renderBrowserHistory();
+}
+
+function closePhoneBrowser() {
+    document.getElementById('phoneBrowserApp').classList.remove('show');
+}
+
+function browserNavigateTo(url) {
+    let tab = browserTabs.find(t => t.id === browserActiveTabId);
+    tab.history = tab.history.slice(0, tab.currentIndex + 1);
+    tab.history.push(url);
+    tab.currentIndex++;
+    
+    // 保存到本地
+    ChatDB.setItem(`browser_tabs_${currentChatRoomCharId}`, JSON.stringify(browserTabs));
+    browserRenderCurrentTab();
+}
+
+function browserRenderCurrentTab() {
+    let tab = browserTabs.find(t => t.id === browserActiveTabId);
+    let currentUrl = tab.history[tab.currentIndex];
+
+    if (currentUrl === 'home') {
+        browserSwitchView('home');
+    } else {
+        browserSwitchView('web');
+        document.getElementById('browser-web-input').value = tab.title || currentUrl;
+        
+        // 渲染论坛帖子内容
+        const forumContent = document.getElementById('browser-forum-content');
+        if (tab.forumData) {
+            let commentsHtml = '';
+            if (tab.forumData.comments && tab.forumData.comments.length > 0) {
+                commentsHtml = tab.forumData.comments.map(c => `
+                    <div class="browser-forum-comment-item">
+                        <div class="browser-forum-comment-avatar"></div>
+                        <div class="browser-forum-comment-info">
+                            <div class="browser-forum-comment-user">${c.user}</div>
+                            <div class="browser-forum-comment-text">${c.text}</div>
+                        </div>
+                    </div>
+                `).join('');
+            } else {
+                commentsHtml = '<div style="color:#888; font-size:13px;">暂无评论</div>';
+            }
+
+            forumContent.innerHTML = `
+                <div class="browser-forum-post">
+                    <div class="browser-forum-title">${tab.forumData.title}</div>
+                    <div class="browser-forum-body">${tab.forumData.content}</div>
+                </div>
+                <div class="browser-forum-comments-section">
+                    <div class="browser-forum-comments-header">全部评论</div>
+                    ${commentsHtml}
+                </div>
+            `;
+        } else {
+            forumContent.innerHTML = '<div style="padding: 20px; color: #888;">正在加载帖子内容...</div>';
+        }
+    }
+    browserUpdateNavButtons();
+    browserUpdateTabCount();
+}
+
+function browserSwitchView(viewName) {
+    browserCurrentView = viewName;
+    document.getElementById('browser-view-home').classList.remove('active');
+    document.getElementById('browser-view-web').classList.remove('active');
+    document.getElementById('browser-view-tabs').classList.remove('active');
+
+    // 新增：控制顶栏的显示与隐藏，只有在主页 (home) 时才显示顶栏
+    const topBar = document.querySelector('#phoneBrowserApp .browser-top-bar');
+    if (topBar) {
+        topBar.style.display = viewName === 'home' ? 'flex' : 'none';
+    }
+
+    if (viewName === 'home') document.getElementById('browser-view-home').classList.add('active');
+    if (viewName === 'web') document.getElementById('browser-view-web').classList.add('active');
+    if (viewName === 'tabs') {
+        document.getElementById('browser-view-tabs').classList.add('active');
+        browserRenderTabGrid();
+    }
+}
+
+function browserUpdateNavButtons() {
+    let tab = browserTabs.find(t => t.id === browserActiveTabId);
+    const btnBack = document.getElementById('browser-btn-back');
+    const btnForward = document.getElementById('browser-btn-forward');
+    
+    if (tab.currentIndex > 0) {
+        btnBack.classList.remove('disabled');
+    } else {
+        btnBack.classList.add('disabled');
+    }
+
+    if (tab.currentIndex < tab.history.length - 1) {
+        btnForward.classList.remove('disabled');
+    } else {
+        btnForward.classList.add('disabled');
+    }
+}
+
+function browserUpdateTabCount() {
+    document.getElementById('browser-tab-count-display').innerText = browserTabs.length;
+}
+
+function browserGoBack() {
+    let tab = browserTabs.find(t => t.id === browserActiveTabId);
+    if (tab.currentIndex > 0) {
+        tab.currentIndex--;
+        ChatDB.setItem(`browser_tabs_${currentChatRoomCharId}`, JSON.stringify(browserTabs));
+        browserRenderCurrentTab();
+    }
+}
+
+function browserGoForward() {
+    let tab = browserTabs.find(t => t.id === browserActiveTabId);
+    if (tab.currentIndex < tab.history.length - 1) {
+        tab.currentIndex++;
+        ChatDB.setItem(`browser_tabs_${currentChatRoomCharId}`, JSON.stringify(browserTabs));
+        browserRenderCurrentTab();
+    }
+}
+
+function browserGoHome() {
+    let tab = browserTabs.find(t => t.id === browserActiveTabId);
+    if (tab.history[tab.currentIndex] !== 'home') {
+        // 核心修改：不覆盖当前标签页，而是寻找已有的主页标签页或新建一个
+        let homeTab = browserTabs.find(t => t.history[t.currentIndex] === 'home');
+        if (homeTab) {
+            browserActiveTabId = homeTab.id;
+            ChatDB.setItem(`browser_tabs_${currentChatRoomCharId}`, JSON.stringify(browserTabs));
+            browserRenderCurrentTab();
+        } else {
+            browserCreateNewTab();
+        }
+    } else {
+        browserSwitchView('home');
+    }
+}
+
+function browserToggleTabs() {
+    if (browserCurrentView === 'tabs') {
+        browserRenderCurrentTab(); // 退出标签管理
+    } else {
+        browserSwitchView('tabs'); // 进入标签管理
+    }
+}
+
+function browserCreateNewTab() {
+    let newTab = { id: Date.now(), history: ['home'], currentIndex: 0 };
+    browserTabs.push(newTab);
+    browserActiveTabId = newTab.id;
+    ChatDB.setItem(`browser_tabs_${currentChatRoomCharId}`, JSON.stringify(browserTabs));
+    browserRenderCurrentTab();
+}
+
+function browserSwitchToTab(id) {
+    browserActiveTabId = id;
+    browserRenderCurrentTab();
+}
+
+function browserCloseTab(event, id) {
+    event.stopPropagation(); // 阻止触发切换标签事件
+    if (browserTabs.length === 1) {
+        // 如果是最后一个标签，直接重置为主页
+        browserTabs[0] = { id: Date.now(), history: ['home'], currentIndex: 0 };
+        browserActiveTabId = browserTabs[0].id;
+        ChatDB.setItem(`browser_tabs_${currentChatRoomCharId}`, JSON.stringify(browserTabs));
+        browserRenderCurrentTab();
+        return;
+    }
+
+    let index = browserTabs.findIndex(t => t.id === id);
+    browserTabs.splice(index, 1);
+    
+    // 如果关闭的是当前激活的标签，激活前一个或后一个
+    if (browserActiveTabId === id) {
+        browserActiveTabId = browserTabs[Math.max(0, index - 1)].id;
+    }
+    
+    ChatDB.setItem(`browser_tabs_${currentChatRoomCharId}`, JSON.stringify(browserTabs));
+    browserRenderTabGrid();
+    browserUpdateTabCount();
+}
+
+function browserRenderTabGrid() {
+    const tabGrid = document.getElementById('browser-tab-grid');
+    tabGrid.innerHTML = '';
+    browserTabs.forEach(tab => {
+        let currentUrl = tab.history[tab.currentIndex];
+        let title = tab.title ? tab.title : (currentUrl === 'home' ? '主页' : currentUrl);
+        
+        let card = document.createElement('div');
+        card.className = `browser-tab-card ${tab.id === browserActiveTabId ? 'active-tab' : ''}`;
+        card.onclick = () => browserSwitchToTab(tab.id);
+        
+        card.innerHTML = `
+            <div class="browser-tab-card-header">
+                <span class="browser-tab-card-title">${title}</span>
+                <div class="browser-close-tab" onclick="browserCloseTab(event, ${tab.id})">
+                    <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </div>
+            </div>
+            <div class="browser-tab-card-content">
+                ${currentUrl === 'home' ? 'Browser' : '论坛帖子'}
+            </div>
+        `;
+        tabGrid.appendChild(card);
+    });
+}
+
+// ==========================================
+// 浏览器搜索记录与内心想法逻辑
+// ==========================================
+
+function showBrowserHistory() {
+    const dropdown = document.getElementById('browserSearchHistoryDropdown');
+    if (browserSearchHistoryData.length > 0) {
+        dropdown.classList.add('show');
+    }
+}
+
+function hideBrowserHistory() {
+    document.getElementById('browserSearchHistoryDropdown').classList.remove('show');
+}
+
+function renderBrowserHistory() {
+    const dropdown = document.getElementById('browserSearchHistoryDropdown');
+    dropdown.innerHTML = '';
+    
+    if (browserSearchHistoryData.length === 0) {
+        dropdown.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 12px; padding: 20px;">点击右上角生成搜索记录</div>';
+        return;
+    }
+
+    browserSearchHistoryData.forEach(item => {
+        const el = document.createElement('div');
+        el.className = 'browser-history-item';
+        
+        const textEl = document.createElement('div');
+        textEl.className = 'browser-history-text';
+        textEl.innerText = item.keyword;
+        
+        // 点击整行，填入输入框并弹出想法
+        el.onclick = (e) => {
+            e.stopPropagation();
+            document.getElementById('browser-home-input').value = item.keyword;
+            hideBrowserHistory();
+            showBrowserThought(item.keyword, item.thought);
+        };
+
+        el.appendChild(textEl);
+        dropdown.appendChild(el);
+    });
+}
+
+function showBrowserThought(keyword, thoughtText) {
+    document.getElementById('browserThoughtKeyword').innerText = "搜索内容：" + keyword;
+    document.getElementById('browserThoughtText').innerText = "内心想法：" + thoughtText;
+    document.getElementById('browserThoughtModalOverlay').classList.add('show');
+}
+
+function closeBrowserThoughtModal() {
+    document.getElementById('browserThoughtModalOverlay').classList.remove('show');
+}
+
+// 调用 API 生成浏览器数据 (包含搜索记录和论坛帖子标签页)
+async function generatePhoneBrowserAPI() {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    // 1. 获取当前登录用户的面具 (Persona)
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    // 2. 获取世界书
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => {
+        activeWbs.push(entry.content);
+    });
+
+    // 3. 获取最近 30 条聊天记录
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    // 4. 构建 Prompt
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    
+    if (activeWbs.length > 0) {
+        prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    }
+    
+    if (recentHistory) {
+        prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+    }
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成你手机浏览器里的数据。
+内容应该符合你的性格、职业、当前的烦恼，或者可能包含你为了 ${userRealName} 而去搜索的内容（比如查攻略、查礼物、查情感问题等）。
+
+必须返回合法的 JSON 对象，包含 "history" (搜索记录) 和 "tabs" (保留的论坛帖子标签页)，结构如下：
+{
+  "history": [
+    {
+      "keyword": "搜索关键词(如: 附近好吃的火锅店)",
+      "thought": "你搜索这个词时的内心真实想法(如: 听说这家店不错，下次带${userRealName}去吃看看)"
+    }
+  ],
+  "tabs": [
+    {
+      "title": "帖子标题(如: 如何向喜欢的人自然地搭话 - 情感问答)",
+      "content": "楼主的详细提问内容或帖子正文，可以包含换行符\\n",
+      "comments": [
+        {"user": "网友A", "text": "直接上啊！"},
+        {"user": "网友B", "text": "先从共同话题聊起吧。"}
+      ]
+    }
+  ]
+}
+注意：history 生成 4-6 条，tabs 生成 3-5 条。`;
+
+    showToast('正在生成浏览器数据...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsedData = JSON.parse(replyRaw);
+            
+            // 1. 处理搜索记录
+            if (parsedData.history && Array.isArray(parsedData.history)) {
+                browserSearchHistoryData = parsedData.history;
+                ChatDB.setItem(`browser_history_${currentChatRoomCharId}`, JSON.stringify(browserSearchHistoryData));
+                renderBrowserHistory();
+            }
+            
+            // 2. 处理标签页 (论坛帖子)
+            if (parsedData.tabs && Array.isArray(parsedData.tabs)) {
+                browserTabs = parsedData.tabs.map((item, index) => ({
+                    id: Date.now() + index,
+                    history: ['home', `forum_${index}`], // 虚拟一个URL
+                    currentIndex: 1, // 默认显示生成的网页
+                    title: item.title,
+                    forumData: item // 保存帖子数据
+                }));
+                ChatDB.setItem(`browser_tabs_${currentChatRoomCharId}`, JSON.stringify(browserTabs));
+            }
+            
+            // 如果生成为空，给个默认主页
+            if (browserTabs.length === 0) {
+                browserTabs = [{ id: Date.now(), history: ['home'], currentIndex: 0 }];
+                ChatDB.setItem(`browser_tabs_${currentChatRoomCharId}`, JSON.stringify(browserTabs));
+            }
+            
+            // 生成完毕后，强制保持在主页视图
+            browserActiveTabId = browserTabs[0].id;
+            browserSwitchView('home');
+            browserUpdateNavButtons();
+            browserUpdateTabCount();
+            
+            hideToast();
+            alert('浏览器数据生成成功！点击搜索框可查看搜索记录。');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}
+
+// ==========================================
+// 查手机 - 豆豆Ai APP 交互逻辑
+// ==========================================
+
+function openPhoneDoubao() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    document.getElementById('phoneDoubaoApp').classList.add('show');
+    renderPhoneDoubaoList();
+}
+
+function closePhoneDoubao() {
+    document.getElementById('phoneDoubaoApp').classList.remove('show');
+}
+
+function renderPhoneDoubaoList() {
+    const listEl = document.getElementById('dbSessionList');
+    const dataStr = ChatDB.getItem(`phone_doubao_${currentChatRoomCharId}`);
+    
+    if (!dataStr) {
+        listEl.innerHTML = '<div style="text-align: center; color: #888; font-size: 13px; margin-top: 40px;">点击右上角按钮生成对话数据</div>';
+        return;
+    }
+
+    const data = JSON.parse(dataStr);
+    listEl.innerHTML = '';
+
+    // 定义三个 AI 助手的 SVG 图标 (纯黑白灰)
+    // 注意：这里的 id 必须和 Prompt 里要求大模型生成的键名保持一致
+    const bots = [
+        { 
+            id: 'doubao', 
+            name: '豆豆', 
+            icon: '<svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path><circle cx="9" cy="10" r="1.5" fill="#fff" stroke="none"></circle><circle cx="15" cy="10" r="1.5" fill="#fff" stroke="none"></circle></svg>'
+        },
+        { 
+            id: 'tarot', 
+            name: '塔罗师', 
+            icon: '<svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>'
+        },
+        { 
+            id: 'answer', 
+            name: '答案之书', 
+            icon: '<svg viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path></svg>'
+        }
+    ];
+
+    bots.forEach(bot => {
+        const sessionData = data[bot.id] || [];
+        const lastMsg = sessionData.length > 0 ? sessionData[sessionData.length - 1].content : '暂无对话';
+        
+        const item = document.createElement('div');
+        item.className = 'db-session-item';
+        // 将 SVG 字符串传入
+        item.onclick = () => openDoubaoChat(bot.id, bot.name, bot.icon);
+        item.innerHTML = `
+            <div class="db-session-avatar">${bot.icon}</div>
+            <div class="db-session-info">
+                <div class="db-session-name">${bot.name}</div>
+                <div class="db-session-desc">${lastMsg}</div>
+            </div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+function openDoubaoChat(botId, botName, botIcon) {
+    document.getElementById('dbChatTitle').innerText = botName;
+    const historyEl = document.getElementById('dbChatHistory');
+    historyEl.innerHTML = '';
+
+    const dataStr = ChatDB.getItem(`phone_doubao_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    const data = JSON.parse(dataStr);
+    const sessionData = data[botId] || [];
+
+    // 获取角色头像
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    const charAvatarUrl = char && char.avatarUrl ? char.avatarUrl : '';
+
+    sessionData.forEach(msg => {
+        // 增强判断：防止大模型生成大写的 User 或者 me 导致识别失败
+        const isUser = msg.role && (msg.role.toLowerCase() === 'user' || msg.role.toLowerCase() === 'me');
+        
+        const msgEl = document.createElement('div');
+        msgEl.className = `db-msg ${isUser ? 'user' : 'ai'}`;
+        
+        let avatarHtml = '';
+        if (isUser) {
+            // User 发出的消息，强制使用内联样式渲染 Char 的真实头像，防止被 CSS 覆盖
+            avatarHtml = `<div class="db-avatar" style="background-image: url('${charAvatarUrl}'); background-color: #e5e5ea; background-size: cover; background-position: center; border: 1px solid #ddd;"></div>`;
+        } else {
+            // AI 发出的消息，使用传入的 SVG 图标
+            avatarHtml = `<div class="db-avatar" style="background-color: #111;">${botIcon}</div>`;
+        }
+
+        msgEl.innerHTML = `
+            ${avatarHtml}
+            <div class="db-bubble">${msg.content}</div>
+        `;
+        historyEl.appendChild(msgEl);
+    });
+
+    document.getElementById('db-page-list').classList.remove('active');
+    document.getElementById('db-page-chat').classList.add('active');
+    
+    setTimeout(() => {
+        historyEl.scrollTop = historyEl.scrollHeight;
+    }, 50);
+}
+
+function closeDoubaoChat() {
+    document.getElementById('db-page-chat').classList.remove('active');
+    document.getElementById('db-page-list').classList.add('active');
+}
+
+async function generatePhoneDoubaoAPI() {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => { activeWbs.push(entry.content); });
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    if (activeWbs.length > 0) prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    if (recentHistory) prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成你手机里“豆豆Ai”APP（一个AI助手合集）的聊天记录。
+包含三个 AI 助手的对话，每个助手生成 4-15 条对话（一问一答）。
+注意：在这些对话中，你是提问者(role: "user")，AI 是回答者(role: "ai")。你的提问内容应该围绕你最近的烦恼、对 ${userRealName} 的看法、或者符合你人设的奇怪问题。
+
+【三个 AI 助手的人设要求】：
+1. 豆豆 (doudou)：很热心并且言听计从并且非常支持char但是很愚蠢，笨笨的，非常不靠谱，总会出馊主意，出错了或者被骂了喜欢说“对不起，我错了，这次我一定给你最直白，最清晰，最完整最不绕弯子的答案”类似这样的道歉话语（注意不可以完全照搬这个道歉话语，可以根据场景改成符合场景的道歉话语）。
+2. 塔罗师 (tarot)：神秘、神神叨叨，喜欢用塔罗牌的意象（如愚者、恋人、高塔等）来解读你的情感或生活问题，给出模棱两可但听起来很厉害的建议，但其实依旧不靠谱
+3. 答案之书 (answer)：极其简短、高冷、玄学。每次只回答一两个词或一句话（如“去做吧”、“不要犹豫”、“时机未到”），还是不靠谱。
+
+必须返回合法的 JSON 对象，结构如下：
+{
+  "doubao": [
+    {"role": "user", "content": "你的提问"},
+    {"role": "ai", "content": "豆豆的愚蠢回答"}
+  ],
+  "tarot": [
+    {"role": "user", "content": "你的提问"},
+    {"role": "ai", "content": "塔罗师的神秘回答"}
+  ],
+  "answer": [
+    {"role": "user", "content": "你的提问"},
+    {"role": "ai", "content": "答案之书的简短回答"}
+  ]
+}`;
+
+    showToast('正在生成豆豆数据...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            ChatDB.setItem(`phone_doubao_${currentChatRoomCharId}`, JSON.stringify(parsed));
+            
+            renderPhoneDoubaoList();
+            hideToast();
+            alert('豆豆Ai数据生成成功！');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}
+
+// ==========================================
+// 查手机 - icity 日记 APP 交互逻辑
+// ==========================================
+function openPhoneIcity() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    
+    // 动态加载当前角色的头像和名字
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (char) {
+        const avatarUrl = char.avatarUrl || 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100&auto=format&fit=crop';
+        const charName = char.netName || char.name || 'User';
+        
+        const avatarEl = document.getElementById('icityAvatar');
+        if (avatarEl) avatarEl.style.backgroundImage = `url('${avatarUrl}')`;
+        
+        const handleEl = document.getElementById('icityHandle');
+        if (handleEl) handleEl.innerText = '@' + charName;
+    }
+
+    document.getElementById('phoneIcityApp').classList.add('show');
+}
+
+function closePhoneIcity() {
+    document.getElementById('phoneIcityApp').classList.remove('show');
+}
+
+// icity 弹窗控制逻辑
+function openIcityGenModal() {
+    document.getElementById('icityGenModalOverlay').classList.add('show');
+}
+
+function closeIcityGenModal() {
+    document.getElementById('icityGenModalOverlay').classList.remove('show');
+}
+
+function confirmIcityGen() {
+    const count = parseInt(document.getElementById('icityGenCount').value) || 1;
+    closeIcityGenModal();
+    generatePhoneIcityAPI(count);
+}
+
+// 渲染 icity 数据
+function renderPhoneIcity() {
+    const dataStr = ChatDB.getItem(`phone_icity_${currentChatRoomCharId}`);
+    const container = document.querySelector('.icity-content-area');
+    if (!container) return;
+    
+    if (dataStr) {
+        let data = JSON.parse(dataStr);
+        if (!Array.isArray(data)) {
+            data = [data]; // 兼容旧数据和一键生成的数据
+        }
+        
+        container.innerHTML = '';
+        
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        const char = chars.find(c => c.id === currentChatRoomCharId);
+        const avatarUrl = char ? (char.avatarUrl || 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100&auto=format&fit=crop') : '';
+        const charName = char ? (char.netName || char.name || 'User') : 'User';
+
+        data.forEach((item, index) => {
+            const card = document.createElement('div');
+            card.className = 'icity-card';
+            card.style.marginBottom = '15px';
+            card.innerHTML = `
+                <div class="icity-card-header">
+                    <div class="icity-avatar" style="background-image: url('${avatarUrl}')"></div>
+                    <div class="icity-user-info">
+                        <svg class="icity-bottle-icon" viewBox="0 0 24 24">
+                            <path d="M8 2h8v3H8zM7 5h10v2l-2 2v11a2 2 0 0 1-2 2H11a2 2 0 0 1-2-2V9L7 7z"/>
+                        </svg>
+                        <div class="icity-handle">@${charName}</div>
+                    </div>
+                </div>
+                <div class="icity-text">${item.content || '暂无内容'}</div>
+                <div class="icity-time-row">
+                    <svg class="icity-time-icon" viewBox="0 0 24 24">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                    <span class="icity-time-text">${item.time || '----/--/-- --:--'}</span>
+                </div>
+                <div class="icity-actions">
+                    <div class="icity-action-btn">
+                        <svg viewBox="0 0 24 24"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path></svg>
+                        喜欢
+                    </div>
+                    <div class="icity-divider"></div>
+                    <div class="icity-action-btn" onclick="shareToChar('icity', ${index})">
+                        <svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path><line x1="12" y1="7" x2="12" y2="13"></line><line x1="9" y1="10" x2="15" y2="10"></line></svg>
+                        小纸条
+                    </div>
+                    <div class="icity-divider"></div>
+                    <div class="icity-action-btn">
+                        <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                        存为图片
+                    </div>
+                    <div class="icity-divider"></div>
+                    <div class="icity-action-btn icity-action-more">
+                        <svg viewBox="0 0 24 24" width="20" height="20"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg>
+                    </div>
+                </div>
+            `;
+            container.appendChild(card);
+        });
+    } else {
+        container.innerHTML = `
+            <div class="icity-card">
+                <div class="icity-text" style="text-align:center; color:#888;">点击右上角按钮生成日记内容...</div>
+            </div>
+        `;
+    }
+}
+
+// 劫持 openPhoneIcity，在打开时尝试渲染已有数据
+const _originalOpenPhoneIcity = openPhoneIcity;
+openPhoneIcity = function() {
+    _originalOpenPhoneIcity();
+    renderPhoneIcity();
+};
+
+// 调用 API 生成 icity 日记数据
+async function generatePhoneIcityAPI(count = 1) {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    // 1. 获取当前登录用户的面具 (Persona)
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    // 2. 获取世界书
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => {
+        activeWbs.push(entry.content);
+    });
+
+    // 3. 获取最近 30 条聊天记录
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    // 4. 构建 Prompt
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    
+    if (activeWbs.length > 0) {
+        prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    }
+    
+    if (recentHistory) {
+        prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+    }
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成 ${count} 篇你写在 "icity" (一个私密日记APP) 里的日记。
+日记的内容应该非常私密、真实，反映你此刻最真实的内心活动、情绪波动，或者对 ${userRealName} 的看法、纠结、暗恋等。
+语气要符合你的人设，不要像机器生成的，要像一个活人在深夜写下的碎碎念。
+
+必须返回合法的 JSON 数组，结构如下：
+[
+  {
+    "content": "日记的具体内容，可以包含换行符\\n，字数必须在200字以上，禁止少于100字",
+    "time": "写下这篇日记的时间，格式如：2025-11-14 21:52"
+  }
+]`;
+
+    showToast('正在生成日记...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            ChatDB.setItem(`phone_icity_${currentChatRoomCharId}`, JSON.stringify(parsed));
+            
+            renderPhoneIcity();
+            hideToast();
+            alert('日记生成成功！');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}
+
+// ==========================================
+// 查手机 - iMessage 短信 APP 交互逻辑 (与桌面短信联动)
+// ==========================================
+
+let currentImsgTargetId = null; // 记录当前打开的短信会话目标ID
+let currentImsgTargetName = '';
+
+// 打开 iMessage APP
+function openPhoneIMessage() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    document.getElementById('phoneImsgApp').classList.add('show');
+    renderPhoneImsgList(); // 打开时尝试渲染已有数据
+}
+
+// 关闭 iMessage APP (点击左上角毛玻璃按钮)
+function closePhoneIMessage() {
+    document.getElementById('phoneImsgApp').classList.remove('show');
+}
+
+// 渲染短信列表
+function renderPhoneImsgList() {
+    const listEl = document.getElementById('imsg-msg-list-container');
+    
+    // 直接读取角色的短信会话列表
+    let sessions = JSON.parse(ChatDB.getItem(`sms_sessions_${currentChatRoomCharId}`) || '[]');
+    
+    if (sessions.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 13px; margin-top: 40px;">点击右上角按钮生成短信数据</div>';
+        return;
+    }
+
+    listEl.innerHTML = '';
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+
+    sessions.forEach((targetId, index) => {
+        let targetName = targetId;
+        let targetAvatar = '';
+        
+        // 官方号特殊处理
+        if (targetId === '10086') { targetName = '10086'; }
+        else if (targetId === '顺丰速运') { targetName = '顺丰速运'; }
+        else if (targetId === '支付宝') { targetName = '支付宝'; }
+        else if (targetId === '微信支付') { targetName = '微信支付'; }
+        else {
+            // 尝试从实体库中查找 NPC 或 User
+            const entity = allEntities.find(e => e.id === targetId);
+            if (entity) {
+                targetName = entity.netName || entity.name;
+                targetAvatar = entity.avatarUrl || '';
+            }
+        }
+
+        let history = JSON.parse(ChatDB.getItem(`sms_history_${currentChatRoomCharId}_${targetId}`) || '[]');
+        let lastMsgText = '暂无消息';
+        let lastMsgTime = '昨天';
+
+        if (history.length > 0) {
+            const lastMsg = history[history.length - 1];
+            lastMsgText = lastMsg.content || '';
+            
+            const date = new Date(lastMsg.timestamp);
+            const now = new Date();
+            lastMsgTime = date.toDateString() === now.toDateString() 
+                ? `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+                : `${date.getMonth() + 1}/${date.getDate()}`;
+        }
+
+        const avatarLetter = targetName.charAt(0).toUpperCase();
+        const colorClass = index % 2 === 0 ? 'imsg-blue' : 'imsg-green';
+
+        const item = document.createElement('div');
+        item.className = 'imsg-msg-item';
+        item.onclick = () => openImsgChat(targetId, targetName, targetAvatar, colorClass);
+        
+        let avatarHtml = targetAvatar 
+            ? `<div class="imsg-msg-avatar" style="background-image: url('${targetAvatar}'); background-size: cover; background-position: center; color: transparent;"></div>`
+            : `<div class="imsg-msg-avatar ${colorClass}">${avatarLetter}</div>`;
+
+        item.innerHTML = `
+            <div class="imsg-unread-dot" style="opacity: 0;"></div>
+            ${avatarHtml}
+            <div class="imsg-msg-info">
+                <div class="imsg-msg-name-row">
+                    <div class="imsg-msg-name">${targetName}</div>
+                    <div class="imsg-msg-time">${lastMsgTime}</div>
+                </div>
+                <div class="imsg-msg-preview-row">
+                    <div class="imsg-msg-preview" style="color: #8e8e93; font-weight: normal;">${lastMsgText}</div>
+                    <div class="imsg-msg-arrow">›</div>
+                </div>
+            </div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+// 切换到聊天页并渲染记录
+function openImsgChat(targetId, targetName, targetAvatar, colorClass) {
+    currentImsgTargetId = targetId;
+    currentImsgTargetName = targetName;
+
+    // 更新头部信息
+    document.getElementById('imsg-chat-name-text').innerText = targetName;
+    const avatarEl = document.getElementById('imsg-chat-avatar');
+    
+    if (targetAvatar) {
+        avatarEl.style.backgroundImage = `url('${targetAvatar}')`;
+        avatarEl.style.backgroundSize = 'cover';
+        avatarEl.style.backgroundPosition = 'center';
+        avatarEl.innerText = '';
+        avatarEl.className = 'imsg-chat-avatar-small';
+    } else {
+        avatarEl.style.backgroundImage = 'none';
+        avatarEl.innerText = targetName.charAt(0).toUpperCase();
+        avatarEl.className = `imsg-chat-avatar-small ${colorClass || 'imsg-blue'}`;
+    }
+    
+    let sessions = JSON.parse(ChatDB.getItem(`sms_sessions_${currentChatRoomCharId}`) || '[]');
+    document.getElementById('imsg-chat-back-badge').innerText = sessions.length;
+
+    // 渲染聊天记录
+    const historyEl = document.getElementById('imsg-chat-history');
+    historyEl.innerHTML = '';
+
+    let history = JSON.parse(ChatDB.getItem(`sms_history_${currentChatRoomCharId}_${targetId}`) || '[]');
+
+    history.forEach((msg, index) => {
+        const prevMsg = history[index - 1];
+        let showTime = false;
+        if (!prevMsg || msg.timestamp - prevMsg.timestamp > 5 * 60 * 1000) {
+            showTime = true;
+        }
+
+        if (showTime) {
+            const date = new Date(msg.timestamp);
+            const timeStr = `${date.getMonth()+1}月${date.getDate()}日 ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+            const timeEl = document.createElement('div');
+            timeEl.className = 'imsg-time-stamp';
+            timeEl.innerText = timeStr;
+            historyEl.appendChild(timeEl);
+        }
+
+        const row = document.createElement('div');
+        // 在 Char 的手机里，role 为 'user' 代表 Char 自己发出的消息 (在右边)
+        row.className = `imsg-msg-row ${msg.role === 'user' ? 'imsg-me' : 'imsg-other'}`;
+        row.innerHTML = `<div class="imsg-bubble">${msg.content}</div>`;
+        historyEl.appendChild(row);
+    });
+
+    document.getElementById('imsg-list-view').classList.add('slide-out');
+    document.getElementById('imsg-chat-view').classList.add('show');
+    
+    setTimeout(() => {
+        historyEl.scrollTop = historyEl.scrollHeight;
+    }, 50);
+}
+
+// 切换回列表页
+function closeImsgChat() {
+    document.getElementById('imsg-list-view').classList.remove('slide-out');
+    document.getElementById('imsg-chat-view').classList.remove('show');
+    currentImsgTargetId = null;
+    renderPhoneImsgList(); // 刷新列表
+}
+
+// 监听输入框内容变化，动态切换语音/发送按钮
+function handleImsgInput() {
+    const inputBox = document.getElementById('imsg-input');
+    const micBtn = document.getElementById('imsg-mic-btn');
+    const sendBtn = document.getElementById('imsg-send-btn');
+    
+    if (inputBox.innerText.trim().length > 0) {
+        micBtn.style.display = 'none';
+        sendBtn.style.display = 'flex';
+    } else {
+        micBtn.style.display = 'flex';
+        sendBtn.style.display = 'none';
+    }
+}
+
+// 发送消息并保存到本地
+function sendImsgMessage() {
+    if (!currentImsgTargetId) return;
+    
+    const inputBox = document.getElementById('imsg-input');
+    const text = inputBox.innerText.trim();
+    if (!text) return;
+
+    // 1. 更新 UI
+    const historyEl = document.getElementById('imsg-chat-history');
+    const newRow = document.createElement('div');
+    newRow.className = 'imsg-msg-row imsg-me';
+    newRow.innerHTML = `<div class="imsg-bubble">${text}</div>`;
+    historyEl.appendChild(newRow);
+    
+    inputBox.innerText = '';
+    handleImsgInput();
+    historyEl.scrollTop = historyEl.scrollHeight;
+
+    // 2. 保存到数据库 (双向同步)
+    const newMsg = {
+        role: 'user', // 在 Char 手机里，Char 发出的消息 role 为 'user'
+        type: 'text',
+        content: text,
+        timestamp: Date.now()
+    };
+
+    // 存入 Char 的视角
+    let history = JSON.parse(ChatDB.getItem(`sms_history_${currentChatRoomCharId}_${currentImsgTargetId}`) || '[]');
+    history.push(newMsg);
+    ChatDB.setItem(`sms_history_${currentChatRoomCharId}_${currentImsgTargetId}`, JSON.stringify(history));
+
+    let sessions = JSON.parse(ChatDB.getItem(`sms_sessions_${currentChatRoomCharId}`) || '[]');
+    sessions = sessions.filter(id => id !== currentImsgTargetId);
+    sessions.unshift(currentImsgTargetId);
+    ChatDB.setItem(`sms_sessions_${currentChatRoomCharId}`, JSON.stringify(sessions));
+
+    // 存入对方的视角 (如果对方是真实用户或其他角色)
+    let targetHistory = JSON.parse(ChatDB.getItem(`sms_history_${currentImsgTargetId}_${currentChatRoomCharId}`) || '[]');
+    let targetMsg = { ...newMsg, role: 'char' }; // 在对方视角里，这是 Char 发来的
+    targetHistory.push(targetMsg);
+    ChatDB.setItem(`sms_history_${currentImsgTargetId}_${currentChatRoomCharId}`, JSON.stringify(targetHistory));
+
+    let targetSessions = JSON.parse(ChatDB.getItem(`sms_sessions_${currentImsgTargetId}`) || '[]');
+    targetSessions = targetSessions.filter(id => id !== currentChatRoomCharId);
+    targetSessions.unshift(currentChatRoomCharId);
+    ChatDB.setItem(`sms_sessions_${currentImsgTargetId}`, JSON.stringify(targetSessions));
+    
+    // 如果桌面短信APP正好打开着，刷新它
+    if (typeof renderSmsHistory === 'function' && document.getElementById('smsChatPage') && !document.getElementById('smsChatPage').classList.contains('hidden')) {
+        if (typeof currentSmsTargetId !== 'undefined' && currentSmsTargetId === currentChatRoomCharId) {
+            renderSmsHistory();
+        }
+    }
+    if (typeof renderSmsList === 'function') renderSmsList();
+}
+
+// 监听回车键发送
+const imsgInputEl = document.getElementById('imsg-input');
+if (imsgInputEl) {
+    imsgInputEl.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendImsgMessage();
+        }
+    });
+}
+
+// ==========================================
+// 调用 API 生成短信数据 (结合聊天记录 + 注册NPC)
+// ==========================================
+async function generatePhoneImsgAPI() {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => { activeWbs.push(entry.content); });
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    if (activeWbs.length > 0) prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    if (recentHistory) prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成你手机里“短信(iMessage)”APP的相关数据。
+【核心要求】：
+1. 短信内容必须与最近的 30 条聊天记录高度相关！例如：如果我们在聊天中提到要去看电影，短信里可能会有电影票的取票码；如果提到买了东西，可能会有快递通知；如果提到某个人，可能会有那个人的短信。
+2. 短信内容需要更加多面化、丰富且充满生活气息！可以包含不同情绪和场景的对话。
+3. 请生成 3-5 个会话，会话类型可能会混合包含：
+   - 服务号/官方号：如 10086、银行扣款、快递外卖通知、验证码等。
+   - 现实生活中的人：如 房东催租、同事谈工作、老妈的唠叨、死党的八卦、前任的纠缠等。
+⚠️【绝对禁止】：绝对不能生成和当前 User(${userRealName}) 的聊天记录！
+
+必须返回合法的 JSON 数组，结构如下：
+[
+  {
+    "name": "10086",
+    "history": [
+      {"role": "other", "content": "【中国移动】您本月已使用流量..."}
+    ]
+  },
+  {
+    "name": "房东王阿姨",
+    "history": [
+      {"role": "other", "content": "小李啊，这个月的房租该交了。"},
+      {"role": "me", "content": "好的阿姨，马上转给您。"}
+    ]
+  }
+]`;
+
+    showToast('正在生成短信数据...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            
+            let npcs = JSON.parse(ChatDB.getItem('chat_npcs') || '[]');
+            let sessions = JSON.parse(ChatDB.getItem(`sms_sessions_${currentChatRoomCharId}`) || '[]');
+            
+            parsed.forEach(session => {
+                let targetId = session.name;
+                
+                // 如果不是官方号，尝试查找或创建 NPC，实现底层数据互通
+                if (targetId !== '10086' && targetId !== '顺丰速运' && targetId !== '支付宝' && targetId !== '微信支付') {
+                    let npc = npcs.find(n => n.name === session.name);
+                    if (npc) {
+                        targetId = npc.id;
+                    } else {
+                        targetId = 'npc_' + Date.now() + Math.random().toString(36).substr(2, 5);
+                        npcs.push({
+                            id: targetId,
+                            name: session.name,
+                            netName: session.name,
+                            signature: '短信联系人',
+                            description: `这是 ${char.name} 的短信联系人。`,
+                            group: 'NPC',
+                            isNPC: true,
+                            isGroup: false,
+                            avatarUrl: ''
+                        });
+                    }
+                }
+                
+                if (!sessions.includes(targetId)) {
+                    sessions.unshift(targetId);
+                }
+                
+                let smsHistory = JSON.parse(ChatDB.getItem(`sms_history_${currentChatRoomCharId}_${targetId}`) || '[]');
+                let baseTime = Date.now() - session.history.length * 60000;
+                
+                session.history.forEach((msg, idx) => {
+                    smsHistory.push({
+                        role: msg.role === 'me' ? 'user' : 'char', // 在 Char 手机里，me 是 user，other 是 char
+                        type: 'text',
+                        content: msg.content,
+                        timestamp: baseTime + idx * 60000
+                    });
+                });
+                
+                ChatDB.setItem(`sms_history_${currentChatRoomCharId}_${targetId}`, JSON.stringify(smsHistory));
+            });
+            
+            ChatDB.setItem('chat_npcs', JSON.stringify(npcs));
+            ChatDB.setItem(`sms_sessions_${currentChatRoomCharId}`, JSON.stringify(sessions));
+            
+            renderPhoneImsgList();
+            hideToast();
+            alert('短信数据生成成功！');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}
+
+// ==========================================
+// 查手机 - 一键生成 APP 数据 (支持自主选择)
+// ==========================================
+function openPhoneGenerateModal() {
+    document.getElementById('charSidebar').classList.remove('open');
+    document.getElementById('phoneGenerateModalOverlay').classList.add('show');
+}
+
+function closePhoneGenerateModal() {
+    document.getElementById('phoneGenerateModalOverlay').classList.remove('show');
+}
+
+function confirmPhoneGenerate() {
+    const checkboxes = document.querySelectorAll('.phone-gen-checkbox:checked');
+    const selectedApps = Array.from(checkboxes).map(cb => cb.value);
+    
+    if (selectedApps.length === 0) {
+        alert('请至少选择一个 APP！');
+        return;
+    }
+    
+    closePhoneGenerateModal();
+    generateAllPhoneDataAPI(selectedApps);
+}
+
+async function generateAllPhoneDataAPI(selectedApps) {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    // 获取当前登录用户的面具 (Persona)
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    // 获取世界书
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => {
+        activeWbs.push(entry.content);
+    });
+
+    // 获取最近 30 条聊天记录
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    // 构建超级 Prompt
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    
+    if (activeWbs.length > 0) {
+        prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    }
+    
+    if (recentHistory) {
+        prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+    }
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，一次性生成你手机里选定 APP 的数据。\n`;
+    prompt += `为了防止数据过大，请严格控制生成数量，只生成以下被选中的 APP 数据：\n\n`;
+
+    let jsonStructure = "{\n";
+    let structureParts = [];
+
+    if (selectedApps.includes('tiktok')) {
+        prompt += `1. TikTok (抖音):\n【核心生成要求】：\n- 首页推荐 (foryou)：生成 3-5 个视频。必须是其他NPC/路人发布的视频（绝对不能是你自己）。内容必须和最近聊天的话题相关，或者是你潜意识里关注的事物。必须生成 5 条具体的网友评论。\n- 个人主页 (profile)：生成你自己发布的 4 个视频。这些视频的文案(desc)和画面(videoContent)都必须和 User(${userRealName}) 有关，表达对 User 的真实情绪，或者是记录 User 相关的事情！必须生成 5 条具体的网友评论。\n- 抖音热搜 (trending)：生成 4-6 个热搜标题。符合当前世界观或你的兴趣。\n- 私信消息 (inbox)：生成 2-4 条私信。【重点】：私信内容必须是路人或熟人对你在个人主页 (profile) 发布的视频的反应或搭讪！\n\n`;
+        structureParts.push(`  "tiktok": {\n    "foryou": [\n      {\n        "author": "路人作者名",\n        "videoContent": "视频画面内容的详细描述",\n        "desc": "视频文案",\n        "likes": "1.2M",\n        "commentsCount": "45K",\n        "music": "音乐名",\n        "comments": [\n          {"user": "网友A", "content": "评论内容"}\n        ]\n      }\n    ],\n    "trending": [\n      {"title": "热搜标题", "hot": "123W"}\n    ],\n    "profile": [\n      {\n        "videoContent": "视频画面内容的详细描述(必须与${userRealName}有关)",\n        "desc": "视频文案(必须与${userRealName}有关)",\n        "likes": "10K",\n        "commentsCount": "120",\n        "comments": [\n          {"user": "网友B", "content": "评论内容"}\n        ]\n      }\n    ],\n    "inbox": [\n      {\n        "name": "发件人(路人/熟人)",\n        "lastMsg": "最后一条消息",\n        "time": "1h",\n        "history": [\n          {"role": "other", "content": "针对你发布的某个视频的搭讪或反应"},\n          {"role": "me", "content": "你的回复"}\n        ]\n      }\n    ],\n    "drafts": [\n      {"desc": "草稿描述，例如：尝试了新的猫咪特效，太搞笑了"}\n    ]\n  }`);
+    }
+
+    if (selectedApps.includes('notes')) {
+        prompt += `2. Notes (备忘录):\n备忘录的内容应该非常私密、真实，可以包含你对 ${userRealName} 的吐槽、暗恋、计划，或者你自己的日常琐事、购物清单、日记等。\n包含 4-6 个文件夹（每个文件夹对应一篇详细的备忘录）。\n\n`;
+        structureParts.push(`  "notes": [\n    {\n      "title": "文件夹标题(如: 购物清单)",\n      "count": "3 个备忘录",\n      "detailTitle": "备忘录详细标题",\n      "detailTime": "2023年10月25日 14:30",\n      "detailContent": "备忘录的具体内容，可以包含换行符\\\\n，内容要符合该角色的人设和日常生活。"\n    }\n  ]`);
+    }
+
+    if (selectedApps.includes('shop')) {
+        prompt += `3. Shopping (商城/外卖):\n商品内容应该符合该角色的消费习惯、兴趣爱好、经济水平，或者可能包含准备买给 ${userRealName} 的礼物。\n【重要新增要求】：这个 APP 不仅可以买实物商品，还可以点外卖！请在生成的首页推荐、购物车、最近订单中，**务必混合包含一些外卖/餐饮相关的条目**（例如：奶茶、烧烤、炸鸡、咖啡、轻食等）。外卖订单的状态可以是“派送中”、“已送达”等。\n【重要要求】：对于每一个商品或外卖，你必须同时生成一段详细的 "description" (商品详情)。\n这段详情需要包含：\n1. 商品的卖点、材质、口味、功能介绍（符合商城或外卖平台的语气）。\n2. 买家秀评价（可以编造几个有趣的评价）。\n3. 【最重要】：以 ${char.name} 的内心独白形式，写一段为什么想买这个东西的想法（比如：觉得很适合 ${userRealName} 想买来送礼，或者是自己最近刚好需要，或者是半夜饿了想吃宵夜）。\n\n`;
+        structureParts.push(`  "shop": {\n    "home": [\n      {\n        "title": "商品名称", \n        "price": "199.00", \n        "imageDesc": "图片画面的详细文字描述",\n        "desc": "商品本身的卖点、材质、功能介绍等客观描述，可以使用 \\\\n 进行换行分段。",\n        "reviews": [\n          {"user": "买家A", "content": "评价内容..."}\n        ],\n        "thought": "角色想买这个东西的内心独白"\n      }\n    ],\n    "cart": [\n      {\n        "title": "商品名称", \n        "sku": "颜色/尺码等规格", \n        "price": "99.00", \n        "qty": 1, \n        "imageDesc": "图片画面的详细文字描述",\n        "desc": "商品本身的卖点、材质、功能介绍等客观描述，可以使用 \\\\n 进行换行分段。",\n        "reviews": [\n          {"user": "买家A", "content": "评价内容..."}\n        ],\n        "thought": "角色想买这个东西的内心独白"\n      }\n    ],\n    "orders": [\n      {\n        "title": "商品名称", \n        "status": "待发货/待收货/已完成", \n        "price": "299.00", \n        "imageDesc": "图片画面的详细文字描述",\n        "desc": "商品本身的卖点、材质、功能介绍等客观描述，可以使用 \\\\n 进行换行分段。",\n        "reviews": [\n          {"user": "买家A", "content": "评价内容..."}\n        ],\n        "thought": "角色想买这个东西的内心独白"\n      }\n    ]\n  }`);
+    }
+
+    if (selectedApps.includes('gallery')) {
+        prompt += `4. Gallery (相册与录音):\n内容应该非常私密、真实，可以包含你对 ${userRealName} 的偷拍、合照、或者是你自己的日常照片；录音可以是你的随手记、唱歌、或者是想对 ${userRealName} 说的话。\n\n`;
+        structureParts.push(`  "gallery": {\n    "recentMemories": [\n      {\n        "time": "照片时间(如: Today)",\n        "desc": "照片画面的详细文字描述，例如：一张在咖啡馆偷拍 ${userRealName} 侧脸的照片"\n      }\n    ],\n    "albums": [\n      {\n        "title": "相册名称(如: Favorites, 偷拍的某人)",\n        "time": "相册创建或最新更新时间(如: 2023-10-25)",\n        "coverDesc": "相册封面的详细文字描述"\n      }\n    ],\n    "records": [\n      {\n        "title": "录音标题(如: 睡前想说的话, 随便哼的歌)",\n        "time": "录音时间(如: Today, 9:00 AM 或 Yesterday, 8:30 PM)",\n        "duration": "录音时长(如: 00:03:45)",\n        "size": "文件大小(如: 2.4 MB)",\n        "content": "录音的具体文本内容，比如角色的自言自语、哼唱的歌词等，要符合人设，字数在20-50字左右。"\n      }\n    ]\n  }`);
+    }
+
+    if (selectedApps.includes('browser')) {
+        prompt += `5. Browser (浏览器):\n内容应该符合你的性格、职业、当前的烦恼，或者可能包含你为了 ${userRealName} 而去搜索的内容（比如查攻略、查礼物、查情感问题等）。\n注意：history 生成 4-6 条，tabs 生成 3-5 条。\n\n`;
+        structureParts.push(`  "browser": {\n    "history": [\n      {\n        "keyword": "搜索关键词(如: 附近好吃的火锅店)",\n        "thought": "你搜索这个词时的内心真实想法(如: 听说这家店不错，下次带${userRealName}去吃看看)"\n      }\n    ],\n    "tabs": [\n      {\n        "title": "帖子标题(如: 如何向喜欢的人自然地搭话 - 情感问答)",\n        "content": "楼主的详细提问内容或帖子正文，可以包含换行符\\\\n",\n        "comments": [\n          {"user": "网友A", "text": "直接上啊！"},\n          {"user": "网友B", "text": "先从共同话题聊起吧。"}\n        ]\n      }\n    ]\n  }`);
+    }
+
+    if (selectedApps.includes('icity')) {
+        prompt += `6. icity (私密日记):\n日记的内容应该非常私密、真实，反映你此刻最真实的内心活动、情绪波动，或者对 ${userRealName} 的看法、纠结、暗恋等。\n语气要符合你的人设，不要像机器生成的，要像一个活人在深夜写下的碎碎念。\n字数必须在200字以上，禁止少于100字。\n\n`;
+        structureParts.push(`  "icity": {\n    "content": "日记的具体内容，可以包含换行符\\\\n，字数必须在200字以上，禁止少于100字",\n    "time": "写下这篇日记的时间，格式如：2025-11-14 21:52"\n  }`);
+    }
+
+    if (selectedApps.includes('doubao')) {
+        prompt += `7. 豆豆Ai (AI助手合集):\n包含三个 AI 助手的对话，每个助手生成 4-15 条对话（一问一答）。\n注意：在这些对话中，你是提问者(role: "user")，AI 是回答者(role: "ai")。你的提问内容应该围绕你最近的烦恼、对 ${userRealName} 的看法、或者符合你人设的奇怪问题。\n【三个 AI 助手的人设要求】：\n1. 豆豆 (doudou)：很热心并且言听计从并且非常支持char但是很愚蠢，笨笨的，非常不靠谱，总会出馊主意，出错了或者被骂了喜欢说“对不起，我错了，这次我一定给你最直白，最清晰，最完整最不绕弯子的答案”类似这样的道歉话语（注意不可以完全照搬这个道歉话语，可以根据场景改成符合场景的道歉话语）。\n2. 塔罗师 (tarot)：神秘、神神叨叨，喜欢用塔罗牌的意象（如愚者、恋人、高塔等）来解读你的情感或生活问题，给出模棱两可但听起来很厉害的建议，但其实依旧不靠谱\n3. 答案之书 (answer)：极其简短、高冷、玄学。每次只回答一两个词或一句话（如“去做吧”、“不要犹豫”、“时机未到”），还是不靠谱。\n\n`;
+        structureParts.push(`  "doubao": {\n    "doubao": [\n      {"role": "user", "content": "你的提问"},\n      {"role": "ai", "content": "豆豆的愚蠢回答"}\n    ],\n    "tarot": [\n      {"role": "user", "content": "你的提问"},\n      {"role": "ai", "content": "塔罗师的神秘回答"}\n    ],\n    "answer": [\n      {"role": "user", "content": "你的提问"},\n      {"role": "ai", "content": "答案之书的简短回答"}\n    ]\n  }`);
+    }
+
+    if (selectedApps.includes('gacha')) {
+        prompt += `8. 恋与user (抽卡游戏):\n生成你在抽卡游戏里的数据。你需要生成 1 段主线剧情，以及 4-6 张卡牌图鉴。\n卡牌的名称和剧情必须和 ${userRealName} 有关（比如：[春日恋歌] ${userRealName}）。\n【核心要求：乙女游戏/视觉小说(AVG)格式】：\n所有的剧情（mainStory 和 story）都必须是 JSON 数组格式，模拟 AVG 游戏的对话流。对话轮数控制在 8-15 轮左右。\n【主线剧情 (mainStory) 风格】：温馨、日常、治愈、甜甜的恋爱日常，体现两人之间的羁绊和生活细节。\n【卡牌剧情 (story) 风格】：隐晦的描述私密、色情、露骨的身体接触和心理描写，不要太直白！满足char的幻想！\n\n`;
+        structureParts.push(`  "gacha": {\n    "diamonds": 12500,\n    "mainStory": [\n      {"name": "旁白", "text": "阳光洒在餐桌上，你正准备着早餐..."},\n      {"name": "${char.name}", "text": "早安，今天想吃点什么？"}\n    ],\n    "collection": [\n      {\n        "rarity": "SSR",\n        "name": "[卡牌前缀] ${userRealName}",\n        "desc": "卡牌的简短描述",\n        "story": [\n          {"name": "旁白", "text": "一段私密露骨的动作描写..."},\n          {"name": "${userRealName}", "text": "不要这样..."}\n        ],\n        "owned": false\n      }\n    ]\n  }`);
+    }
+
+    if (selectedApps.includes('imsg')) {
+        prompt += `10. 短信 (iMessage):\n短信内容必须与最近的聊天记录高度相关！内容需要多面化、丰富且充满生活气息。包含服务号/官方号和现实生活中的人。生成 3-5 个会话。绝对不能生成和当前 User(${userRealName}) 的聊天记录！\n\n`;
+        structureParts.push(`  "imsg": [\n    {\n      "name": "10086",\n      "history": [\n        {"role": "other", "content": "【中国移动】您本月已使用流量..."}\n      ]\n    },\n    {\n      "name": "房东王阿姨",\n      "history": [\n        {"role": "other", "content": "小李啊，这个月的房租该交了。"},\n        {"role": "me", "content": "好的阿姨，马上转给您。"}\n      ]\n    }\n  ]`);
+    }
+
+    if (selectedApps.includes('music')) {
+        prompt += `11. 音乐 (Music):\n生成 3-5 首你最近单曲循环的真实存在的歌曲，必须包含 innerVoice(心声)。以及 3-4 个符合你品味的歌单，并为每个歌单生成 3-5 首代表性歌曲。\n\n`;
+        structureParts.push(`  "music": {\n    "recent": [\n      {\n        "title": "歌曲名",\n        "artist": "歌手名",\n        "innerVoice": "听这首歌时的内心独白"\n      }\n    ],\n    "playlists": [\n      {\n        "title": "歌单名称",\n        "tracks": [\n          {"title": "歌曲名1", "artist": "歌手名1"}\n        ]\n      }\n    ]\n  }`);
+    }
+
+    jsonStructure += structureParts.join(",\n") + "\n}";
+    prompt += `必须返回合法的 JSON 对象，结构必须严格如下：\n${jsonStructure}`;
+
+    showToast('正在一键生成选定数据(耗时较长，请耐心等待)...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            
+            // 分发数据到各个 APP 的存储中 (只保存选中的)
+            if (selectedApps.includes('tiktok') && parsed.tiktok) ChatDB.setItem(`tiktok_data_${currentChatRoomCharId}`, JSON.stringify(parsed.tiktok));
+            if (selectedApps.includes('notes') && parsed.notes) ChatDB.setItem(`phone_notes_${currentChatRoomCharId}`, JSON.stringify(parsed.notes));
+            if (selectedApps.includes('shop') && parsed.shop) ChatDB.setItem(`phone_shop_${currentChatRoomCharId}`, JSON.stringify(parsed.shop));
+            if (selectedApps.includes('gallery') && parsed.gallery) ChatDB.setItem(`phone_gallery_${currentChatRoomCharId}`, JSON.stringify(parsed.gallery));
+            if (selectedApps.includes('icity') && parsed.icity) ChatDB.setItem(`phone_icity_${currentChatRoomCharId}`, JSON.stringify(parsed.icity));
+            if (selectedApps.includes('doubao') && parsed.doubao) ChatDB.setItem(`phone_doubao_${currentChatRoomCharId}`, JSON.stringify(parsed.doubao));
+            if (selectedApps.includes('music') && parsed.music) {
+                if (parsed.music.recent && parsed.music.recent.length > 0) {
+                    const recentPlaylist = {
+                        id: 'recent', name: '最近播放', cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg', trackCount: parsed.music.recent.length,
+                        tracks: parsed.music.recent.map(s => ({ id: 'gen_recent_' + Date.now() + Math.random(), title: s.title, artist: s.artist, innerVoice: s.innerVoice, isGenerated: true, cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg' }))
+                    };
+                    ChatDB.setItem(`music_recent_${currentChatRoomCharId}`, JSON.stringify(recentPlaylist));
+                }
+                if (parsed.music.playlists && parsed.music.playlists.length > 0) {
+                    let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${currentChatRoomCharId}`) || '[]');
+                    parsed.music.playlists.forEach(pl => {
+                        savedPlaylists.push({
+                            id: 'char_pl_' + Date.now() + Math.random(), name: pl.title, cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg', trackCount: pl.tracks ? pl.tracks.length : 0,
+                            tracks: (pl.tracks || []).map(t => ({ id: 'gen_' + Date.now() + Math.random(), title: t.title, artist: t.artist, isGenerated: true, cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg' }))
+                        });
+                    });
+                    ChatDB.setItem(`music_playlists_${currentChatRoomCharId}`, JSON.stringify(savedPlaylists));
+                }
+            }
+            if (selectedApps.includes('imsg') && parsed.imsg) {
+                let npcs = JSON.parse(ChatDB.getItem('chat_npcs') || '[]');
+                let sessions = JSON.parse(ChatDB.getItem(`sms_sessions_${currentChatRoomCharId}`) || '[]');
+                
+                parsed.imsg.forEach(session => {
+                    let targetId = session.name;
+                    if (targetId !== '10086' && targetId !== '顺丰速运' && targetId !== '支付宝' && targetId !== '微信支付') {
+                        let npc = npcs.find(n => n.name === session.name);
+                        if (npc) {
+                            targetId = npc.id;
+                        } else {
+                            targetId = 'npc_' + Date.now() + Math.random().toString(36).substr(2, 5);
+                            npcs.push({
+                                id: targetId, name: session.name, netName: session.name, signature: '短信联系人', description: `这是 ${char.name} 的短信联系人。`, group: 'NPC', isNPC: true, isGroup: false, avatarUrl: ''
+                            });
+                        }
+                    }
+                    if (!sessions.includes(targetId)) sessions.unshift(targetId);
+                    
+                    let smsHistory = JSON.parse(ChatDB.getItem(`sms_history_${currentChatRoomCharId}_${targetId}`) || '[]');
+                    let baseTime = Date.now() - session.history.length * 60000;
+                    session.history.forEach((msg, idx) => {
+                        smsHistory.push({
+                            role: msg.role === 'me' ? 'user' : 'char',
+                            type: 'text', content: msg.content, timestamp: baseTime + idx * 60000
+                        });
+                    });
+                    ChatDB.setItem(`sms_history_${currentChatRoomCharId}_${targetId}`, JSON.stringify(smsHistory));
+                });
+                ChatDB.setItem('chat_npcs', JSON.stringify(npcs));
+                ChatDB.setItem(`sms_sessions_${currentChatRoomCharId}`, JSON.stringify(sessions));
+            }
+            
+            if (selectedApps.includes('browser') && parsed.browser) {
+                if (parsed.browser.history) ChatDB.setItem(`browser_history_${currentChatRoomCharId}`, JSON.stringify(parsed.browser.history));
+                if (parsed.browser.tabs) {
+                    const tabs = parsed.browser.tabs.map((item, index) => ({
+                        id: Date.now() + index,
+                        history: ['home', `forum_${index}`],
+                        currentIndex: 1,
+                        title: item.title,
+                        forumData: item
+                    }));
+                    ChatDB.setItem(`browser_tabs_${currentChatRoomCharId}`, JSON.stringify(tabs));
+                }
+            }
+            
+            hideToast();
+            alert('选定 APP 数据一键生成成功！');
+        } else {
+            const err = await response.json();
+            hideToast();
+            showApiErrorModal(JSON.stringify(err, null, 2));
+        }
+    } catch (e) {
+        hideToast();
+        showApiErrorModal(e.message || '生成失败，请检查 API 配置或重试。数据量过大可能导致超时。');
+    }
+}
+// ==========================================
+// 查手机 - 通用分享给 Char 逻辑
+// ==========================================
+let currentShareType = '';
+let currentShareExtraData = null; // 用于接收索引等额外数据
+
+function shareToChar(type, extraData = null) {
+    currentShareType = type;
+    currentShareExtraData = extraData;
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return alert('请先登录！');
+
+    let contacts = JSON.parse(ChatDB.getItem(`contacts_${currentLoginId}`) || '[]');
+    let allEntities = getAllEntities();
+    let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+    
+    const listEl = document.getElementById('universalShareContactList');
+    listEl.innerHTML = '';
+    
+    const friends = contacts.map(id => allEntities.find(c => c.id === id)).filter(c => c);
+    
+    if (friends.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#aaa; font-size:12px;">暂无好友可分享</div>';
+    } else {
+        friends.forEach(f => {
+            const displayName = remarks[f.id] || f.netName || f.name;
+            const typeTag = f.isAccount ? '<span style="font-size:10px; background:#eee; color:#888; padding:2px 4px; border-radius:4px; margin-left:4px;">用户</span>' : '';
+            const item = document.createElement('div');
+            item.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 10px; background: #f9f9f9; border-radius: 10px; cursor: pointer;';
+            item.innerHTML = `
+                <div style="width: 36px; height: 36px; border-radius: 8px; background-image: url('${f.avatarUrl || ''}'); background-size: cover; background-color: #eee;"></div>
+                <div style="font-size: 14px; font-weight: bold; color: #333;">${displayName}${typeTag}</div>
+            `;
+            item.onclick = () => confirmUniversalShare(f.id);
+            listEl.appendChild(item);
+        });
+    }
+    
+    document.getElementById('universalShareModalOverlay').classList.add('show');
+}
+
+function closeUniversalShareModal() {
+    document.getElementById('universalShareModalOverlay').classList.remove('show');
+}
+
+function confirmUniversalShare(targetCharId) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${targetCharId}`) || '[]');
+    
+    let appName = '';
+    let shareTitle = '';
+    let shareDesc = '';
+    let shareContent = ''; // 存入富文本 HTML
+
+    // 动态抓取当前页面的内容并生成富文本
+    if (currentShareType.startsWith('tiktok')) {
+        appName = 'TikTok';
+        const dataStr = ChatDB.getItem(`tiktok_data_${currentChatRoomCharId}`);
+        if (dataStr) {
+            const data = JSON.parse(dataStr);
+            let video = null;
+            if (currentShareType === 'tiktok_foryou') video = data.foryou[currentShareExtraData];
+            else if (currentShareType === 'tiktok_profile') video = data.profile[currentShareExtraData];
+            
+            if (video) {
+                let authorName = video.author || '用户';
+                if (currentShareType === 'tiktok_profile') {
+                    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+                    const char = chars.find(c => c.id === currentChatRoomCharId);
+                    authorName = char ? (char.netName || char.name) : '用户';
+                }
+
+                // 修复双 @ 问题
+                let cleanAuthorName = authorName.startsWith('@') ? authorName.substring(1) : authorName;
+
+                shareTitle = `分享了 @${cleanAuthorName} 的视频`;
+                shareDesc = video.desc || '点击查看视频详情';
+                
+                let commentsHtml = (video.comments || []).map(c => `
+                    <div style="margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px;">
+                        <div style="font-size: 13px; color: #888; font-weight: bold;">${c.user}</div>
+                        <div style="font-size: 14px; color: #333;">${c.content}</div>
+                    </div>
+                `).join('');
+
+                shareContent = `
+                    <div style="background: #000; color: #fff; padding: 0; border-radius: 12px; margin-bottom: 15px; overflow: hidden;">
+                        <!-- 视频区域占位 -->
+                        <div style="position: relative; width: 100%; aspect-ratio: 9/16; background: #111; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 20px; text-align: center; border-bottom: 1px solid #333; box-sizing: border-box;">
+                            <div style="color: #aaa; font-size: 14px; line-height: 1.6; border: 1px dashed #555; padding: 20px; border-radius: 8px; width: 85%; box-sizing: border-box;">
+                                <div style="margin-bottom: 10px; font-weight: bold;">[视频画面]</div>
+                                ${video.videoContent || '无画面描述'}
+                            </div>
+                            
+                            <!-- 底部信息悬浮 -->
+                            <div style="position: absolute; bottom: 20px; left: 15px; right: 15px; text-align: left;">
+                                <div style="font-size: 16px; font-weight: bold; margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+                                    <div style="width: 32px; height: 32px; border-radius: 50%; background: #555; display: flex; justify-content: center; align-items: center; flex-shrink: 0;">
+                                        <svg viewBox="0 0 24 24" width="18" height="18" fill="#fff"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+                                    </div>
+                                    <span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">@${cleanAuthorName}</span>
+                                </div>
+                                <div style="font-size: 14px; line-height: 1.5; text-shadow: 0 1px 2px rgba(0,0,0,0.5);">${video.desc}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div style="font-size: 15px; font-weight: bold; margin-bottom: 15px; color: #111; padding: 0 5px;">评论区 (${video.commentsCount || 0})</div>
+                    <div style="padding: 0 5px;">${commentsHtml || '<div style="color:#888; font-size:13px;">暂无评论</div>'}</div>
+                `;
+            }
+        }
+    } else if (currentShareType === 'browser') {
+        appName = '浏览器';
+        // 判断当前是否在主页视图
+        const isHome = document.getElementById('browser-view-home').classList.contains('active');
+        if (isHome) {
+            shareTitle = '分享了搜索记录';
+            shareDesc = '点击查看搜索历史';
+            let historyHtml = browserSearchHistoryData.map(item => `
+                <div style="padding: 12px; background: #fff; border-radius: 10px; margin-bottom: 10px; border: 1px solid #eee; box-shadow: 0 2px 8px rgba(0,0,0,0.02);">
+                    <div style="font-size: 15px; font-weight: bold; color: #111; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                        <svg viewBox="0 0 24 24" width="14" height="14" stroke="#888" stroke-width="2" fill="none"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                        ${item.keyword}
+                    </div>
+                    <div style="font-size: 13px; color: #666; font-style: italic; background: #f9f9f9; padding: 8px 10px; border-radius: 6px; border-left: 3px solid #ccc;">
+                        ${item.thought}
+                    </div>
+                </div>
+            `).join('');
+            
+            shareContent = `
+                <div style="background: #f4f5f7; padding: 15px; border-radius: 12px;">
+                    <div style="font-size: 16px; font-weight: bold; margin-bottom: 15px; color: #111; display: flex; align-items: center; gap: 6px;">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                        搜索历史记录
+                    </div>
+                    <div>
+                        ${historyHtml || '<div style="padding: 15px; color: #888; text-align: center;">暂无记录</div>'}
+                    </div>
+                </div>
+            `;
+        } else {
+            shareTitle = document.getElementById('browser-web-input')?.value || '网页分享';
+            shareDesc = '点击查看帖子详情';
+            let tab = browserTabs.find(t => t.id === browserActiveTabId);
+            if (tab && tab.forumData) {
+                let commentsHtml = (tab.forumData.comments || []).map(c => `
+                    <div style="margin-bottom: 12px; border-bottom: 1px solid #f0f0f0; padding-bottom: 12px; display: flex; flex-direction: column; gap: 4px;">
+                        <div style="font-size: 13px; color: #576b95; font-weight: bold;">${c.user}</div>
+                        <div style="font-size: 14px; color: #333; line-height: 1.5;">${c.text}</div>
+                    </div>
+                `).join('');
+                
+                // 将换行符替换为 <br>，去除 white-space: pre-wrap 防止代码缩进被渲染
+                let safeContent = (tab.forumData.content || '').replace(/\n/g, '<br>');
+                
+                shareContent = `
+                    <div style="background: #fff; padding: 5px;">
+                        <div style="font-size: 18px; font-weight: bold; color: #111; margin-bottom: 15px; line-height: 1.4;">${tab.forumData.title}</div>
+                        <div style="font-size: 15px; color: #333; line-height: 1.6; margin-bottom: 25px; background: #f4f5f7; padding: 15px; border-radius: 12px; text-align: justify;">
+                            ${safeContent}
+                        </div>
+                        <div style="font-size: 14px; font-weight: bold; margin-bottom: 15px; color: #111; border-bottom: 1px solid #eee; padding-bottom: 8px;">全部评论</div>
+                        <div style="display: flex; flex-direction: column;">
+                            ${commentsHtml || '<div style="color:#888; font-size:13px;">暂无评论</div>'}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+    } else if (currentShareType === 'doubao') {
+        appName = '豆豆Ai';
+        shareTitle = document.getElementById('dbChatTitle')?.innerText || 'AI对话';
+        shareDesc = '点击查看 AI 对话记录';
+        
+        const historyEl = document.getElementById('dbChatHistory');
+        const msgs = historyEl.querySelectorAll('.db-msg');
+        let chatHtml = '';
+        msgs.forEach(msgEl => {
+            const isUser = msgEl.classList.contains('user');
+            const text = msgEl.querySelector('.db-bubble').innerText;
+            const roleName = isUser ? '我' : shareTitle;
+            const align = isUser ? 'flex-end' : 'flex-start';
+            const bgColor = isUser ? '#111' : '#f4f4f4';
+            const color = isUser ? '#fff' : '#333';
+            const borderRadius = isUser ? '16px 16px 4px 16px' : '16px 16px 16px 4px';
+            
+            chatHtml += `
+                <div style="display: flex; flex-direction: column; align-items: ${align}; margin-bottom: 15px; width: 100%;">
+                    <div style="font-size: 11px; color: #888; margin-bottom: 4px; padding: 0 4px;">${roleName}</div>
+                    <div style="background: ${bgColor}; color: ${color}; padding: 10px 14px; border-radius: ${borderRadius}; font-size: 14px; max-width: 80%; word-break: break-all; line-height: 1.5; width: fit-content;">
+                        ${text}
+                    </div>
+                </div>
+            `;
+        });
+
+        shareContent = `
+            <div style="background: #fff; padding: 10px 5px; display: flex; flex-direction: column;">
+                ${chatHtml || '<div style="text-align:center; color:#888;">暂无对话</div>'}
+            </div>
+        `;
+    } else if (currentShareType === 'notes') {
+        appName = '备忘录';
+        shareTitle = document.querySelector('.note-editor-title')?.innerText || '备忘录';
+        let rawContent = document.getElementById('noteDetailEditor')?.innerText || '';
+        shareDesc = rawContent.substring(0, 40) + '...';
+        shareContent = `<div style="font-size: 22px; font-weight: bold; margin-bottom: 15px;">${shareTitle}</div><div style="font-size: 15px; line-height: 1.6;">${rawContent}</div>`;
+    } else if (currentShareType === 'icity') {
+        appName = 'icity';
+        shareTitle = '我的日记';
+        
+        let rawContent = '';
+        const dataStr = ChatDB.getItem(`phone_icity_${currentChatRoomCharId}`);
+        if (dataStr) {
+            let data = JSON.parse(dataStr);
+            if (!Array.isArray(data)) data = [data];
+            if (data[currentShareExtraData]) {
+                rawContent = data[currentShareExtraData].content;
+            }
+        }
+        if (!rawContent) {
+            rawContent = document.getElementById('icityText')?.innerText || '';
+        }
+        
+        shareDesc = rawContent.substring(0, 40) + '...';
+        shareContent = `<div style="font-size: 15px; line-height: 1.8; text-align: justify; color: #444;">${rawContent}</div>`;
+    } else if (currentShareType === 'gallery_image') {
+        appName = '相册';
+        shareTitle = document.getElementById('pgAlbumDetailTitle')?.innerText || '图片分享';
+        let rawContent = document.getElementById('pgAlbumDetailDesc')?.innerText || '';
+        shareDesc = rawContent.substring(0, 40) + '...';
+        shareContent = `<div style="width: 100%; aspect-ratio: 1; background: #f4f4f4; border-radius: 12px; display: flex; justify-content: center; align-items: center; padding: 20px; text-align: center; color: #555; margin-bottom: 15px;">[图片画面]<br>${rawContent}</div>`;
+    } else if (currentShareType === 'gallery_record') {
+        appName = '录音';
+        shareTitle = document.getElementById('pg-record-hero-title')?.innerText || '语音备忘录';
+        let rawContent = document.getElementById('pg-record-hero-content')?.innerText || '';
+        shareDesc = rawContent.substring(0, 40) + '...';
+        shareContent = `
+            <div style="background: #111; color: #fff; padding: 20px; border-radius: 16px; text-align: center; margin-bottom: 15px;">
+                <div style="font-size: 18px; font-weight: bold; margin-bottom: 10px;">${shareTitle}</div>
+                <div style="display: flex; justify-content: center; gap: 4px; margin-bottom: 15px;">
+                    <div style="width: 3px; height: 15px; background: #fff; border-radius: 2px;"></div>
+                    <div style="width: 3px; height: 25px; background: #fff; border-radius: 2px;"></div>
+                    <div style="width: 3px; height: 10px; background: #fff; border-radius: 2px;"></div>
+                    <div style="width: 3px; height: 20px; background: #fff; border-radius: 2px;"></div>
+                </div>
+                <div style="font-size: 14px; color: #aaa; font-style: italic;">${rawContent}</div>
+            </div>
+        `;
+    }
+
+    const newMsg = {
+        role: 'user',
+        type: 'app_share',
+        content: `[分享] ${shareTitle}`, // 兜底文本
+        appName: appName,
+        shareTitle: shareTitle,
+        shareDesc: shareDesc,
+        shareContent: shareContent,
+        timestamp: Date.now()
+    };
+    
+    targetHistory.push(newMsg);
+    ChatDB.setItem(`chat_history_${currentLoginId}_${targetCharId}`, JSON.stringify(targetHistory));
+    
+    // 更新会话列表
+    let sessions = JSON.parse(ChatDB.getItem(`chat_sessions_${currentLoginId}`) || '[]');
+    sessions = sessions.filter(id => id !== targetCharId);
+    sessions.unshift(targetCharId);
+    ChatDB.setItem(`chat_sessions_${currentLoginId}`, JSON.stringify(sessions));
+
+    // 双向同步给对方
+    let allEntities = getAllEntities();
+    const targetEntity = allEntities.find(e => e.id === targetCharId);
+    if (targetEntity) {
+        let targetOtherHistory = JSON.parse(ChatDB.getItem(`chat_history_${targetCharId}_${currentLoginId}`) || '[]');
+        let targetOtherMsg = { ...newMsg, role: 'char' };
+        targetOtherHistory.push(targetOtherMsg);
+        ChatDB.setItem(`chat_history_${targetCharId}_${currentLoginId}`, JSON.stringify(targetOtherHistory));
+
+        let targetOtherSessions = JSON.parse(ChatDB.getItem(`chat_sessions_${targetCharId}`) || '[]');
+        targetOtherSessions = targetOtherSessions.filter(id => id !== currentLoginId);
+        targetOtherSessions.unshift(currentLoginId);
+        ChatDB.setItem(`chat_sessions_${targetCharId}`, JSON.stringify(targetOtherSessions));
+
+        let unreadCount = parseInt(ChatDB.getItem(`unread_${targetCharId}_${currentLoginId}`) || '0');
+        ChatDB.setItem(`unread_${targetCharId}_${currentLoginId}`, (unreadCount + 1).toString());
+    }
+
+    if (typeof renderChatList === 'function') renderChatList();
+    
+    alert('分享成功！');
+    closeUniversalShareModal();
+}
+// ==========================================
+// 查手机 - 恋与user (Gacha) APP 交互逻辑
+// ==========================================
+
+function openPhoneGacha() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    
+    // 获取当前登录用户的面具和账号信息
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    
+    const maskAvatar = persona && persona.avatarUrl ? persona.avatarUrl : 'https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?q=80&w=800&auto=format&fit=crop';
+    const accountAvatar = account && account.avatarUrl ? account.avatarUrl : 'https://images.unsplash.com/photo-1578632767115-351597cf2477?q=80&w=800&auto=format&fit=crop';
+    const realName = persona && persona.realName ? persona.realName : (account ? account.netName : 'User');
+
+    // 首页背景封面显示 user 面具头像
+    document.getElementById('gacha-page-home').style.backgroundImage = `url('${maskAvatar}')`;
+    
+    // 祈愿招募使用 user 账号头像和真名
+    document.getElementById('gachaPoolArt').style.backgroundImage = `url('${accountAvatar}')`;
+    document.getElementById('gachaPoolCharName').innerText = `SSR [命运邂逅] ${realName}`;
+
+    // 动态加载当前角色的头像和名字 (显示在左上角玩家信息处)
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (char) {
+        const charAvatarUrl = char.avatarUrl || 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100&auto=format&fit=crop';
+        const charName = char.netName || char.name || 'Player';
+        document.getElementById('gachaHomeAvatar').style.backgroundImage = `url('${charAvatarUrl}')`;
+        document.getElementById('gachaHomeName').innerText = charName;
+    }
+
+    // 初始化樱花特效
+    const sakuraContainer = document.getElementById('gacha-sakura-container');
+    if (sakuraContainer.children.length === 0) {
+        for (let i = 0; i < 30; i++) {
+            const sakura = document.createElement('div');
+            sakura.classList.add('gacha-sakura');
+            const size = Math.random() * 10 + 6;
+            const left = Math.random() * 100;
+            const duration = Math.random() * 5 + 4;
+            const delay = Math.random() * 5;
+            sakura.style.width = `${size}px`;
+            sakura.style.height = `${size}px`;
+            sakura.style.left = `${left}vw`;
+            sakura.style.animationDuration = `${duration}s, 2s`;
+            sakura.style.animationDelay = `${delay}s, 0s`;
+            sakuraContainer.appendChild(sakura);
+        }
+    }
+
+    document.getElementById('phoneGachaApp').classList.add('show');
+    switchGachaPage('gacha-page-home');
+    renderGachaData();
+}
+
+function closePhoneGacha() {
+    document.getElementById('phoneGachaApp').classList.remove('show');
+}
+
+function switchGachaPage(pageId) {
+    document.querySelectorAll('.gacha-page').forEach(page => {
+        page.classList.remove('active');
+    });
+    document.getElementById(pageId).classList.add('active');
+}
+
+function renderGachaData() {
+    const dataStr = ChatDB.getItem(`phone_gacha_${currentChatRoomCharId}`);
+    let diamonds = 12500;
+    let collection = [];
+
+    if (dataStr) {
+        const data = JSON.parse(dataStr);
+        if (data.diamonds !== undefined) diamonds = data.diamonds;
+        if (data.collection) collection = data.collection;
+    }
+
+    document.getElementById('gachaHomeDiamond').innerText = diamonds.toLocaleString();
+    document.getElementById('gachaPoolDiamond').innerText = diamonds.toLocaleString();
+
+    const grid = document.getElementById('gachaCollectionGrid');
+    grid.innerHTML = '';
+    
+    if (collection.length === 0) {
+        grid.innerHTML = '<div style="grid-column: 1 / -1; text-align: center; color: #aaa; font-size: 12px; margin-top: 40px;">点击右上角生成数据</div>';
+    } else {
+        collection.forEach(item => {
+            const card = document.createElement('div');
+            // 判断是否已拥有
+            const isOwned = item.owned;
+            card.className = `gacha-collection-item ${isOwned ? 'owned' : 'unowned'}`;
+            
+            // 获取 User 账号头像作为卡面
+            const currentLoginId = ChatDB.getItem('current_login_account');
+            let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+            const account = accounts.find(a => a.id === currentLoginId);
+            const accountAvatar = account && account.avatarUrl ? account.avatarUrl : 'https://images.unsplash.com/photo-1518020382113-a7e8fc38eac9?q=80&w=400&auto=format&fit=crop';
+            
+            card.style.backgroundImage = `url('${accountAvatar}')`;
+            card.innerHTML = `<div class="gacha-col-rarity">${item.rarity || 'SSR'}</div>`;
+            
+            card.onclick = () => {
+                if (isOwned) {
+                    openGachaStoryModal(item.name, item.story || item.desc);
+                } else {
+                    alert(`【${item.name}】\n尚未获得该卡牌，请前往招募！`);
+                }
+            };
+            grid.appendChild(card);
+        });
+    }
+}
+
+// AVG 播放器全局变量
+let currentGachaAvgStory = [];
+let currentGachaAvgIndex = 0;
+
+function playGachaAvgStory(storyData, bgUrl) {
+    // 兼容旧版纯文本数据
+    if (typeof storyData === 'string') {
+        currentGachaAvgStory = [{"name": "旁白", "text": storyData}];
+    } else if (Array.isArray(storyData)) {
+        currentGachaAvgStory = storyData;
+    } else {
+        return alert('剧情数据格式错误！');
+    }
+
+    if (currentGachaAvgStory.length === 0) return alert('暂无剧情内容！');
+
+    currentGachaAvgIndex = 0;
+    document.getElementById('gachaAvgBg').style.backgroundImage = `url('${bgUrl}')`;
+    document.getElementById('gachaAvgOverlay').classList.add('show');
+    
+    renderGachaAvgLine();
+}
+
+function renderGachaAvgLine() {
+    if (currentGachaAvgIndex >= currentGachaAvgStory.length) {
+        closeGachaAvg();
+        return;
+    }
+    const line = currentGachaAvgStory[currentGachaAvgIndex];
+    document.getElementById('gachaAvgName').innerText = line.name || '旁白';
+    document.getElementById('gachaAvgText').innerText = line.text || '...';
+}
+
+function nextGachaAvgLine() {
+    currentGachaAvgIndex++;
+    renderGachaAvgLine();
+}
+
+function closeGachaAvg() {
+    document.getElementById('gachaAvgOverlay').classList.remove('show');
+    currentGachaAvgStory = [];
+}
+
+// 劫持图鉴点击事件，调用 AVG 播放器
+const _originalRenderGachaData = renderGachaData;
+renderGachaData = function() {
+    _originalRenderGachaData();
+    // 重新绑定点击事件
+    const grid = document.getElementById('gachaCollectionGrid');
+    const dataStr = ChatDB.getItem(`phone_gacha_${currentChatRoomCharId}`);
+    if (!dataStr) return;
+    const data = JSON.parse(dataStr);
+    
+    Array.from(grid.children).forEach((card, index) => {
+        const item = data.collection[index];
+        card.onclick = () => {
+            if (item.owned) {
+                // 使用卡面作为背景
+                const bgUrl = card.style.backgroundImage.slice(5, -2); 
+                playGachaAvgStory(item.story || item.desc, bgUrl);
+            } else {
+                alert(`【${item.name}】\n尚未获得该卡牌，请前往招募！`);
+            }
+        };
+    });
+};
+
+function openGachaMainStory() {
+    const dataStr = ChatDB.getItem(`phone_gacha_${currentChatRoomCharId}`);
+    if (!dataStr) return alert('请先点击右上角生成数据！');
+    const data = JSON.parse(dataStr);
+    if (data.mainStory) {
+        // 主线剧情使用角色头像作为背景
+        let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        const char = chars.find(c => c.id === currentChatRoomCharId);
+        const bgUrl = char && char.avatarUrl ? char.avatarUrl : 'https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?q=80&w=800&auto=format&fit=crop';
+        
+        playGachaAvgStory(data.mainStory, bgUrl);
+    } else {
+        alert('暂无主线剧情！');
+    }
+}
+
+async function generateGachaDataAPI() {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => { activeWbs.push(entry.content); });
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    if (activeWbs.length > 0) prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    if (recentHistory) prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成你在抽卡游戏里的数据。
+你需要生成 1 段主线剧情，以及 4-6 张卡牌图鉴。
+卡牌的名称和剧情必须和 ${userRealName} 有关（比如：[春日恋歌] ${userRealName}）。
+
+【核心要求：乙女游戏/视觉小说(AVG)格式】：
+1. 所有的剧情（mainStory 和 story）都必须是 JSON 数组格式，模拟 AVG 游戏的对话流。
+2. 数组中的每个对象包含 "name" (说话人名字，可以是 ${char.name}、${userRealName} 或 "旁白") 和 "text" (对话内容或动作描写)。对话轮数控制在 8-15 轮左右。
+3. 【主线剧情 (mainStory) 风格】：温馨、日常、治愈、甜甜的恋爱日常，体现两人之间的羁绊和生活细节。
+4. 【卡牌剧情 (story) 风格】：隐晦的描述私密、色情、露骨的身体接触和心理描写，不要太直白！满足char的幻想！
+
+必须返回合法的 JSON 对象，结构如下：
+{
+  "diamonds": 12500,
+  "mainStory": [
+    {"name": "旁白", "text": "阳光洒在餐桌上，你正准备着早餐..."},
+    {"name": "${char.name}", "text": "早安，今天想吃点什么？"}
+  ],
+  "collection": [
+    {
+      "rarity": "SSR",
+      "name": "[卡牌前缀] ${userRealName}",
+      "desc": "卡牌的简短描述",
+      "story": [
+        {"name": "旁白", "text": "一段私密露骨的动作描写..."},
+        {"name": "${userRealName}", "text": "不要这样..."}
+      ],
+      "owned": false
+    }
+  ]
+}`;
+
+    showToast('正在生成抽卡数据(包含剧情，请耐心等待)...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            ChatDB.setItem(`phone_gacha_${currentChatRoomCharId}`, JSON.stringify(parsed));
+            
+            renderGachaData();
+            hideToast();
+            alert('抽卡数据生成成功！');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}
+
+function doGachaSummon(times) {
+    const dataStr = ChatDB.getItem(`phone_gacha_${currentChatRoomCharId}`);
+    if (!dataStr) return alert('请先点击右上角生成数据！');
+    let data = JSON.parse(dataStr);
+    
+    if (data.diamonds < times * 150) {
+        return alert('钻石不足！');
+    }
+    
+    data.diamonds -= times * 150;
+    
+    // 找出未拥有的卡牌
+    let unownedCards = data.collection.filter(c => !c.owned);
+    let drawnCard = null;
+    
+    if (unownedCards.length > 0) {
+        // 随机抽一张未拥有的
+        let randomIndex = Math.floor(Math.random() * unownedCards.length);
+        drawnCard = unownedCards[randomIndex];
+        // 在原数组中标记为已拥有
+        let originalCard = data.collection.find(c => c.name === drawnCard.name);
+        if (originalCard) originalCard.owned = true;
+    } else {
+        // 如果全收集了，随机抽一张已拥有的
+        let randomIndex = Math.floor(Math.random() * data.collection.length);
+        drawnCard = data.collection[randomIndex];
+    }
+    
+    ChatDB.setItem(`phone_gacha_${currentChatRoomCharId}`, JSON.stringify(data));
+    renderGachaData(); // 更新钻石和图鉴状态
+
+    const overlay = document.getElementById('gachaSummonOverlay');
+    overlay.classList.add('active');
+    overlay.classList.remove('flash');
+    
+    // 模拟加载特效动画 1.5秒
+    setTimeout(() => {
+        overlay.classList.add('flash'); // 触发白屏闪烁
+        
+        setTimeout(() => {
+            switchGachaPage('gacha-page-result');
+            
+            // 获取 User 账号头像和真名
+            const currentLoginId = ChatDB.getItem('current_login_account');
+            let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+            const account = accounts.find(a => a.id === currentLoginId);
+            let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+            const persona = personas.find(p => p.id === (account ? account.personaId : null));
+            
+            const accountAvatar = account && account.avatarUrl ? account.avatarUrl : 'https://images.unsplash.com/photo-1578632767115-351597cf2477?q=80&w=800&auto=format&fit=crop';
+            const realName = persona && persona.realName ? persona.realName : (account ? account.netName : 'User');
+
+            const container = document.getElementById('gachaResultCardContainer');
+            container.innerHTML = `
+                <div class="gacha-result-card" style="background-image: url('${accountAvatar}');">
+                    <div class="gacha-result-rarity">${drawnCard ? drawnCard.rarity : 'SSR'}</div>
+                    <div class="gacha-result-name-strip">${drawnCard ? drawnCard.name : '[命运邂逅] ' + realName}</div>
+                </div>
+            `;
+            
+            setTimeout(() => {
+                overlay.classList.remove('active');
+                overlay.classList.remove('flash');
+            }, 500);
+
+        }, 500); // 白屏持续时间
+    }, 1500); // 加载动画持续时间
+}
+
+// ==========================================
+// 查手机 - 专属小宠 APP 交互逻辑
+// ==========================================
+let isPetDiaryMode = false;
+
+// ==========================================
+// 专属小宠 设置与图片更换逻辑
+// ==========================================
+function openPetSettingsModal() {
+    const dataStr = ChatDB.getItem(`phone_pet_settings_${currentChatRoomCharId}`) || '{}';
+    const data = JSON.parse(dataStr);
+    
+    // 兼容旧版单图和新版多图
+    let imgs = [];
+    if (Array.isArray(data.petImgs)) {
+        imgs = data.petImgs;
+    } else if (data.petImg) {
+        imgs = [data.petImg];
+    }
+    
+    document.getElementById('petImgUrlInput').value = imgs.join('\n');
+    document.getElementById('petBgUrlInput').value = data.petBg || '';
+    document.getElementById('petSettingsModalOverlay').classList.add('show');
+}
+
+function closePetSettingsModal() {
+    document.getElementById('petSettingsModalOverlay').classList.remove('show');
+}
+
+function handlePetLocalImg(event) {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    
+    const textarea = document.getElementById('petImgUrlInput');
+    let currentUrls = textarea.value.split('\n').map(s => s.trim()).filter(s => s);
+    
+    let loadedCount = 0;
+    for (let i = 0; i < files.length; i++) {
+        const reader = new FileReader();
+        reader.onload = e => {
+            currentUrls.push(e.target.result);
+            loadedCount++;
+            if (loadedCount === files.length) {
+                textarea.value = currentUrls.join('\n');
+            }
+        };
+        reader.readAsDataURL(files[i]);
+    }
+    event.target.value = '';
+}
+
+function handlePetLocalBg(event) {
+    const file = event.target.files[0];
+    if (file) {
+        const reader = new FileReader();
+        reader.onload = e => { document.getElementById('petBgUrlInput').value = e.target.result; };
+        reader.readAsDataURL(file);
+    }
+    event.target.value = '';
+}
+
+function savePetSettings() {
+    const petImgsRaw = document.getElementById('petImgUrlInput').value;
+    const petImgs = petImgsRaw.split('\n').map(s => s.trim()).filter(s => s);
+    const petBg = document.getElementById('petBgUrlInput').value;
+    
+    ChatDB.setItem(`phone_pet_settings_${currentChatRoomCharId}`, JSON.stringify({ petImgs, petBg }));
+    
+    applyPetSettings();
+    closePetSettingsModal();
+}
+
+function applyPetSettings() {
+    const dataStr = ChatDB.getItem(`phone_pet_settings_${currentChatRoomCharId}`) || '{}';
+    const data = JSON.parse(dataStr);
+    
+    let imgs = [];
+    if (Array.isArray(data.petImgs) && data.petImgs.length > 0) {
+        imgs = data.petImgs;
+    } else if (data.petImg) {
+        imgs = [data.petImg];
+    }
+
+    const petImgSrc = imgs.length > 0 ? imgs[0] : 'https://i.postimg.cc/LspkSSWj/retouch-2026050906172575.png';
+    document.getElementById('petImg').src = petImgSrc;
+    
+    // 同步更新 AVG 对话框的小宠头像
+    const avgAvatar = document.getElementById('petAvgAvatar');
+    if (avgAvatar) {
+        avgAvatar.style.backgroundImage = `url(${petImgSrc})`;
+    }
+    
+    if (data.petBg) {
+        document.getElementById('phonePetApp').style.backgroundImage = `url(${data.petBg})`;
+        document.getElementById('phonePetApp').style.backgroundSize = 'cover';
+        document.getElementById('phonePetApp').style.backgroundPosition = 'center';
+    } else {
+        document.getElementById('phonePetApp').style.backgroundImage = 'radial-gradient(#a1a1aa 1px, transparent 1px)';
+        document.getElementById('phonePetApp').style.backgroundSize = '20px 20px';
+    }
+}
+
+// ==========================================
+// 专属小宠 核心交互逻辑
+// ==========================================
+function openPhonePet() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    
+    // 动态加载当前角色的名字
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (char) {
+        const name = char.netName || char.name || 'Char';
+        document.getElementById('petLcdName').innerText = name;
+    }
+
+    applyPetSettings(); // 应用保存的图片和背景
+    document.getElementById('phonePetApp').classList.add('show');
+    renderPhonePet();
+}
+
+function closePhonePet() {
+    document.getElementById('phonePetApp').classList.remove('show');
+}
+
+function renderPhonePet() {
+    const dataStr = ChatDB.getItem(`phone_pet_${currentChatRoomCharId}`);
+    const diaryContainer = document.getElementById('petDiaryText');
+    
+    if (!dataStr) {
+        diaryContainer.innerHTML = '<div style="text-align: center; color: #888; margin-top: 20px;">点击右上角生成日记</div>';
+        return;
+    }
+
+    const data = JSON.parse(dataStr);
+    diaryContainer.innerHTML = '';
+    
+    if (data.diaries && data.diaries.length > 0) {
+        data.diaries.forEach(diary => {
+            const item = document.createElement('div');
+            item.style.marginBottom = '10px';
+            item.innerHTML = `
+                <div style="font-size: 9px; color: #888;">${diary.time}</div>
+                ${diary.content}
+            `;
+            diaryContainer.appendChild(item);
+        });
+    } else {
+        diaryContainer.innerHTML = '<div style="text-align: center; color: #888; margin-top: 20px;">暂无日记</div>';
+    }
+}
+
+function showPetToast(text) {
+    if (isPetDiaryMode) return; 
+    const toast = document.getElementById('lcdToast');
+    toast.innerText = text;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 1500);
+}
+
+function spawnPetHeart() {
+    if (isPetDiaryMode) return;
+    const stage = document.getElementById('petStage');
+    const heart = document.createElement('div');
+    heart.className = 'floating-heart';
+    heart.innerText = '❤️';
+    heart.style.left = (Math.random() * 40 + 30) + '%';
+    heart.style.top = '40%';
+    stage.appendChild(heart);
+    setTimeout(() => heart.remove(), 1000);
+}
+
+function actionPetDiary() {
+    const viewPet = document.getElementById('pet-view-main');
+    const viewDiary = document.getElementById('pet-view-diary');
+    
+    isPetDiaryMode = !isPetDiaryMode;
+    
+    if (isPetDiaryMode) {
+        viewPet.style.display = 'none';
+        viewDiary.classList.add('active');
+    } else {
+        viewPet.style.display = 'flex';
+        viewDiary.classList.remove('active');
+    }
+}
+
+// ==========================================
+// 专属小宠 AVG 对话逻辑
+// ==========================================
+function showPetAvg(text) {
+    document.getElementById('petAvgText').innerText = text;
+    document.getElementById('petAvgOverlay').classList.add('show');
+}
+
+function closePetAvg() {
+    document.getElementById('petAvgOverlay').classList.remove('show');
+}
+
+// 随机切换小宠动作图片
+function changePetImageRandomly() {
+    const dataStr = ChatDB.getItem(`phone_pet_settings_${currentChatRoomCharId}`) || '{}';
+    const data = JSON.parse(dataStr);
+    let imgs = [];
+    if (Array.isArray(data.petImgs) && data.petImgs.length > 0) {
+        imgs = data.petImgs;
+    } else if (data.petImg) {
+        imgs = [data.petImg];
+    }
+    
+    if (imgs.length > 0) {
+        const randomImg = imgs[Math.floor(Math.random() * imgs.length)];
+        document.getElementById('petImg').src = randomImg;
+        const avgAvatar = document.getElementById('petAvgAvatar');
+        if (avgAvatar) {
+            avgAvatar.style.backgroundImage = `url(${randomImg})`;
+        }
+    }
+}
+
+function actionPetFeed() {
+    if (isPetDiaryMode) return;
+    spawnPetHeart();
+    changePetImageRandomly(); // 随机切换动作图片
+    
+    let dialogues = [
+        "吧唧吧唧... 勉强算你合格吧。",
+        "哼，别以为一点零食就能收买我！",
+        "（开心地摇尾巴）谢谢主人~",
+        "看在你这么有诚意的份上，我就吃一口吧。"
+    ];
+    
+    if (currentChatRoomCharId) {
+        const dataStr = ChatDB.getItem(`phone_pet_${currentChatRoomCharId}`);
+        if (dataStr) {
+            try {
+                const data = JSON.parse(dataStr);
+                if (data.feedDialogues && data.feedDialogues.length > 0) {
+                    dialogues = data.feedDialogues;
+                }
+            } catch(e){}
+        }
+    }
+    
+    const text = dialogues[Math.floor(Math.random() * dialogues.length)];
+    showPetAvg(text);
+}
+
+function actionPetTouch() {
+    if (isPetDiaryMode) return;
+    spawnPetHeart();
+    changePetImageRandomly(); // 随机切换动作图片
+    
+    let dialogues = [
+        "呼噜呼噜... 再摸一下，就一下。",
+        "别乱摸！... 算了，随你便吧。",
+        "（蹭蹭你的手心）好温暖...",
+        "你今天怎么这么粘人？"
+    ];
+    
+    if (currentChatRoomCharId) {
+        const dataStr = ChatDB.getItem(`phone_pet_${currentChatRoomCharId}`);
+        if (dataStr) {
+            try {
+                const data = JSON.parse(dataStr);
+                if (data.touchDialogues && data.touchDialogues.length > 0) {
+                    dialogues = data.touchDialogues;
+                }
+            } catch(e){}
+        }
+    }
+    
+    const text = dialogues[Math.floor(Math.random() * dialogues.length)];
+    showPetAvg(text);
+}
+
+function closePhonePet() {
+    document.getElementById('phonePetApp').classList.remove('show');
+}
+
+function renderPhonePet() {
+    const dataStr = ChatDB.getItem(`phone_pet_${currentChatRoomCharId}`);
+    const diaryContainer = document.getElementById('petDiaryText');
+    
+    if (!dataStr) {
+        diaryContainer.innerHTML = '<div style="text-align: center; color: #888; margin-top: 20px;">点击右上角生成日记</div>';
+        return;
+    }
+
+    const data = JSON.parse(dataStr);
+    diaryContainer.innerHTML = '';
+    
+    if (data.diaries && data.diaries.length > 0) {
+        data.diaries.forEach(diary => {
+            const item = document.createElement('div');
+            item.style.marginBottom = '10px';
+            item.innerHTML = `
+                <div style="font-size: 9px; color: #888;">${diary.time}</div>
+                ${diary.content}
+            `;
+            diaryContainer.appendChild(item);
+        });
+    } else {
+        diaryContainer.innerHTML = '<div style="text-align: center; color: #888; margin-top: 20px;">暂无日记</div>';
+    }
+}
+
+function showPetToast(text) {
+    if (isPetDiaryMode) return; 
+    const toast = document.getElementById('lcdToast');
+    toast.innerText = text;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 1500);
+}
+
+function spawnPetHeart() {
+    if (isPetDiaryMode) return;
+    const stage = document.getElementById('petStage');
+    const heart = document.createElement('div');
+    heart.className = 'floating-heart';
+    heart.innerText = '❤️';
+    heart.style.left = (Math.random() * 40 + 30) + '%';
+    heart.style.top = '40%';
+    stage.appendChild(heart);
+    setTimeout(() => heart.remove(), 1000);
+}
+
+function petJumpAnim() {
+    const pet = document.getElementById('petImg');
+    pet.style.animation = 'none';
+    pet.style.transform = 'translateY(-15px) scale(1.05)';
+    setTimeout(() => {
+        pet.style.transform = 'translateY(0) scale(1)';
+        setTimeout(() => {
+            pet.style.animation = 'petBreathe 2.5s ease-in-out infinite';
+        }, 100);
+    }, 150);
+}
+
+function actionPetDiary() {
+    const viewPet = document.getElementById('pet-view-main');
+    const viewDiary = document.getElementById('pet-view-diary');
+    
+    isPetDiaryMode = !isPetDiaryMode;
+    
+    if (isPetDiaryMode) {
+        viewPet.style.display = 'none';
+        viewDiary.classList.add('active');
+    } else {
+        viewPet.style.display = 'flex';
+        viewDiary.classList.remove('active');
+    }
+}
+
+async function generatePhonePetAPI() {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => { activeWbs.push(entry.content); });
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    if (activeWbs.length > 0) prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    if (recentHistory) prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成你在“专属小宠”APP里的数据【最高指令：必须和最近的聊天记录或者生活状态相关，根据最新聊天记录和生活状态生成！！】。
+在这个APP里，你是一个被 ${userRealName} 饲养的电子宠物，你必须扮演一个电子宠物，模拟真实宠物，不可以扮演真人！
+
+你需要生成两部分内容：
+1. 饲养日志 (diaries)：必须是你作为“宠物”视角的碎碎念，表达你对 ${userRealName} (主人) 的依恋、吐槽、吃醋或渴望被关注的心情。请生成 3-4 条日记。为了突出情感，请将日记中直接提到 ${userRealName} 或者表达强烈情绪的句子，用 <span> 标签包裹起来（例如：<span>明明一直在等消息的……</span>）【最高指令：必须和最近的聊天记录或者生活状态相关，根据最新聊天记录和生活状态生成！！】。
+2. 互动对话：当 ${userRealName} 对你进行“投喂”或“抚摸”时，你作为宠物会说的话。语气要符合你的人设（傲娇、粘人、高冷等），每种动作生成 3-5 句不同的反应，【最高指令：必须和最近的聊天记录或者生活状态相关，根据最新聊天记录和生活状态生成！！】。
+
+必须返回合法的 JSON 对象，结构如下：
+{
+  "diaries": [
+    {
+      "time": "时间(如: 昨天 23:15)",
+      "content": "日记内容，包含 <span> 标签高亮重点句子"
+    }
+  ],
+  "feedDialogues": [
+    "投喂时的反应1",
+    "投喂时的反应2"
+  ],
+  "touchDialogues": [
+    "抚摸时的反应1",
+    "抚摸时的反应2"
+  ]
+}`;
+
+    showToast('正在生成宠物日记...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^\s*```json/i, '').replace(/^\s*```/i, '').replace(/```\s*$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            ChatDB.setItem(`phone_pet_${currentChatRoomCharId}`, JSON.stringify(parsed));
+            
+            renderPhonePet();
+            hideToast();
+            alert('宠物日记生成成功！');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}
+
+// ==========================================
+// 查手机 - 音乐 APP 交互逻辑
+// ==========================================
+function openPhoneMusic() {
+    if (!currentChatRoomCharId) return alert('请先进入聊天室！');
+    
+    // 动态加载当前角色的头像和名字
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (char) {
+        const avatarUrl = char.avatarUrl || 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?q=80&w=100&auto=format&fit=crop';
+        const charName = char.netName || char.name || 'Char';
+        
+        const avatarEl = document.getElementById('pmProfileAvatar');
+        if (avatarEl) avatarEl.style.backgroundImage = `url('${avatarUrl}')`;
+        
+        const nameEl = document.getElementById('pmProfileName');
+        if (nameEl) nameEl.innerText = charName + "'s Music";
+        
+        const bgEl = document.getElementById('pmProfileHeaderBg');
+        if (bgEl) bgEl.style.backgroundImage = `url('${avatarUrl}')`;
+    }
+
+    document.getElementById('phoneMusicApp').classList.add('show');
+    renderPhoneMusic();
+}
+
+function closePhoneMusic() {
+    document.getElementById('phoneMusicApp').classList.remove('show');
+}
+
+function renderPhoneMusic() {
+    // 核心修改：直接读取桌面 Music APP 的数据源，实现双向同步
+    const recentDataStr = ChatDB.getItem(`music_recent_${currentChatRoomCharId}`);
+    const playlistsDataStr = ChatDB.getItem(`music_playlists_${currentChatRoomCharId}`);
+    
+    const recentContainer = document.getElementById('pmRecentPlaylistContainer');
+    const playlistContainer = document.getElementById('pmPlaylistContainer');
+    const countEl = document.getElementById('pmPlaylistCount');
+    
+    // 渲染最近听歌 (作为一个歌单入口)
+    if (recentDataStr) {
+        const recentData = JSON.parse(recentDataStr);
+        if (recentData.tracks && recentData.tracks.length > 0) {
+            recentContainer.innerHTML = '';
+            const card = document.createElement('div');
+            card.className = 'pm-recent-playlist-card';
+            // 点击直接进入专属歌单详情页
+            card.onclick = () => openPhoneMusicPlaylistDetail(recentData, true);
+            
+            card.innerHTML = `
+                <div class="pm-recent-playlist-cover">
+                    <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
+                </div>
+                <div class="pm-recent-playlist-info">
+                    <div class="pm-recent-playlist-title">最近播放</div>
+                    <div class="pm-recent-playlist-desc">共 ${recentData.tracks.length} 首 · 包含心声记录</div>
+                </div>
+                <div class="pm-playlist-arrow">
+                    <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                </div>
+            `;
+            recentContainer.appendChild(card);
+        } else {
+            recentContainer.innerHTML = '<div style="padding: 20px; color: #888; font-size: 13px; text-align: center; width: 100%; background: #fff; border-radius: 16px; border: 1px solid #f0f0f0;">暂无最近播放记录</div>';
+        }
+    } else {
+        recentContainer.innerHTML = '<div style="padding: 20px; color: #888; font-size: 13px; text-align: center; width: 100%; background: #fff; border-radius: 16px; border: 1px solid #f0f0f0;">点击右上角生成数据</div>';
+    }
+
+    // 渲染歌单
+    if (playlistsDataStr) {
+        const playlists = JSON.parse(playlistsDataStr);
+        if (playlists.length > 0) {
+            playlistContainer.innerHTML = '';
+            countEl.innerText = `共 ${playlists.length} 个`;
+            playlists.forEach(pl => {
+                const item = document.createElement('div');
+                item.className = 'pm-playlist-item';
+                item.onclick = () => openPhoneMusicPlaylistDetail(pl, false);
+                item.innerHTML = `
+                    <div class="pm-playlist-cover">
+                        <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
+                    </div>
+                    <div class="pm-playlist-info">
+                        <div class="pm-playlist-title">${pl.name}</div>
+                        <div class="pm-playlist-desc">
+                            <span class="pm-playlist-tag">Char 专属</span>
+                            ${pl.trackCount || 0} 首
+                        </div>
+                    </div>
+                    <div class="pm-playlist-arrow">
+                        <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                    </div>
+                `;
+                playlistContainer.appendChild(item);
+            });
+        } else {
+            playlistContainer.innerHTML = '<div style="padding: 20px; color: #888; font-size: 13px; text-align: center; width: 100%;">暂无歌单</div>';
+            countEl.innerText = '共 0 个';
+        }
+    } else {
+        playlistContainer.innerHTML = '<div style="padding: 20px; color: #888; font-size: 13px; text-align: center; width: 100%;">暂无歌单</div>';
+        countEl.innerText = '共 0 个';
+    }
+}
+
+function openPhoneMusicPlaylistDetail(data, isRecent) {
+    document.getElementById('pmDetailName').innerText = data.name;
+    document.getElementById('pmDetailCount').innerText = `共 ${data.tracks ? data.tracks.length : 0} 首`;
+    
+    const trackList = document.getElementById('pmDetailTrackList');
+    trackList.innerHTML = '';
+
+    if (data.tracks && data.tracks.length > 0) {
+        data.tracks.forEach((song, index) => {
+            const item = document.createElement('div');
+            item.className = 'pm-track-item';
+            item.onclick = () => {
+                if (typeof playGeneratedSong === 'function') {
+                    if (song.url && song.url.startsWith('data:audio')) {
+                        playLocalSong(song);
+                    } else if (song.isGenerated || String(song.id).startsWith('gen_')) {
+                        playGeneratedSong(song.title, song.artist);
+                    } else {
+                        musicPlaySong(song.id, song.title, song.artist, song.cover);
+                    }
+                } else {
+                    alert('音乐播放组件未加载');
+                }
+            };
+
+            let voiceHtml = '';
+            if (isRecent && song.innerVoice) {
+                voiceHtml = `<div class="pm-track-voice">"${song.innerVoice}"</div>`;
+            }
+
+            item.innerHTML = `
+                <div class="pm-track-index">${index + 1}</div>
+                <div class="pm-track-info">
+                    <div class="pm-track-title">${song.title}</div>
+                    <div class="pm-track-artist">${song.artist}</div>
+                    ${voiceHtml}
+                </div>
+                <div class="pm-track-action">
+                    <svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                </div>
+            `;
+            trackList.appendChild(item);
+        });
+    } else {
+        trackList.innerHTML = '<div style="text-align: center; color: #888; font-size: 13px; padding: 20px;">歌单为空</div>';
+    }
+
+    document.getElementById('pmPlaylistDetailPage').classList.add('active');
+}
+
+function closePhoneMusicPlaylistDetail() {
+    document.getElementById('pmPlaylistDetailPage').classList.remove('active');
+}
+
+async function generatePhoneMusicAPI() {
+    if (!currentChatRoomCharId) return;
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === currentChatRoomCharId);
+    if (!char) return;
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    let activeWbs = [];
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+    let entries = wbData.entries.filter(e => (char.wbEntries && char.wbEntries.includes(e.id)) || e.constant);
+    entries.forEach(entry => { activeWbs.push(entry.content); });
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    let recentHistory = history.slice(-30).map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
+
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    if (activeWbs.length > 0) prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    if (recentHistory) prompt += `【最近的聊天记录参考】：\n${recentHistory}\n`;
+
+    prompt += `\n请基于你的人设、当前生活状态，以及我们最近的聊天上下文，生成你手机里“音乐”APP的相关数据。
+你需要生成两部分内容：
+1. 最近听歌 (recent)：生成 6-10 首你最近单曲循环的真实存在的歌曲。必须包含 innerVoice(心声)，解释你为什么听这首歌，心情如何（第一人称，简短感性，10-30字）。
+2. 创建的歌单 (playlists)：生成 1-2 个符合你品味的歌单，并且为每个歌单生成30首歌曲列表(songs数组)，每首歌包含title(歌名)和artist(歌手)。
+4.歌曲必须是现实中真实存在的知名歌曲，以便能够在音乐软件中搜索到。不要自己瞎编歌名
+
+必须返回合法的 JSON 对象，结构如下：
+{
+  "recent": [
+    {
+      "title": "歌曲名",
+      "artist": "歌手名",
+      "innerVoice": "听这首歌时的内心独白"
+    }
+  ],
+  "playlists": [
+    {
+      "title": "歌单名称",
+      "tracks": [
+        {"title": "歌曲名1", "artist": "歌手名1"}
+      ]
+    }
+  ]
+}`;
+
+    showToast('正在生成音乐数据...', 'loading');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^\s*```json/i, '').replace(/^\s*```/i, '').replace(/```\s*$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            
+            // 核心修改：将生成的数据直接转换为桌面 Music APP 的数据结构并保存
+            if (parsed.recent && parsed.recent.length > 0) {
+                const recentPlaylist = {
+                    id: 'recent',
+                    name: '最近播放',
+                    cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg',
+                    trackCount: parsed.recent.length,
+                    tracks: parsed.recent.map(s => ({
+                        id: 'gen_recent_' + Date.now() + Math.random(),
+                        title: s.title,
+                        artist: s.artist,
+                        innerVoice: s.innerVoice,
+                        isGenerated: true,
+                        cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg'
+                    }))
+                };
+                ChatDB.setItem(`music_recent_${currentChatRoomCharId}`, JSON.stringify(recentPlaylist));
+            }
+
+            if (parsed.playlists && parsed.playlists.length > 0) {
+                let savedPlaylists = JSON.parse(ChatDB.getItem(`music_playlists_${currentChatRoomCharId}`) || '[]');
+                parsed.playlists.forEach(pl => {
+                    savedPlaylists.push({
+                        id: 'char_pl_' + Date.now() + Math.random(),
+                        name: pl.title,
+                        cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg',
+                        trackCount: pl.tracks ? pl.tracks.length : 0,
+                        tracks: (pl.tracks || []).map(t => ({
+                            id: 'gen_' + Date.now() + Math.random(),
+                            title: t.title,
+                            artist: t.artist,
+                            isGenerated: true,
+                            cover: char.avatarUrl || 'https://p2.music.126.net/6y-7YvS_G8V8.jpg'
+                        }))
+                    });
+                });
+                ChatDB.setItem(`music_playlists_${currentChatRoomCharId}`, JSON.stringify(savedPlaylists));
+            }
+            
+            renderPhoneMusic();
+            hideToast();
+            alert('音乐数据生成成功！已同步至桌面 Music APP。');
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        hideToast();
+        alert('生成失败，请检查 API 配置或重试。');
+    }
+}

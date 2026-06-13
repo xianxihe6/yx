@@ -1,0 +1,1890 @@
+// ==========================================
+// 亲密关系 APP 逻辑
+// ==========================================
+
+let isIntimacyGroupEditing = false;
+
+function toggleIntimacyGroupEdit() {
+    isIntimacyGroupEditing = !isIntimacyGroupEditing;
+    const btn = document.getElementById('intimacyGroupEditBtn');
+    if (isIntimacyGroupEditing) {
+        btn.innerText = 'Done';
+        btn.style.color = '#111';
+    } else {
+        btn.innerText = 'Edit';
+        btn.style.color = '#888';
+    }
+    renderIntimacyGroups(); // 重新渲染列表以显示/隐藏删除按钮
+}
+
+function openIntimacyApp() {
+    document.getElementById('intimacyAppPanel').style.display = 'flex';
+    
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    if (currentLoginId) {
+        // 已登录
+        document.getElementById('intimacyLoginPage').style.transform = 'translateY(100%)';
+        renderIntimacyMainPage();
+    } else {
+        // 未登录
+        document.getElementById('intimacyLoginPage').style.transform = 'translateY(0)';
+        renderIntimacyAccountList();
+    }
+}
+
+function closeIntimacyApp() {
+    document.getElementById('intimacyAppPanel').style.display = 'none';
+}
+
+// --- 登录逻辑 ---
+function renderIntimacyAccountList() {
+    const listEl = document.getElementById('intimacyAccountList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    
+    if (accounts.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 13px; padding: 20px 0;">暂无可用账号，请先在 Chat 中注册</div>';
+        return;
+    }
+
+    accounts.forEach(acc => {
+        const item = document.createElement('div');
+        item.style.cssText = 'background: #f9f9f9; border-radius: 16px; padding: 15px; display: flex; align-items: center; gap: 15px; cursor: pointer; border: 1px solid #eee;';
+        item.onclick = () => {
+            ChatDB.setItem('intimacy_current_account', acc.id);
+            document.getElementById('intimacyLoginPage').style.transform = 'translateY(100%)';
+            renderIntimacyMainPage();
+        };
+        item.innerHTML = `
+            <div style="width: 48px; height: 48px; border-radius: 12px; background-image: url('${acc.avatarUrl || ''}'); background-size: cover; background-position: center; background-color: #eee;"></div>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 4px;">
+                <div style="font-size: 16px; font-weight: bold; color: #111;">${acc.netName || '未命名'}</div>
+                <div style="font-size: 12px; color: #888; font-family: monospace;">${acc.account}</div>
+            </div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+function intimacyLoginWithPassword() {
+    const account = document.getElementById('intimacyLoginAccount').value.trim();
+    const password = document.getElementById('intimacyLoginPassword').value.trim();
+    
+    if (!account || !password) return alert('请输入账号和密码！');
+    
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const validAccount = accounts.find(a => a.account === account && a.password === password);
+    
+    if (validAccount) {
+        ChatDB.setItem('intimacy_current_account', validAccount.id);
+        document.getElementById('intimacyLoginPage').style.transform = 'translateY(100%)';
+        renderIntimacyMainPage();
+    } else {
+        alert('账号或密码错误！');
+    }
+}
+
+// --- 设置与切换账号逻辑 ---
+function openIntimacySettingsPage() {
+    const listEl = document.getElementById('intimacySwitchAccountList');
+    listEl.innerHTML = '';
+    
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    
+    accounts.forEach(acc => {
+        const isCurrent = acc.id === currentLoginId;
+        const item = document.createElement('div');
+        item.style.cssText = `display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #f5f5f5; cursor: pointer; background: ${isCurrent ? '#f9f9f9' : '#fff'}; flex-shrink: 0;`;
+        item.onclick = () => {
+            if (!isCurrent) {
+                ChatDB.setItem('intimacy_current_account', acc.id);
+                renderIntimacyMainPage();
+                closeIntimacySettingsPage();
+                showIntimacyToast('已切换账号');
+            }
+        };
+        item.innerHTML = `
+            <div style="display: flex; align-items: center; gap: 12px;">
+                <div style="width: 40px; height: 40px; border-radius: 10px; background-image: url('${acc.avatarUrl || ''}'); background-size: cover; background-position: center; background-color: #eee;"></div>
+                <div style="font-size: 15px; font-weight: bold; color: #111;">${acc.netName || '未命名'}</div>
+            </div>
+            ${isCurrent ? '<svg viewBox="0 0 24 24" width="20" height="20" stroke="#111" stroke-width="2" fill="none"><polyline points="20 6 9 17 4 12"></polyline></svg>' : ''}
+        `;
+        listEl.appendChild(item);
+    });
+    
+    const apiSelect = document.getElementById('intimacyApiSelect');
+    if (apiSelect) {
+        apiSelect.innerHTML = '<option value="">默认全局 API</option>';
+        let presets = JSON.parse(ChatDB.getItem('api_presets') || '[]');
+        presets.forEach(p => {
+            const opt = document.createElement('option');
+            opt.value = p.id;
+            opt.innerText = p.name;
+            apiSelect.appendChild(opt);
+        });
+        
+        const savedApiId = ChatDB.getItem(`intimacy_api_preset_${currentLoginId}`);
+        if (savedApiId) {
+            apiSelect.value = savedApiId;
+        }
+    }
+
+    document.getElementById('intimacySettingsPage').style.display = 'flex';
+}
+
+function saveIntimacyApiSelect() {
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    const val = document.getElementById('intimacyApiSelect').value;
+    if (val) {
+        ChatDB.setItem(`intimacy_api_preset_${currentLoginId}`, val);
+    } else {
+        ChatDB.removeItem(`intimacy_api_preset_${currentLoginId}`);
+    }
+}
+
+function closeIntimacySettingsPage() {
+    document.getElementById('intimacySettingsPage').style.display = 'none';
+}
+
+function intimacyLogout() {
+    if (confirm('确定要退出当前账号吗？')) {
+        ChatDB.removeItem('intimacy_current_account');
+        closeIntimacySettingsPage();
+        document.getElementById('intimacyLoginPage').style.transform = 'translateY(0)';
+        renderIntimacyAccountList();
+    }
+}
+
+function renderIntimacyMainPage() {
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    if (!currentLoginId) return;
+
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const me = accounts.find(a => a.id === currentLoginId);
+    if (!me) return;
+
+    // 渲染我的头像
+    const avatarMeEl = document.getElementById('intimacyLoverAvatarMe');
+    if (me.avatarUrl) {
+        avatarMeEl.style.backgroundImage = `url('${me.avatarUrl}')`;
+        avatarMeEl.style.backgroundSize = 'cover';
+        avatarMeEl.style.backgroundPosition = 'center';
+        avatarMeEl.innerHTML = '';
+    } else {
+        avatarMeEl.style.backgroundImage = 'none';
+        avatarMeEl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="1.5" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
+    }
+
+    // 检查是否绑定了恋人
+    const loverDataStr = ChatDB.getItem(`intimacy_lover_${currentLoginId}`);
+    const avatarTaEl = document.getElementById('intimacyLoverAvatarTa');
+    const nameTextEl = document.getElementById('intimacyLoverNameText');
+    const daysTextEl = document.getElementById('intimacyLoverDaysText');
+
+    if (loverDataStr) {
+        const loverData = JSON.parse(loverDataStr);
+        let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+        const char = allEntities.find(c => c.id === loverData.charId);
+        
+        if (char) {
+            avatarTaEl.classList.remove('empty');
+            if (char.avatarUrl) {
+                avatarTaEl.style.backgroundImage = `url('${char.avatarUrl}')`;
+                avatarTaEl.style.backgroundSize = 'cover';
+                avatarTaEl.style.backgroundPosition = 'center';
+                avatarTaEl.innerHTML = '';
+            } else {
+                avatarTaEl.style.backgroundImage = 'none';
+                avatarTaEl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="1.5" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
+            }
+            
+            const myName = me.netName || '我';
+            const taName = char.netName || char.name || 'TA';
+            nameTextEl.innerHTML = `${myName}<span>&</span>${taName}`;
+            
+            const days = Math.floor((Date.now() - loverData.bindTime) / (1000 * 60 * 60 * 24));
+            daysTextEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>在一起 ${days} 天`;
+        }
+    } else {
+        avatarTaEl.classList.add('empty');
+        avatarTaEl.style.backgroundImage = 'none';
+        avatarTaEl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#bbb" stroke-width="1.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>';
+        nameTextEl.innerHTML = `我<span>&</span>等TA来`;
+        daysTextEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>点击邀请恋人`;
+    }
+
+    // 渲染关系组
+    renderIntimacyGroups();
+}
+
+function renderIntimacyGroups() {
+    const container = document.getElementById('intimacyGroupsContainer');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    if (!currentLoginId) return;
+
+    // 默认分组
+    let groups = JSON.parse(ChatDB.getItem(`intimacy_groups_${currentLoginId}`) || '["闺蜜", "基友", "家人"]');
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+
+    groups.forEach(groupName => {
+        let membersIds = JSON.parse(ChatDB.getItem(`intimacy_members_${currentLoginId}_${groupName}`) || '[]');
+        let members = membersIds.map(id => allEntities.find(c => c.id === id)).filter(c => c);
+
+        const groupEl = document.createElement('div');
+        groupEl.className = 'intimacy-rel-group';
+        
+        let avatarsHtml = '';
+        if (members.length >= 2) {
+            avatarsHtml = `
+                <div class="intimacy-ra" style="background-image: url('${members[0].avatarUrl || ''}'); background-size: cover; background-position: center;">${!members[0].avatarUrl ? '<svg viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="1.6" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' : ''}</div>
+                <div class="intimacy-ra" style="background-image: url('${members[1].avatarUrl || ''}'); background-size: cover; background-position: center;">${!members[1].avatarUrl ? '<svg viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="1.6" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' : ''}</div>
+            `;
+        } else if (members.length === 1) {
+            avatarsHtml = `
+                <div class="intimacy-ra" style="background-image: url('${members[0].avatarUrl || ''}'); background-size: cover; background-position: center;">${!members[0].avatarUrl ? '<svg viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="1.6" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' : ''}</div>
+                <div class="intimacy-ra placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div>
+            `;
+        } else {
+            avatarsHtml = `
+                <div class="intimacy-ra placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div>
+                <div class="intimacy-ra placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div>
+            `;
+        }
+
+        let membersHtml = '';
+        members.forEach(m => {
+            membersHtml += `
+                <div class="intimacy-mem-row" onclick="openIntimacyDetail('member', '${m.id}', '${groupName}', 0)">
+                    <div class="intimacy-mem-av" style="background-image: url('${m.avatarUrl || ''}'); background-size: cover; background-position: center;">${!m.avatarUrl ? '<svg viewBox="0 0 24 24" fill="none" stroke="#999" stroke-width="1.5" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' : ''}</div>
+                    <div class="intimacy-mem-info"><div class="intimacy-mem-name">${m.netName || m.name}</div><div class="intimacy-mem-sub">已加入</div></div>
+                </div>
+            `;
+        });
+
+        membersHtml += `
+            <div class="intimacy-mem-row empty" onclick="showIntimacyAddMemberModal('${groupName}')">
+                <div class="intimacy-mem-av"><svg viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="1.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div>
+                <div class="intimacy-mem-info"><div class="intimacy-mem-name">添加成员</div></div>
+            </div>
+        `;
+
+        let deleteBtnHtml = '';
+        if (isIntimacyGroupEditing) {
+            deleteBtnHtml = `<div class="intimacy-rel-delete" onclick="deleteIntimacyGroup('${groupName}', ${members.length}, event)" style="margin-right: 10px; color: #ff3b30; font-size: 12px; font-weight: bold; padding: 4px 8px; background: #ffe5e5; border-radius: 8px;">删除</div>`;
+        }
+
+        groupEl.innerHTML = `
+            <div class="intimacy-rel-head" onclick="${isIntimacyGroupEditing ? '' : 'toggleIntimacyGroup(this)'}">
+                <div class="intimacy-rel-pair">
+                    ${avatarsHtml}
+                </div>
+                <div class="intimacy-rel-meta">
+                    <div class="intimacy-rel-name">${groupName}</div>
+                    <div class="intimacy-rel-count">${members.length} 人</div>
+                </div>
+                ${deleteBtnHtml}
+                <div class="intimacy-rel-arrow" style="${isIntimacyGroupEditing ? 'display:none;' : ''}"><svg viewBox="0 0 24 24" fill="none" stroke="#ccc" stroke-width="2" stroke-linecap="round"><path d="M9 18l6-6-6-6"/></svg></div>
+            </div>
+            <div class="intimacy-rel-body">
+                <div class="intimacy-rel-body-inner">
+                    ${membersHtml}
+                </div>
+            </div>
+        `;
+        container.appendChild(groupEl);
+    });
+}
+
+function handleLoverCardClick() {
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    if (!currentLoginId) return;
+    const loverDataStr = ChatDB.getItem(`intimacy_lover_${currentLoginId}`);
+    if (loverDataStr) {
+        openIntimacyDetail('lover');
+    } else {
+        openLoverInviteModal();
+    }
+}
+
+function openLoverInviteModal() {
+    const listEl = document.getElementById('intimacyLoverInviteList');
+    listEl.innerHTML = '';
+    
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+    
+    document.querySelector('#intimacyLoverInviteModalOverlay .preset-modal-title').innerText = '邀请恋人';
+
+    // 过滤出可以邀请的对象：排除自己、排除NPC、排除群聊、排除已绑定恋人的对象
+    let inviteTargets = allEntities.filter(c => {
+        if (c.id === currentLoginId) return false;
+        if (c.isNPC || c.isGroup) return false;
+        const taLover = ChatDB.getItem(`intimacy_lover_${c.id}`);
+        return !taLover;
+    });
+
+    if (inviteTargets.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#aaa; font-size:12px;">暂无单身角色或用户可邀请</div>';
+    } else {
+        inviteTargets.forEach(c => {
+            const typeTag = c.isAccount ? '<span style="font-size:10px; background:#eee; color:#888; padding:2px 4px; border-radius:4px; margin-left:4px;">用户</span>' : '';
+            const item = document.createElement('div');
+            item.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 10px; background: #f9f9f9; border-radius: 10px; cursor: pointer;';
+            item.innerHTML = `
+                <div style="width: 36px; height: 36px; border-radius: 8px; background-image: url('${c.avatarUrl || ''}'); background-size: cover; background-position: center; background-color: #eee;"></div>
+                <div style="font-size: 14px; font-weight: bold; color: #333; flex: 1;">${c.netName || c.name}${typeTag}</div>
+            `;
+            item.onclick = () => bindLover(c.id);
+            listEl.appendChild(item);
+        });
+    }
+    document.getElementById('intimacyLoverInviteModalOverlay').classList.add('show');
+}
+
+function closeLoverInviteModal() {
+    document.getElementById('intimacyLoverInviteModalOverlay').classList.remove('show');
+}
+
+let pendingLoverCharId = null;
+
+function bindLover(charId) {
+    pendingLoverCharId = charId;
+    closeLoverInviteModal();
+    document.getElementById('userConfessionInput').value = '';
+    document.getElementById('userConfessionModalOverlay').classList.add('show');
+}
+
+function closeUserConfessionModal() {
+    document.getElementById('userConfessionModalOverlay').classList.remove('show');
+    pendingLoverCharId = null;
+}
+
+function confirmUserConfession() {
+    const text = document.getElementById('userConfessionInput').value.trim() || "“我观察你很久了，每次看到你，我的心跳都会漏半拍。这段时间以来的相处，让我确信你就是那个对的人。<br><br>你愿意，成为我的唯一吗？”";
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    if (typeof sendIntimacyInviteMsg === 'function') {
+        sendIntimacyInviteMsg(currentLoginId, pendingLoverCharId, 'lover', '', text);
+    }
+    closeUserConfessionModal();
+    showIntimacyToast('已发送恋人邀请至聊天室！');
+}
+
+let currentIntimacyCharId = null;
+
+// ===== 打开详情页 =====
+function openIntimacyDetail(type, charId, groupName, days) {
+    const page = document.getElementById('intimacyDetailPage');
+    const main = document.getElementById('intimacyMainPage');
+    const avatarsEl = document.getElementById('intimacyHeroAvatars');
+    const titleEl = document.getElementById('intimacyHeroTitle');
+    const subtitleEl = document.getElementById('intimacyHeroSubtitle');
+    const daysEl = document.getElementById('intimacyHeroDays');
+    const daysLabelEl = document.getElementById('intimacyHeroDaysLabel');
+    const gridEl = document.getElementById('intimacyDetailGrid');
+    const actionsEl = document.getElementById('intimacyQuickActions');
+
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    
+    // 核心修改：使用 getAllEntities 统一获取所有实体（包含角色和用户账号）
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+    const me = allEntities.find(a => a.id === currentLoginId);
+    
+    let char = null;
+    let bindDays = days || 0;
+
+    if (type === 'lover') {
+        const loverDataStr = ChatDB.getItem(`intimacy_lover_${currentLoginId}`);
+        if (loverDataStr) {
+            const loverData = JSON.parse(loverDataStr);
+            char = allEntities.find(c => c.id === loverData.charId);
+            currentIntimacyCharId = loverData.charId;
+            bindDays = Math.floor((Date.now() - loverData.bindTime) / (1000 * 60 * 60 * 24));
+        }
+    } else {
+        char = allEntities.find(c => c.id === charId);
+        currentIntimacyCharId = charId;
+    }
+
+    const meAvatarUrl = me && me.avatarUrl ? me.avatarUrl : '';
+    const charAvatarUrl = char && char.avatarUrl ? char.avatarUrl : '';
+    const myName = me ? (me.netName || '我') : '我';
+    const taName = char ? (char.netName || char.name) : 'TA';
+
+    if (type === 'lover') {
+        avatarsEl.innerHTML = `
+            <div class="intimacy-hero-av" style="background-image: url('${meAvatarUrl}'); background-size: cover; background-position: center; background-repeat: no-repeat; border-radius: 50%; overflow: hidden; flex-shrink: 0;">
+                ${!meAvatarUrl ? '<svg viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" stroke-width="1.5" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' : ''}
+            </div>
+            <div class="intimacy-hero-heart-badge"><svg viewBox="0 0 24 24" fill="#fff"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 000-7.78z"/></svg></div>
+            <div class="intimacy-hero-av" style="background-image: url('${charAvatarUrl}'); background-size: cover; background-position: center; background-repeat: no-repeat; border-radius: 50%; overflow: hidden; flex-shrink: 0;">
+                ${!charAvatarUrl ? '<svg viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" stroke-width="1.5" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' : ''}
+            </div>
+        `;
+        titleEl.innerHTML = `${myName}<span>&</span>${taName}`;
+        subtitleEl.textContent = '恋人关系';
+        daysEl.textContent = bindDays;
+        daysLabelEl.textContent = '天 · 在一起';
+
+        gridEl.innerHTML = `
+            <div class="intimacy-detail-card" onclick="showIntimacyToast('纪念日')">
+                <div class="intimacy-detail-card-icon" style="background:#eee">
+                    <svg viewBox="0 0 24 24" fill="none">
+                        <rect x="3" y="8" width="18" height="13" rx="3" stroke="#999" stroke-width="1.5"/>
+                        <path d="M3 13c3-2 6 1 9-1s6 1 9-1" stroke="#ccc" stroke-width="1.2"/>
+                        <rect x="7" y="4" width="2" height="5" rx="1" fill="#ddd"/>
+                        <rect x="15" y="4" width="2" height="5" rx="1" fill="#ddd"/>
+                        <ellipse cx="8" cy="3.5" rx="1.8" ry="1" fill="#bbb" opacity="0.7"/>
+                        <ellipse cx="16" cy="3.5" rx="1.8" ry="1" fill="#bbb" opacity="0.7"/>
+                        <circle cx="8" cy="3" r="0.5" fill="#999"/>
+                        <circle cx="16" cy="3" r="0.5" fill="#999"/>
+                    </svg>
+                </div>
+                <div class="intimacy-detail-card-title">纪念日</div>
+                <div class="intimacy-detail-card-desc">记录每个重要时刻</div>
+                <div class="intimacy-detail-card-badge" style="background:#eee;color:#888;">3个</div>
+            </div>
+            <div class="intimacy-detail-card" onclick="showIntimacyToast('相册')">
+                <div class="intimacy-detail-card-icon" style="background:#eee">
+                    <svg viewBox="0 0 24 24" fill="none">
+                        <rect x="2.5" y="6" width="19" height="14" rx="3" stroke="#999" stroke-width="1.5"/>
+                        <path d="M2.5 16l4.5-4 3 2.5 4-5 5.5 6.5" stroke="#bbb" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                        <circle cx="8" cy="11" r="2" fill="#ddd" opacity="0.5"/>
+                        <path d="M9 6l1-2.5h4L15 6" stroke="#999" stroke-width="1.3" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <div class="intimacy-detail-card-title">相册</div>
+                <div class="intimacy-detail-card-desc">收藏你们的回忆</div>
+                <div class="intimacy-detail-card-badge" style="background:#eee;color:#888;">12张</div>
+            </div>
+            <div class="intimacy-detail-card" onclick="openPlayLibrary()">
+                <div class="intimacy-detail-card-icon" style="background:#eee">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#bbb" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M9 18V5l12-2v13"></path>
+                        <circle cx="6" cy="18" r="3"></circle>
+                        <circle cx="18" cy="16" r="3"></circle>
+                    </svg>
+                </div>
+                <div class="intimacy-detail-card-title">为你写歌</div>
+                <div class="intimacy-detail-card-desc">谱写专属羁绊</div>
+                <div class="intimacy-detail-card-badge" style="background:#eee;color:#888;">3首</div>
+            </div>
+            <div class="intimacy-detail-card" onclick="showIntimacyToast('情书')">
+                <div class="intimacy-detail-card-icon" style="background:#eee">
+                    <svg viewBox="0 0 24 24" fill="none">
+                        <rect x="2" y="5" width="20" height="14" rx="3" stroke="#999" stroke-width="1.5"/>
+                        <path d="M2 5l10 8 10-8" stroke="#999" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <circle cx="7" cy="14" r="0.5" fill="#ccc"/>
+                        <circle cx="17" cy="14" r="0.5" fill="#ccc"/>
+                    </svg>
+                </div>
+                <div class="intimacy-detail-card-title">情书</div>
+                <div class="intimacy-detail-card-desc">写给TA的悄悄话</div>
+            </div>
+            <div class="intimacy-detail-card full-width" onclick="showIntimacyToast('亲密排行')">
+                <div style="display:flex;align-items:center;gap:14px;">
+                    <div class="intimacy-detail-card-icon" style="background:#eee;flex-shrink:0;">
+                        <svg viewBox="0 0 24 24" fill="none">
+                            <path d="M6 15h3v6H6z" fill="#ddd"/>
+                            <path d="M10.5 11h3v10h-3z" fill="#bbb"/>
+                            <path d="M15 13h3v8h-3z" fill="#ddd"/>
+                            <path d="M12 4l1 2.2h2.4l-1.9 1.4.7 2.3L12 8.5l-2.2 1.4.7-2.3-1.9-1.4H11L12 4z" fill="#bbb"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <div class="intimacy-detail-card-title">亲密排行</div>
+                        <div class="intimacy-detail-card-desc">看看你们的互动数据</div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        actionsEl.innerHTML = `
+            <button class="intimacy-quick-btn" style="color: #ff3b30; background: #ffe5e5;" onclick="unbindLover()">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#ff3b30" stroke-width="1.8" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                解除关系
+            </button>
+        `;
+
+    } else if (type === 'member') {
+        avatarsEl.innerHTML = `
+            <div class="intimacy-hero-av" style="background-image: url('${meAvatarUrl}'); background-size: cover; background-position: center; background-repeat: no-repeat; border-radius: 50%; overflow: hidden; flex-shrink: 0;">
+                ${!meAvatarUrl ? '<svg viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" stroke-width="1.5" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' : ''}
+            </div>
+            <div class="intimacy-hero-av" style="background-image: url('${charAvatarUrl}'); background-size: cover; background-position: center; background-repeat: no-repeat; border-radius: 50%; overflow: hidden; flex-shrink: 0;">
+                ${!charAvatarUrl ? '<svg viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" stroke-width="1.5" stroke-linecap="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>' : ''}
+            </div>
+        `;
+        titleEl.innerHTML = `我<span>&</span>${taName}`;
+        subtitleEl.textContent = `${groupName}`;
+        daysEl.textContent = bindDays;
+        daysLabelEl.textContent = '天 · 认识';
+
+        gridEl.innerHTML = `
+            <div class="intimacy-detail-card" onclick="showIntimacyToast('纪念日')">
+                <div class="intimacy-detail-card-icon" style="background:#eee">
+                    <svg viewBox="0 0 24 24" fill="none">
+                        <rect x="3" y="8" width="18" height="13" rx="3" stroke="#999" stroke-width="1.5"/>
+                        <path d="M3 13c3-2 6 1 9-1s6 1 9-1" stroke="#ccc" stroke-width="1.2"/>
+                        <rect x="7" y="4" width="2" height="5" rx="1" fill="#ddd"/>
+                        <rect x="15" y="4" width="2" height="5" rx="1" fill="#ddd"/>
+                        <ellipse cx="8" cy="3.5" rx="1.8" ry="1" fill="#bbb" opacity="0.7"/>
+                        <ellipse cx="16" cy="3.5" rx="1.8" ry="1" fill="#bbb" opacity="0.7"/>
+                        <circle cx="8" cy="3" r="0.5" fill="#999"/>
+                        <circle cx="16" cy="3" r="0.5" fill="#999"/>
+                    </svg>
+                </div>
+                <div class="intimacy-detail-card-title">纪念日</div>
+                <div class="intimacy-detail-card-desc">记录重要时刻</div>
+            </div>
+            <div class="intimacy-detail-card" onclick="showIntimacyToast('相册')">
+                <div class="intimacy-detail-card-icon" style="background:#eee">
+                    <svg viewBox="0 0 24 24" fill="none">
+                        <rect x="2.5" y="6" width="19" height="14" rx="3" stroke="#999" stroke-width="1.5"/>
+                        <path d="M2.5 16l4.5-4 3 2.5 4-5 5.5 6.5" stroke="#bbb" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                        <circle cx="8" cy="11" r="2" fill="#ddd" opacity="0.5"/>
+                        <path d="M9 6l1-2.5h4L15 6" stroke="#999" stroke-width="1.3" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <div class="intimacy-detail-card-title">相册</div>
+                <div class="intimacy-detail-card-desc">我们的回忆</div>
+            </div>
+            <div class="intimacy-detail-card" onclick="openPlayLibrary()">
+                <div class="intimacy-detail-card-icon" style="background:#eee">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#bbb" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M9 18V5l12-2v13"></path>
+                        <circle cx="6" cy="18" r="3"></circle>
+                        <circle cx="18" cy="16" r="3"></circle>
+                    </svg>
+                </div>
+                <div class="intimacy-detail-card-title">为你写歌</div>
+                <div class="intimacy-detail-card-desc">谱写专属羁绊</div>
+            </div>
+            <div class="intimacy-detail-card" onclick="showIntimacyToast('留言板')">
+                <div class="intimacy-detail-card-icon" style="background:#eee">
+                    <svg viewBox="0 0 24 24" fill="none">
+                        <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" stroke="#999" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M8 9h8M8 13h5" stroke="#bbb" stroke-width="1.3" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <div class="intimacy-detail-card-title">留言板</div>
+                <div class="intimacy-detail-card-desc">互相留言</div>
+            </div>
+        `;
+
+        actionsEl.innerHTML = `
+            <button class="intimacy-quick-btn" style="color: #ff3b30; background: #ffe5e5;" onclick="unbindIntimacyMember('${charId}', '${groupName}')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#ff3b30" stroke-width="1.8" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                解除关系
+            </button>
+        `;
+    }
+
+    main.classList.add('slide-out');
+    page.classList.add('show');
+    page.scrollTop = 0;
+}
+
+function closeIntimacyDetail() {
+    document.getElementById('intimacyDetailPage').classList.remove('show');
+    document.getElementById('intimacyMainPage').classList.remove('slide-out');
+}
+
+// ===== 弹窗 =====
+function showIntimacyAddMemberModal(group) {
+    const listEl = document.getElementById('intimacyLoverInviteList');
+    listEl.innerHTML = '';
+    
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+    
+    // 获取当前组已有的成员
+    let currentMembers = JSON.parse(ChatDB.getItem(`intimacy_members_${currentLoginId}_${group}`) || '[]');
+
+    // 过滤出可以邀请的对象：排除自己、排除NPC、排除群聊、排除已经在该组的对象
+    let inviteTargets = allEntities.filter(c => {
+        if (c.id === currentLoginId) return false;
+        if (c.isNPC || c.isGroup) return false;
+        if (currentMembers.includes(c.id)) return false;
+        return true;
+    });
+    
+    document.querySelector('#intimacyLoverInviteModalOverlay .preset-modal-title').innerText = `邀请加入「${group}」`;
+
+    if (inviteTargets.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#aaa; font-size:12px;">暂无角色或用户可邀请</div>';
+    } else {
+        inviteTargets.forEach(c => {
+            const typeTag = c.isAccount ? '<span style="font-size:10px; background:#eee; color:#888; padding:2px 4px; border-radius:4px; margin-left:4px;">用户</span>' : '';
+            const item = document.createElement('div');
+            item.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 10px; background: #f9f9f9; border-radius: 10px; cursor: pointer;';
+            item.innerHTML = `
+                <div style="width: 36px; height: 36px; border-radius: 8px; background-image: url('${c.avatarUrl || ''}'); background-size: cover; background-position: center; background-color: #eee;"></div>
+                <div style="font-size: 14px; font-weight: bold; color: #333; flex: 1;">${c.netName || c.name}${typeTag}</div>
+            `;
+            item.onclick = () => {
+                if (typeof sendIntimacyInviteMsg === 'function') {
+                    sendIntimacyInviteMsg(currentLoginId, c.id, 'friend', group);
+                }
+                closeLoverInviteModal();
+                showIntimacyToast('已发送邀请至聊天室！');
+            };
+            listEl.appendChild(item);
+        });
+    }
+    document.getElementById('intimacyLoverInviteModalOverlay').classList.add('show');
+}
+
+function showIntimacyAddGroupModal() {
+    const modal = document.getElementById('intimacyModal');
+    document.getElementById('intimacyModalTitle').textContent = '创建关系组';
+    document.getElementById('intimacyModalContent').innerHTML = `
+        <div class="intimacy-modal-option" onclick="createIntimacyGroup('闺蜜');closeIntimacyModal()">
+            <div class="intimacy-modal-option-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.8" stroke-linecap="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></div>
+            <div class="intimacy-modal-option-text"><div class="intimacy-modal-option-title">闺蜜</div><div class="intimacy-modal-option-desc">无话不谈的好姐妹</div></div>
+        </div>
+        <div class="intimacy-modal-option" onclick="createIntimacyGroup('基友');closeIntimacyModal()">
+            <div class="intimacy-modal-option-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.8" stroke-linecap="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></div>
+            <div class="intimacy-modal-option-text"><div class="intimacy-modal-option-title">基友</div><div class="intimacy-modal-option-desc">铁哥们、好兄弟</div></div>
+        </div>
+        <div class="intimacy-modal-option" onclick="createIntimacyGroup('家人');closeIntimacyModal()">
+            <div class="intimacy-modal-option-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.8" stroke-linecap="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg></div>
+            <div class="intimacy-modal-option-text"><div class="intimacy-modal-option-title">家人</div><div class="intimacy-modal-option-desc">最温暖的避风港</div></div>
+        </div>
+        <div class="intimacy-modal-option" onclick="createIntimacyGroup('搭子');closeIntimacyModal()">
+            <div class="intimacy-modal-option-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.8" stroke-linecap="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></div>
+            <div class="intimacy-modal-option-text"><div class="intimacy-modal-option-title">搭子</div><div class="intimacy-modal-option-desc">饭搭子、旅游搭子…</div></div>
+        </div>
+        <div class="intimacy-modal-option" onclick="createIntimacyGroup('敌人');closeIntimacyModal()">
+            <div class="intimacy-modal-option-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.8" stroke-linecap="round"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v2"/></svg></div>
+            <div class="intimacy-modal-option-text"><div class="intimacy-modal-option-title">敌人</div><div class="intimacy-modal-option-desc">相爱相杀的宿敌</div></div>
+        </div>
+        <div class="intimacy-modal-option" onclick="createIntimacyGroup('师生');closeIntimacyModal()">
+            <div class="intimacy-modal-option-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.8" stroke-linecap="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c0 0 3 3 6 3s6-3 6-3v-5"/></svg></div>
+            <div class="intimacy-modal-option-text"><div class="intimacy-modal-option-title">师生</div><div class="intimacy-modal-option-desc">传道受业解惑</div></div>
+        </div>
+        <div class="intimacy-modal-option" onclick="closeIntimacyModal(); openGlobalPrompt('自定义关系', '请输入自定义关系名称', '例如：主仆', (name) => { if(name) createIntimacyGroup(name); })">
+            <div class="intimacy-modal-option-icon"><svg viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div>
+            <div class="intimacy-modal-option-text"><div class="intimacy-modal-option-title">自定义</div><div class="intimacy-modal-option-desc">创建专属关系组</div></div>
+        </div>
+    `;
+    modal.classList.add('show');
+}
+
+function createIntimacyGroup(name) {
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    if (!currentLoginId) return;
+
+    if (!name || name.trim() === '') return;
+    const safeName = name.trim();
+
+    let groups = JSON.parse(ChatDB.getItem(`intimacy_groups_${currentLoginId}`) || '["闺蜜", "基友", "家人"]');
+    
+    if (!groups.includes(safeName)) {
+        groups.push(safeName);
+        ChatDB.setItem(`intimacy_groups_${currentLoginId}`, JSON.stringify(groups));
+        renderIntimacyGroups();
+        showIntimacyToast('已创建「' + safeName + '」');
+    } else {
+        alert(`关系组「${safeName}」已存在，请勿重复添加！`);
+    }
+}
+
+function closeIntimacyModal(e) {
+    if (e && e.target !== e.currentTarget) return;
+    document.getElementById('intimacyModal').classList.remove('show');
+}
+
+// ===== 展开/收起 =====
+function toggleIntimacyGroup(head) {
+    const body = head.nextElementSibling;
+    const arrow = head.querySelector('.intimacy-rel-arrow');
+    const isOpen = body.classList.contains('open');
+    document.querySelectorAll('.intimacy-rel-body.open').forEach(b => {
+        b.classList.remove('open');
+        b.previousElementSibling.querySelector('.intimacy-rel-arrow').classList.remove('open');
+    });
+    if (!isOpen) { body.classList.add('open'); arrow.classList.add('open'); }
+}
+
+// ===== Toast =====
+let intimacyToastTimer;
+function showIntimacyToast(msg) {
+    const t = document.getElementById('intimacyToast');
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(intimacyToastTimer);
+    intimacyToastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+}
+
+// ===== 功能按钮 =====
+function handleIntimacyFeature(type) {
+    if (type === 'play') {
+        openPlayLibrary();
+        return;
+    }
+    const m = { anniversary:'纪念日', album:'相册', wish:'心愿单', rank:'排行榜' };
+    showIntimacyToast(m[type]);
+}
+// ===== 删除与解除关系逻辑 =====
+function deleteIntimacyGroup(groupName, memberCount, event) {
+    event.stopPropagation();
+    if (memberCount > 0) {
+        return alert('该关系分组中还有绑定的角色，请先解除关系后再删除！');
+    }
+    if (confirm(`确定要删除关系分组「${groupName}」吗？`)) {
+        const currentLoginId = ChatDB.getItem('intimacy_current_account');
+        let groups = JSON.parse(ChatDB.getItem(`intimacy_groups_${currentLoginId}`) || '["闺蜜", "基友", "家人"]');
+        groups = groups.filter(g => g !== groupName);
+        ChatDB.setItem(`intimacy_groups_${currentLoginId}`, JSON.stringify(groups));
+        renderIntimacyGroups();
+        showIntimacyToast('已删除分组');
+    }
+}
+
+function unbindIntimacyMember(charId, groupName) {
+    if (confirm(`确定要解除与 TA 的「${groupName}」关系吗？`)) {
+        const currentLoginId = ChatDB.getItem('intimacy_current_account');
+        
+        let members = JSON.parse(ChatDB.getItem(`intimacy_members_${currentLoginId}_${groupName}`) || '[]');
+        members = members.filter(id => id !== charId);
+        ChatDB.setItem(`intimacy_members_${currentLoginId}_${groupName}`, JSON.stringify(members));
+        
+        let targetMembers = JSON.parse(ChatDB.getItem(`intimacy_members_${charId}_${groupName}`) || '[]');
+        targetMembers = targetMembers.filter(id => id !== currentLoginId);
+        ChatDB.setItem(`intimacy_members_${charId}_${groupName}`, JSON.stringify(targetMembers));
+        
+        closeIntimacyDetail();
+        renderIntimacyMainPage();
+        showIntimacyToast('已解除关系');
+    }
+}
+
+function unbindLover() {
+    if (confirm('确定要解除恋人关系吗？')) {
+        const currentLoginId = ChatDB.getItem('intimacy_current_account');
+        const loverDataStr = ChatDB.getItem(`intimacy_lover_${currentLoginId}`);
+        if (loverDataStr) {
+            const loverData = JSON.parse(loverDataStr);
+            ChatDB.removeItem(`intimacy_lover_${currentLoginId}`);
+            ChatDB.removeItem(`intimacy_lover_${loverData.charId}`);
+        }
+        closeIntimacyDetail();
+        renderIntimacyMainPage();
+        showIntimacyToast('已解除恋人关系');
+    }
+}
+
+// ==========================================
+// 亲密关系邀请消息逻辑
+// ==========================================
+
+function sendIntimacyInviteMsg(userId, charId, type, groupName = '', confessionText = '') {
+    let newMsg = {
+        role: 'user',
+        type: 'intimacy_invite',
+        subType: type, // 'lover' or 'friend'
+        groupName: groupName,
+        confessionText: confessionText,
+        status: 'pending',
+        timestamp: Date.now(),
+        content: type === 'lover' ? '[恋人邀请]' : `[${groupName}邀请]`
+    };
+
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${userId}_${charId}`) || '[]');
+    history.push(newMsg);
+    ChatDB.setItem(`chat_history_${userId}_${charId}`, JSON.stringify(history));
+
+    // 双向同步给对方
+    let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${charId}_${userId}`) || '[]');
+    let targetMsg = { ...newMsg, role: 'char' };
+    targetHistory.push(targetMsg);
+    ChatDB.setItem(`chat_history_${charId}_${userId}`, JSON.stringify(targetHistory));
+
+    let targetSessions = JSON.parse(ChatDB.getItem(`chat_sessions_${charId}`) || '[]');
+    targetSessions = targetSessions.filter(id => id !== userId);
+    targetSessions.unshift(userId);
+    ChatDB.setItem(`chat_sessions_${charId}`, JSON.stringify(targetSessions));
+
+    let unreadCount = parseInt(ChatDB.getItem(`unread_${charId}_${userId}`) || '0');
+    ChatDB.setItem(`unread_${charId}_${userId}`, (unreadCount + 1).toString());
+
+    if (typeof renderChatList === 'function') renderChatList();
+    if (currentChatRoomCharId === charId) {
+        renderChatHistory(charId);
+    }
+}
+
+let currentIntimacyInviteMsgIndex = null;
+
+function handleIntimacyInviteClick(index) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId || !currentChatRoomCharId) return;
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    const msg = history[index];
+
+    if (!msg || msg.type !== 'intimacy_invite') return;
+    if (msg.status !== 'pending') return;
+
+    currentIntimacyInviteMsgIndex = index;
+
+    let allEntities = getAllEntities();
+    const char = allEntities.find(c => c.id === currentChatRoomCharId);
+    const me = allEntities.find(a => a.id === currentLoginId);
+    const charName = char ? (char.netName || char.name) : 'TA';
+    const myName = me ? (me.netName || me.name) : '我';
+    
+    // 获取真实姓名用于信纸显示
+    const charRealName = char ? char.name : 'TA';
+    const myRealName = me ? me.name : '我';
+
+    const isUserSender = msg.role === 'user';
+
+    if (msg.subType === 'lover') {
+        // 恋人邀请，弹出信封 (使用真实姓名)
+        document.getElementById('letterTitle').innerText = isUserSender ? `To: ${charRealName}` : `To: ${myRealName}`;
+        document.getElementById('letterSignature').innerText = isUserSender ? `From: ${myRealName}` : `From: ${charRealName}`;
+        
+        let defaultConfession = `“我观察你很久了，每次看到你，我的心跳都会漏半拍。这段时间以来的相处，让我确信你就是那个对的人。<br><br>你愿意，成为我的唯一吗？”`;
+        if (msg.confessionText) {
+            defaultConfession = msg.confessionText;
+        } else if (!isUserSender && char && char.description) {
+            defaultConfession = `“这段时间以来的相处，让我确信你就是那个对的人。<br><br>你愿意，成为我的唯一吗？”`;
+        }
+        document.getElementById('letterBody').innerHTML = defaultConfession;
+
+        // 切换底部按钮
+        if (isUserSender) {
+            document.getElementById('loverActionsReceive').style.display = 'none';
+            document.getElementById('loverActionsForce').style.display = 'flex';
+        } else {
+            document.getElementById('loverActionsReceive').style.display = 'flex';
+            document.getElementById('loverActionsForce').style.display = 'none';
+        }
+
+        const container = document.getElementById('loveLetterContainer');
+        container.classList.remove('opening', 'opened');
+        document.getElementById('loverCloseBtn').style.display = 'none';
+        document.getElementById('intimacyLoverLetterModalOverlay').classList.add('show');
+    } else {
+        // 普通关系邀请
+        document.getElementById('insNormalInviteAvatar').style.backgroundImage = `url('${isUserSender ? (me ? me.avatarUrl : '') : (char ? char.avatarUrl : '')}')`;
+        document.getElementById('insNormalInviteTitle').innerText = isUserSender ? `你 邀请 ${charName} 加入「${msg.groupName}」` : `${charName} 邀请你加入「${msg.groupName}」`;
+        document.getElementById('insNormalInviteDesc').innerText = `接受邀请后，你们将建立关系，解锁专属的亲密互动与纪念日。`;
+        
+        // 切换底部按钮
+        if (isUserSender) {
+            document.getElementById('insNormalActionsReceive').style.display = 'none';
+            document.getElementById('insNormalActionsForce').style.display = 'flex';
+        } else {
+            document.getElementById('insNormalActionsReceive').style.display = 'flex';
+            document.getElementById('insNormalActionsForce').style.display = 'none';
+        }
+
+        document.getElementById('intimacyNormalInviteModalOverlay').classList.add('show');
+    }
+}
+
+function closeIntimacyNormalInviteModal() {
+    document.getElementById('intimacyNormalInviteModalOverlay').classList.remove('show');
+    currentIntimacyInviteMsgIndex = null;
+}
+
+function closeIntimacyLoverLetterModal() {
+    document.getElementById('intimacyLoverLetterModalOverlay').classList.remove('show');
+    currentIntimacyInviteMsgIndex = null;
+}
+
+function openIntimacyLetter() {
+    const container = document.getElementById('loveLetterContainer');
+    container.classList.add('opening');
+    setTimeout(() => {
+        container.classList.add('opened');
+        document.getElementById('loverCloseBtn').style.display = 'flex';
+    }, 600);
+}
+
+function handleIntimacyInviteAction(isAccept) {
+    if (currentIntimacyInviteMsgIndex === null) return;
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`) || '[]');
+    const msg = history[currentIntimacyInviteMsgIndex];
+
+    if (!msg) return;
+
+    if (isAccept) {
+        if (msg.subType === 'lover') {
+            const myLover = ChatDB.getItem(`intimacy_lover_${currentLoginId}`);
+            const taLover = ChatDB.getItem(`intimacy_lover_${currentChatRoomCharId}`);
+            if (myLover) {
+                alert('你已经绑定了恋人，无法接受新的邀请！\n请先解除原有的恋人关系。');
+                return; 
+            }
+            if (taLover) {
+                alert('对方已经绑定了恋人，无法接受邀请！');
+                return; 
+            }
+        }
+
+        msg.status = 'accepted';
+        ChatDB.setItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(history));
+
+        let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentChatRoomCharId}_${currentLoginId}`) || '[]');
+        let targetMsgIndex = targetHistory.findIndex(m => m.type === 'intimacy_invite' && m.timestamp === msg.timestamp);
+        if (targetMsgIndex !== -1) {
+            targetHistory[targetMsgIndex].status = 'accepted';
+            ChatDB.setItem(`chat_history_${currentChatRoomCharId}_${currentLoginId}`, JSON.stringify(targetHistory));
+        }
+
+        if (msg.subType === 'lover') {
+            ChatDB.setItem(`intimacy_lover_${currentLoginId}`, JSON.stringify({ charId: currentChatRoomCharId, bindTime: Date.now() }));
+            ChatDB.setItem(`intimacy_lover_${currentChatRoomCharId}`, JSON.stringify({ charId: currentLoginId, bindTime: Date.now() }));
+        } else {
+            let members = JSON.parse(ChatDB.getItem(`intimacy_members_${currentLoginId}_${msg.groupName}`) || '[]');
+            if (!members.includes(currentChatRoomCharId)) {
+                members.push(currentChatRoomCharId);
+                ChatDB.setItem(`intimacy_members_${currentLoginId}_${msg.groupName}`, JSON.stringify(members));
+            }
+            let targetMembers = JSON.parse(ChatDB.getItem(`intimacy_members_${currentChatRoomCharId}_${msg.groupName}`) || '[]');
+            if (!targetMembers.includes(currentLoginId)) {
+                targetMembers.push(currentLoginId);
+                ChatDB.setItem(`intimacy_members_${currentChatRoomCharId}_${msg.groupName}`, JSON.stringify(targetMembers));
+            }
+        }
+        alert('已同意邀请！');
+    } else {
+        msg.status = 'rejected';
+        ChatDB.setItem(`chat_history_${currentLoginId}_${currentChatRoomCharId}`, JSON.stringify(history));
+
+        let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentChatRoomCharId}_${currentLoginId}`) || '[]');
+        let targetMsgIndex = targetHistory.findIndex(m => m.type === 'intimacy_invite' && m.timestamp === msg.timestamp);
+        if (targetMsgIndex !== -1) {
+            targetHistory[targetMsgIndex].status = 'rejected';
+            ChatDB.setItem(`chat_history_${currentChatRoomCharId}_${currentLoginId}`, JSON.stringify(targetHistory));
+        }
+        alert('已婉拒邀请。');
+    }
+
+    renderChatHistory(currentChatRoomCharId);
+    closeIntimacyNormalInviteModal();
+    closeIntimacyLoverLetterModal();
+}
+// ==========================================
+// 补充：朋友圈发布与个人资料编辑逻辑
+// ==========================================
+function openQQPostMomentPanel() {
+    document.getElementById('qqPostMomentPanel').classList.add('show');
+    document.getElementById('qqMomentTextInput').value = '';
+    document.getElementById('qqMomentFilePreview').innerHTML = '';
+    document.getElementById('qqMomentPwdInput').value = '';
+    tempQQMomentFile = null;
+    tempQQMomentFileName = '';
+}
+
+function closeQQPostMomentPanel() {
+    document.getElementById('qqPostMomentPanel').classList.remove('show');
+}
+
+function triggerQQMomentFile() {
+    document.getElementById('qqMomentRealFileInput').click();
+}
+
+function handleQQMomentFile(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    tempQQMomentFileName = file.name;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        tempQQMomentFile = e.target.result;
+        const previewEl = document.getElementById('qqMomentFilePreview');
+        if (file.type.startsWith('image/')) {
+            previewEl.innerHTML = `<img src="${tempQQMomentFile}" style="width: 80px; height: 80px; object-fit: cover; border-radius: 8px;">`;
+        } else {
+            previewEl.innerHTML = `<div style="width: 80px; height: 80px; background: #f0f0f0; border-radius: 8px; display: flex; justify-content: center; align-items: center; font-size: 12px; text-align: center; padding: 5px; word-break: break-all;">📎 ${file.name}</div>`;
+        }
+    };
+    reader.readAsDataURL(file);
+}
+
+function submitQQMoment() {
+    const text = document.getElementById('qqMomentTextInput').value.trim();
+    const pwd = document.getElementById('qqMomentPwdInput').value.trim();
+    
+    if (!text && !tempQQMomentFile) {
+        alert("请输入内容或上传文件！");
+        return;
+    }
+    
+    let profile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    let moment = { 
+        id: Date.now(), 
+        name: profile.name, 
+        avatar: profile.avatar, 
+        text: text, 
+        time: Date.now(),
+        filePwd: pwd || null
+    };
+    
+    if (tempQQMomentFile) {
+        if (tempQQMomentFile.startsWith('data:image/')) {
+            moment.image = tempQQMomentFile;
+        } else {
+            moment.fileName = tempQQMomentFileName;
+            moment.fileData = tempQQMomentFile;
+        }
+    }
+    
+    saveAndBroadcastMoment(moment);
+    closeQQPostMomentPanel();
+}
+
+function openQQEditProfilePanel() {
+    let profile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    document.getElementById('qqEditProfileName').value = profile.name;
+    document.getElementById('qqEditProfileAvatarPreview').style.backgroundImage = `url(${profile.avatar || ''})`;
+    document.getElementById('qqEditProfilePanel').classList.add('show');
+}
+
+function closeQQEditProfilePanel() {
+    document.getElementById('qqEditProfilePanel').classList.remove('show');
+}
+
+function handleQQEditAvatar(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        document.getElementById('qqEditProfileAvatarPreview').style.backgroundImage = `url(${e.target.result})`;
+        document.getElementById('qqEditProfileAvatarPreview').dataset.url = e.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+
+function saveQQProfile() {
+    let profile = JSON.parse(ChatDB.getItem('qq_my_profile') || '{"name":"未命名", "avatar":""}');
+    profile.name = document.getElementById('qqEditProfileName').value.trim() || '未命名';
+    let newAvatar = document.getElementById('qqEditProfileAvatarPreview').dataset.url;
+    if (newAvatar) profile.avatar = newAvatar;
+    
+    ChatDB.setItem('qq_my_profile', JSON.stringify(profile));
+    renderQQProfile();
+    closeQQEditProfilePanel();
+}
+
+// ==========================================
+// 为你写歌 (Play Together) 核心逻辑
+// ==========================================
+let playAudioCtx;
+const playFrequencies = [261.63, 277.18, 293.66, 311.13, 329.63, 349.23, 369.99, 392.00, 415.30, 440.00, 466.16, 493.88];
+const playNoteMapping = { '1': 0, '2': 2, '3': 4, '4': 5, '5': 7, '6': 9, '7': 11 };
+
+function initPlayAudio() {
+    if (!playAudioCtx) {
+        playAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (playAudioCtx.state === 'suspended') {
+        playAudioCtx.resume();
+    }
+}
+
+function playNoteSound(noteIndex) {
+    if (!playAudioCtx) return;
+    const osc = playAudioCtx.createOscillator();
+    const gainNode = playAudioCtx.createGain();
+    osc.type = 'sine'; 
+    osc.frequency.setValueAtTime(playFrequencies[noteIndex % 12], playAudioCtx.currentTime);
+    gainNode.gain.setValueAtTime(0.5, playAudioCtx.currentTime);
+    gainNode.gain.exponentialRampToValueAtTime(0.01, playAudioCtx.currentTime + 0.5);
+    osc.connect(gainNode);
+    gainNode.connect(playAudioCtx.destination);
+    osc.start();
+    osc.stop(playAudioCtx.currentTime + 0.5);
+}
+
+function openPlayLibrary() {
+    document.querySelectorAll('.play-page').forEach(p => p.classList.remove('active'));
+    document.getElementById('play-page-library').classList.add('active');
+    renderPlayLibrary();
+}
+
+function closePlayLibrary() {
+    document.getElementById('play-page-library').classList.remove('active');
+}
+
+let currentPlayCardElement = null;
+let currentPlayRawSheet = ""; 
+let currentPlayCharMsg = "";
+let currentPlayRecordId = null;
+
+function openPlayDetailModal(title, date, desc, sheet, charMsg, cardElement, recordId) {
+    document.getElementById('play-detail-title').innerText = title;
+    document.getElementById('play-detail-desc').innerText = desc;
+    // 修复报错：移除了对 play-detail-sheet 的 innerHTML 赋值，因为该元素已被删除
+    document.getElementById('play-detail-char-msg').innerText = charMsg;
+    
+    currentPlayCardElement = cardElement;
+    currentPlayRawSheet = sheet; 
+    currentPlayCharMsg = charMsg;
+    currentPlayRecordId = recordId;
+    
+    // 移除了获取和设置头像的逻辑
+
+    const cardImg = cardElement.querySelector('.play-polaroid-img');
+    const detailImg = document.getElementById('play-detail-img');
+    if (cardImg.style.backgroundImage) {
+        detailImg.style.backgroundImage = cardImg.style.backgroundImage;
+        detailImg.style.backgroundSize = 'cover';
+    } else {
+        detailImg.style.backgroundImage = `url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22><path d=%22M9 18V5l12-2v13%22 stroke=%22%23ccc%22 stroke-width=%221.5%22 fill=%22none%22/><circle cx=%226%22 cy=%2218%22 r=%223%22 stroke=%22%23ccc%22 stroke-width=%221.5%22 fill=%22none%22/><circle cx=%2218%22 cy=%2216%22 r=%223%22 stroke=%22%23ccc%22 stroke-width=%221.5%22 fill=%22none%22/></svg>')`;
+        detailImg.style.backgroundSize = '40%';
+    }
+
+    document.getElementById('play-flip-wrapper').classList.remove('flipped');
+    document.getElementById('play-detail-modal').classList.add('show');
+}
+
+function deletePlayRecord() {
+    if (!currentPlayRecordId) return;
+    if (confirm('确定要删除这首专属曲谱吗？')) {
+        const currentLoginId = ChatDB.getItem('intimacy_current_account');
+        let records = JSON.parse(ChatDB.getItem(`intimacy_play_records_${currentLoginId}_${currentIntimacyCharId}`) || '[]');
+        records = records.filter(r => r.id !== currentPlayRecordId);
+        ChatDB.setItem(`intimacy_play_records_${currentLoginId}_${currentIntimacyCharId}`, JSON.stringify(records));
+        
+        closePlayDetailModal();
+        renderPlayLibrary();
+        showIntimacyToast('曲谱已删除');
+    }
+}
+
+function parsePlaySheet(rawSheet) {
+    const displayArea = document.getElementById('play-sheet-display');
+    displayArea.innerHTML = '';
+    displayArea.style.position = 'relative';
+    displayArea.style.height = '60px'; // 给一个固定高度容纳单行
+    
+    playParsedMelody = [];
+    const lines = rawSheet.split('\n');
+    lines.forEach((line, lineIndex) => {
+        const lineDiv = document.createElement('div');
+        lineDiv.className = 'play-sheet-line';
+        if (lineIndex === 0) lineDiv.classList.add('active'); // 默认显示第一行
+        
+        for (let char of line) {
+            if (/[1-7]/.test(char)) {
+                const span = document.createElement('span');
+                span.className = 'play-sheet-note';
+                span.innerText = char;
+                span.dataset.index = playParsedMelody.length; 
+                lineDiv.appendChild(span);
+                playParsedMelody.push(playNoteMapping[char]); 
+            } else {
+                const span = document.createElement('span');
+                span.innerText = char;
+                lineDiv.appendChild(span);
+            }
+        }
+        displayArea.appendChild(lineDiv);
+    });
+}
+
+let playDropStep = 0; // 用于记录节奏模式下落到第几个音符
+
+function showPlayHitEffect(type) {
+    const area = document.getElementById('play-falling-area');
+    const text = document.createElement('div');
+    text.className = `play-hit-text ${type}`;
+    text.innerText = type === 'perfect' ? 'Perfect!' : 'Miss';
+    area.appendChild(text);
+    setTimeout(() => text.remove(), 500);
+}
+
+function startPlayPiano(mode) {
+    initPlayAudio(); 
+    closePlayDetailModal();
+    document.getElementById('play-piano-song-title').innerText = document.getElementById('play-detail-title').innerText;
+    
+    parsePlaySheet(currentPlayRawSheet);
+    document.querySelectorAll('.play-page').forEach(p => p.classList.remove('active'));
+    document.getElementById('play-page-piano').classList.add('active');
+    
+    clearInterval(playPianoInterval);
+    playCurrentStep = 0;
+    playDropStep = 0;
+    playCurrentScore = 0;
+    
+    const scoreDisplay = document.getElementById('play-piano-score-display');
+    const isRhythm = (currentPlayModeSetting === 'rhythm');
+    const sheetDisplay = document.getElementById('play-sheet-display');
+    const fallingArea = document.getElementById('play-falling-area');
+    const staffSvg = document.querySelector('.play-staff-svg');
+    
+    // 根据模式切换 UI
+    if (isRhythm) {
+        sheetDisplay.style.display = 'none';
+        staffSvg.style.opacity = '0.2';
+        fallingArea.style.display = 'block';
+        // 保留判定线，清空其他音符
+        Array.from(fallingArea.children).forEach(child => {
+            if (child.id !== 'play-hit-line') child.remove();
+        });
+    } else {
+        sheetDisplay.style.display = 'block';
+        staffSvg.style.opacity = '1';
+        fallingArea.style.display = 'none';
+    }
+    
+    const keys = document.querySelectorAll('.play-key-white, .play-key-black');
+    keys.forEach(key => {
+        key.onclick = () => {
+            const noteIndex = parseInt(key.getAttribute('data-note'));
+            activatePlayKey(noteIndex, key);
+            
+            if (playIsManualMode) {
+                if (isRhythm) {
+                    // 节奏大师模式：严格判定
+                    // 查找当前轨道上处于判定区间 (hittable) 的音符
+                    const hittableNote = Array.from(fallingArea.querySelectorAll('.play-falling-note')).find(n => 
+                        n.dataset.noteIndex == noteIndex && n.dataset.hittable === 'true'
+                    );
+                    
+                    if (hittableNote) {
+                        // 击中
+                        hittableNote.remove();
+                        playCurrentScore += 10;
+                        scoreDisplay.innerText = `得分: ${playCurrentScore}`;
+                        showPlayHitEffect('perfect');
+                        playCurrentStep++;
+                    } else {
+                        // 没击中或按错
+                        showPlayHitEffect('miss');
+                    }
+                    
+                    if (playCurrentStep >= playParsedMelody.length) {
+                        document.getElementById('play-ta-hint').innerText = '挑战结束！';
+                        document.getElementById('play-ta-hint').style.display = 'block';
+                    }
+                } else {
+                    // 古典模式：宽松判定
+                    if (playCurrentStep < playParsedMelody.length && noteIndex === playParsedMelody[playCurrentStep]) {
+                        playCurrentStep++;
+                        playCurrentScore += 10;
+                        scoreDisplay.innerText = `得分: ${playCurrentScore}`;
+                        highlightPlaySheetNote(playCurrentStep);
+                        
+                        if (playCurrentStep >= playParsedMelody.length) {
+                            document.getElementById('play-ta-hint').innerText = '挑战成功！';
+                            document.getElementById('play-ta-hint').style.display = 'block';
+                        }
+                    }
+                }
+            }
+        };
+    });
+
+    if (mode === 'auto') {
+        playIsManualMode = false;
+        scoreDisplay.style.display = 'none';
+        document.getElementById('play-ta-hint').innerText = 'TA 正在弹奏';
+        document.getElementById('play-ta-hint').style.display = 'block';
+        
+        playPianoInterval = setInterval(() => {
+            if (playCurrentStep >= playParsedMelody.length) {
+                clearInterval(playPianoInterval);
+                document.getElementById('play-ta-hint').innerText = '演奏结束';
+                return;
+            }
+            const noteIndex = playParsedMelody[playCurrentStep];
+            const keyEl = document.querySelector(`[data-note="${noteIndex}"]`);
+            
+            if (isRhythm) {
+                createFallingNote(noteIndex, keyEl, true);
+            } else {
+                if (keyEl) activatePlayKey(noteIndex, keyEl);
+                highlightPlaySheetNote(playCurrentStep);
+            }
+            playCurrentStep++;
+        }, 600);
+    } else {
+        playIsManualMode = true;
+        scoreDisplay.style.display = 'block';
+        scoreDisplay.innerText = `得分: 0`;
+        document.getElementById('play-ta-hint').style.display = 'none';
+        
+        if (isRhythm) {
+            // 节奏模式手动：按节奏掉落音符，等待用户点击
+            playPianoInterval = setInterval(() => {
+                if (playDropStep >= playParsedMelody.length) {
+                    clearInterval(playPianoInterval);
+                    return;
+                }
+                const noteIndex = playParsedMelody[playDropStep];
+                const keyEl = document.querySelector(`[data-note="${noteIndex}"]`);
+                createFallingNote(noteIndex, keyEl, false);
+                playDropStep++;
+            }, 800);
+        } else {
+            highlightPlaySheetNote(playCurrentStep);
+        }
+    }
+}
+
+// ===== 自定义曲谱逻辑 =====
+function openPlayCreateModal() {
+    document.getElementById('playCreateTitle').value = '';
+    document.getElementById('playCreateDesc').value = '';
+    document.getElementById('playCreateSheet').value = '';
+    document.getElementById('playCreateModalOverlay').classList.add('show');
+}
+
+function closePlayCreateModal() {
+    document.getElementById('playCreateModalOverlay').classList.remove('show');
+}
+
+function saveCustomPlayRecord() {
+    const title = document.getElementById('playCreateTitle').value.trim() || '《未命名的羁绊》';
+    const desc = document.getElementById('playCreateDesc').value.trim() || '用户自定义的专属旋律。';
+    const sheet = document.getElementById('playCreateSheet').value.trim();
+    
+    if (!sheet) {
+        return alert('请输入曲谱内容！');
+    }
+
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    if (!currentLoginId || !currentIntimacyCharId) return alert('未找到当前角色');
+
+    let records = JSON.parse(ChatDB.getItem(`intimacy_play_records_${currentLoginId}_${currentIntimacyCharId}`) || '[]');
+    records.push({
+        id: Date.now().toString(),
+        title: title,
+        desc: desc,
+        charMsg: desc, // 自定义曲谱寄语和简介相同
+        sheet: sheet,
+        date: new Date().toISOString().split('T')[0].replace(/-/g, '.'),
+        img: '',
+        creator: 'user' // 新增：标记为用户创作
+    });
+    ChatDB.setItem(`intimacy_play_records_${currentLoginId}_${currentIntimacyCharId}`, JSON.stringify(records));
+
+    closePlayCreateModal();
+    renderPlayLibrary();
+    showIntimacyToast('自定义曲谱保存成功！');
+}
+
+function closePlayPiano() {
+    clearInterval(playPianoInterval);
+    // 移除了气泡相关的逻辑
+    document.querySelectorAll('.play-page').forEach(p => p.classList.remove('active'));
+    document.getElementById('play-page-library').classList.add('active');
+}
+
+function highlightPlaySheetNote(stepIndex) {
+    document.querySelectorAll('.play-sheet-note').forEach(el => el.classList.remove('active'));
+    const target = document.querySelector(`.play-sheet-note[data-index="${stepIndex}"]`);
+    if (target) {
+        target.classList.add('active');
+        
+        // 处理行切换逻辑
+        const currentLine = target.parentElement;
+        if (!currentLine.classList.contains('active')) {
+            // 隐藏所有行
+            document.querySelectorAll('.play-sheet-line').forEach(line => line.classList.remove('active'));
+            // 显示当前行
+            currentLine.classList.add('active');
+        }
+    }
+}
+
+function createFallingNote(noteIndex, keyEl, autoPlay) {
+    if (!keyEl) return;
+    const area = document.getElementById('play-falling-area');
+    const note = document.createElement('div');
+    note.className = 'play-falling-note';
+    note.dataset.noteIndex = noteIndex;
+    
+    if (keyEl.classList.contains('play-key-black')) {
+        note.classList.add('black-key');
+    }
+    
+    const keyboardRect = document.getElementById('play-keyboard').getBoundingClientRect();
+    const keyRect = keyEl.getBoundingClientRect();
+    const areaRect = area.getBoundingClientRect();
+    
+    const leftPercent = ((keyRect.left - keyboardRect.left) / keyboardRect.width) * 100;
+    const widthPercent = (keyRect.width / keyboardRect.width) * 100;
+    
+    note.style.left = leftPercent + '%';
+    note.style.width = widthPercent + '%';
+    note.style.height = '30px';
+    
+    area.appendChild(note);
+
+    // 使用 requestAnimationFrame 实现丝滑下落
+    let start = null;
+    const duration = 1500; // 下落总时间 1.5秒
+    const targetY = areaRect.height; // 落到底部
+    
+    function step(timestamp) {
+        if (!start) start = timestamp;
+        const progress = (timestamp - start) / duration;
+        
+        if (progress < 1) {
+            const currentY = progress * targetY;
+            note.style.transform = `translateY(${currentY}px)`;
+            
+            // 判定区间：到达底部 75% ~ 90% 之间算作可击中 (判定线在 85%)
+            if (!autoPlay) {
+                const percent = progress * 100;
+                if (percent >= 75 && percent <= 90) {
+                    note.dataset.hittable = 'true';
+                } else {
+                    note.dataset.hittable = 'false';
+                }
+                
+                // 如果掉出屏幕还没被击中，算 Miss
+                if (percent > 90 && !note.dataset.missed && document.body.contains(note)) {
+                    note.dataset.missed = 'true';
+                    showPlayHitEffect('miss');
+                    playCurrentStep++; 
+                    if (playCurrentStep >= playParsedMelody.length) {
+                        document.getElementById('play-ta-hint').innerText = '挑战结束！';
+                        document.getElementById('play-ta-hint').style.display = 'block';
+                    }
+                }
+            }
+            
+            if (document.body.contains(note)) {
+                requestAnimationFrame(step);
+            }
+        } else {
+            if (document.body.contains(note)) {
+                note.remove();
+            }
+            if (autoPlay) {
+                activatePlayKey(noteIndex, keyEl);
+            }
+        }
+    }
+    requestAnimationFrame(step);
+}
+
+// 新增：黑胶唱片播放逻辑
+let vinylPlayInterval = null;
+let vinylCurrentStep = 0;
+
+function togglePlayVinylMusic() {
+    const vinyl = document.getElementById('play-vinyl-record');
+    const tonearm = document.getElementById('play-vinyl-tonearm');
+    
+    if (vinyl.classList.contains('playing')) {
+        // 停止播放：唱片停止旋转，唱针移开
+        vinyl.classList.remove('playing');
+        tonearm.classList.remove('playing');
+        clearInterval(vinylPlayInterval);
+    } else {
+        // 开始播放
+        initPlayAudio();
+        parsePlaySheet(currentPlayRawSheet);
+        if (playParsedMelody.length === 0) return;
+        
+        // 唱片开始旋转，唱针落到唱片上
+        vinyl.classList.add('playing');
+        tonearm.classList.add('playing');
+        vinylCurrentStep = 0;
+        
+        vinylPlayInterval = setInterval(() => {
+            if (vinylCurrentStep >= playParsedMelody.length) {
+                vinyl.classList.remove('playing');
+                tonearm.classList.remove('playing');
+                clearInterval(vinylPlayInterval);
+                return;
+            }
+            const noteIndex = playParsedMelody[vinylCurrentStep];
+            playNoteSound(noteIndex);
+            vinylCurrentStep++;
+        }, 600);
+    }
+}
+
+function closePlayDetailModal(e) {
+    if (e && e.target !== e.currentTarget) return;
+    document.getElementById('play-detail-modal').classList.remove('show');
+    // 关闭弹窗时停止黑胶播放并复位唱针
+    const vinyl = document.getElementById('play-vinyl-record');
+    const tonearm = document.getElementById('play-vinyl-tonearm');
+    if (vinyl) {
+        vinyl.classList.remove('playing');
+        if (tonearm) tonearm.classList.remove('playing');
+        clearInterval(vinylPlayInterval);
+    }
+}
+
+function togglePlayFlip() {
+    document.getElementById('play-flip-wrapper').classList.toggle('flipped');
+}
+
+function handlePlayImageUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    window.globalCompressImage(file, 512, function(compressedUrl) {
+        const url = `url(${compressedUrl})`;
+        const detailImg = document.getElementById('play-detail-img');
+        detailImg.style.backgroundImage = url;
+        detailImg.style.backgroundSize = 'cover';
+        if (currentPlayCardElement) {
+            const cardImg = currentPlayCardElement.querySelector('.play-polaroid-img');
+            cardImg.innerHTML = ''; 
+            cardImg.style.backgroundImage = url;
+            cardImg.style.backgroundSize = 'cover';
+        }
+        
+        // 保存到数据库
+        const currentLoginId = ChatDB.getItem('intimacy_current_account');
+        if (currentLoginId && currentIntimacyCharId && currentPlayRecordId) {
+            let records = JSON.parse(ChatDB.getItem(`intimacy_play_records_${currentLoginId}_${currentIntimacyCharId}`) || '[]');
+            const index = records.findIndex(r => r.id === currentPlayRecordId);
+            if (index !== -1) {
+                records[index].img = compressedUrl;
+                ChatDB.setItem(`intimacy_play_records_${currentLoginId}_${currentIntimacyCharId}`, JSON.stringify(records));
+            }
+        }
+    });
+    event.target.value = '';
+}
+
+async function triggerPlayApiGenerate() {
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    if (!currentLoginId || !currentIntimacyCharId) return alert('未找到当前角色');
+
+    let apiConfig = null;
+    const selectedApiId = ChatDB.getItem(`intimacy_api_preset_${currentLoginId}`);
+    if (selectedApiId) {
+        let presets = JSON.parse(ChatDB.getItem('api_presets') || '[]');
+        apiConfig = presets.find(p => p.id.toString() === selectedApiId);
+    }
+    if (!apiConfig) {
+        apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    }
+
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        return alert('请先在设置中配置 API！');
+    }
+
+    const modal = document.getElementById('play-loading-modal');
+    const textEl = document.getElementById('play-loading-text');
+    modal.classList.add('show');
+    textEl.innerText = "正在提取记忆与设定...";
+
+    try {
+        // 1. 获取基础实体信息
+        let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+        const char = allEntities.find(c => c.id === currentIntimacyCharId);
+        const me = allEntities.find(a => a.id === currentLoginId);
+        
+        if (!char || !me) throw new Error("角色或用户数据丢失");
+
+        // 2. 获取用户面具与真名
+        let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        const account = accounts.find(a => a.id === currentLoginId);
+        let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+        const persona = personas.find(p => p.id === (account ? account.personaId : null));
+        
+        const userRealName = persona ? (persona.realName || me.netName || 'User') : (me.netName || 'User');
+        const userPersonaDesc = persona ? (persona.persona || '普通用户') : '普通用户';
+        const charName = char.netName || char.name || 'Char';
+        const charDesc = char.description || '无';
+
+        // 3. 获取世界书
+        let activeWbs = [];
+        if (char.wbEntries && char.wbEntries.length > 0) {
+            let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+            let entries = wbData.entries.filter(e => char.wbEntries.includes(e.id));
+            entries.forEach(entry => {
+                if (entry.constant) activeWbs.push(entry.content);
+            });
+        }
+
+        // 4. 获取角色记忆库
+        const currentPersonaId = persona ? persona.id : currentLoginId;
+        let memory = JSON.parse(ChatDB.getItem(`char_memory_${currentPersonaId}_${currentIntimacyCharId}`) || '{}');
+        let memoryText = "";
+        if (memory.core && memory.core.length > 0) {
+            memoryText += "[核心记忆]\n" + memory.core.map(m => m.content).join('\n') + "\n";
+        }
+        if (memory.summary && memory.summary.length > 0) {
+            memoryText += "[近期剧情]\n" + memory.summary.slice(-3).map(m => m.content).join('\n') + "\n";
+        }
+
+        // 5. 获取最近 30 条聊天记录
+        let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentIntimacyCharId}`) || '[]');
+        let recentHistory = history.slice(-30).map(m => {
+            let sender = m.role === 'user' ? userRealName : charName;
+            let content = m.content.replace(/<[^>]+>/g, ''); // 简单过滤 HTML 标签
+            return `${sender}: ${content}`;
+        }).join('\n');
+
+        // 6. 组装 Prompt
+        const prompt = `你是一个专属曲谱生成助手。请根据以下角色设定、记忆和聊天记录，为我们谱写一首专属的钢琴简谱。
+
+【角色设定】：
+${charName}的设定：${charDesc}
+${userRealName}的设定：${userPersonaDesc}
+
+【世界书背景】：
+${activeWbs.join('\n') || '无'}
+
+【记忆库】：
+${memoryText || '无'}
+
+【最近聊天记录】：
+${recentHistory || '暂无聊天记录'}
+
+要求：
+1. 简谱只包含数字 1-7，用空格分隔，可以用横线 - 表示长音。
+2. 曲谱请尽量长一点，至少包含 4 到 8 行旋律，让演奏更有沉浸感。
+3. 必须返回 JSON 格式：
+{
+  "title": "曲谱名称",
+  "desc": "简单优雅的曲子简介（20字以内，如：记录了海边漫步的足迹）",
+  "charMsg": "角色对这首曲子的内心独白或寄语（如：这首曲子，是我看着你的侧脸时想到的...）",
+  "sheet": "1 2 3 4 5 5 5\\n5 4 3 2 1 - -\\n3 4 5 6 5 - -\\n1 2 3 2 1 - -"
+}`;
+
+        textEl.innerText = "AI 正在谱写专属曲谱...";
+
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.8
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            const parsed = JSON.parse(replyRaw);
+
+            let records = JSON.parse(ChatDB.getItem(`intimacy_play_records_${currentLoginId}_${currentIntimacyCharId}`) || '[]');
+            records.push({
+                id: Date.now().toString(),
+                title: parsed.title || '《未命名的羁绊》',
+                desc: parsed.desc || 'AI根据最新聊天记录生成的专属旋律。',
+                charMsg: parsed.charMsg || '“这是属于我们现在的旋律，你听到了吗？”',
+                sheet: parsed.sheet || '1 2 3 4 5 5 5\n5 4 3 2 1 - -',
+                date: new Date().toISOString().split('T')[0].replace(/-/g, '.'),
+                img: '',
+                creator: 'char' // 新增：标记为角色创作
+            });
+            ChatDB.setItem(`intimacy_play_records_${currentLoginId}_${currentIntimacyCharId}`, JSON.stringify(records));
+
+            modal.classList.remove('show');
+            renderPlayLibrary();
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        modal.classList.remove('show');
+        alert('生成失败: ' + e.message);
+    }
+}
+
+function renderPlayLibrary() {
+    const wrapper = document.getElementById('play-timeline-wrapper');
+    wrapper.innerHTML = '';
+
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    if (!currentLoginId || !currentIntimacyCharId) return;
+
+    let records = JSON.parse(ChatDB.getItem(`intimacy_play_records_${currentLoginId}_${currentIntimacyCharId}`) || '[]');
+
+    if (records.length === 0) {
+        wrapper.innerHTML = '<div style="text-align:center; color:#aaa; font-size:13px; margin-top:40px;">暂无专属曲谱，点击右上角生成</div>';
+        return;
+    }
+
+    // 倒序渲染
+    records.slice().reverse().forEach((record, index) => {
+        const isLeft = index % 2 === 0;
+        const nodeClass = isLeft ? 'left' : 'right';
+        
+        const safeTitle = record.title.replace(/'/g, "\\'");
+        const safeDate = record.date.replace(/'/g, "\\'");
+        const safeDesc = record.desc.replace(/'/g, "\\'").replace(/\n/g, " ");
+        const safeCharMsg = (record.charMsg || record.desc).replace(/'/g, "\\'").replace(/\n/g, " ");
+        const safeSheet = record.sheet.replace(/'/g, "\\'").replace(/\n/g, "\\n");
+
+        const nodeHTML = `
+            <div class="play-polaroid-node ${nodeClass}">
+                <div class="play-polaroid-card" onclick="openPlayDetailModal('${safeTitle}', '${safeDate}', '${safeDesc}', '${safeSheet}', '${safeCharMsg}', this, '${record.id}')">
+                    <div class="play-polaroid-img" style="background-image: url('${record.img || ''}'); ${record.img ? 'background-size: cover;' : ''}">
+                        ${!record.img ? '<svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>' : ''}
+                    </div>
+                    <div class="play-polaroid-title">${record.title}</div>
+                    <div class="play-polaroid-date">${record.date}</div>
+                </div>
+            </div>
+        `;
+        
+        wrapper.insertAdjacentHTML('beforeend', nodeHTML);
+
+        if (index < records.length - 1) {
+            const svgHTML = `<svg class="play-svg-connector" viewBox="0 0 100 50"><path d="${isLeft ? 'M 20 0 C 20 25, 80 25, 80 50' : 'M 80 0 C 80 25, 20 25, 20 50'}" /></svg>`;
+            wrapper.insertAdjacentHTML('beforeend', svgHTML);
+        }
+    });
+}
+
+let playPianoInterval;
+let playParsedMelody = []; 
+let playCurrentStep = 0;
+let playIsManualMode = false;
+let playCurrentScore = 0;
+
+
+
+function sharePlayToChar() {
+    document.getElementById('playShareConfirmModalOverlay').classList.add('show');
+}
+
+function closePlayShareConfirmModal() {
+    document.getElementById('playShareConfirmModalOverlay').classList.remove('show');
+}
+
+function executeSharePlayToChar() {
+    closePlayShareConfirmModal();
+    
+    const currentLoginId = ChatDB.getItem('intimacy_current_account');
+    if (!currentLoginId || !currentIntimacyCharId) return;
+
+    const title = document.getElementById('play-piano-song-title').innerText;
+    let shareDesc = '';
+    
+    if (playIsManualMode) {
+        shareDesc = `我刚刚挑战了弹奏《${title}》，获得了 ${playCurrentScore} 分！`;
+    } else {
+        shareDesc = `我刚刚听了你为我弹奏的《${title}》，很好听~`;
+    }
+
+    // 获取当前曲谱的详细信息
+    let records = JSON.parse(ChatDB.getItem(`intimacy_play_records_${currentLoginId}_${currentIntimacyCharId}`) || '[]');
+    let currentRecord = records.find(r => r.id === currentPlayRecordId) || {};
+    // 兼容老数据：如果没有 creator 字段，且 charMsg 和 desc 不同，大概率是 AI 生成的
+    let creator = currentRecord.creator || (currentRecord.charMsg !== currentRecord.desc ? 'char' : 'user');
+
+    // 构造黑胶唱片风分享卡片
+    const content = `
+        <div class="play-share-card" onclick="alert('《${title}》\\n${currentPlayCharMsg}')">
+            <div class="psc-content">
+                <div class="psc-vinyl"></div>
+                <div class="psc-info">
+                    <div class="psc-title">《${title}》</div>
+                    <div class="psc-desc">${shareDesc}</div>
+                </div>
+            </div>
+            <div class="psc-footer">
+                <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor" stroke="none"><path d="M14 5l7 7-7 7v-4.1c-5 0-8.5 1.6-11 5.1 1-5 4-10 11-11V5z"/></svg>
+                来自 为你写歌
+            </div>
+        </div>
+    `;
+
+    let newMsg = { 
+        role: 'user', 
+        type: 'app_share', 
+        content: content, 
+        shareTitle: title, 
+        shareDesc: shareDesc, 
+        appName: '为你写歌', 
+        timestamp: Date.now(),
+        // 新增：附带曲谱详细信息供 AI 感知
+        playRecordInfo: {
+            creator: creator,
+            desc: currentRecord.desc || '',
+            charMsg: currentRecord.charMsg || '',
+            sheet: currentRecord.sheet || '' // 新增：附带具体曲谱内容
+        }
+    };
+    
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentIntimacyCharId}`) || '[]');
+    history.push(newMsg);
+    ChatDB.setItem(`chat_history_${currentLoginId}_${currentIntimacyCharId}`, JSON.stringify(history));
+    
+    // 双向同步
+    let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentIntimacyCharId}_${currentLoginId}`) || '[]');
+    let targetMsg = { ...newMsg, role: 'char' };
+    targetHistory.push(targetMsg);
+    ChatDB.setItem(`chat_history_${currentIntimacyCharId}_${currentLoginId}`, JSON.stringify(targetHistory));
+
+    let targetSessions = JSON.parse(ChatDB.getItem(`chat_sessions_${currentIntimacyCharId}`) || '[]');
+    targetSessions = targetSessions.filter(id => id !== currentLoginId);
+    targetSessions.unshift(currentLoginId);
+    ChatDB.setItem(`chat_sessions_${currentIntimacyCharId}`, JSON.stringify(targetSessions));
+
+    let unreadCount = parseInt(ChatDB.getItem(`unread_${currentIntimacyCharId}_${currentLoginId}`) || '0');
+    ChatDB.setItem(`unread_${currentIntimacyCharId}_${currentLoginId}`, (unreadCount + 1).toString());
+
+    showIntimacyToast('已分享给 TA！');
+}
+
+function activatePlayKey(noteIndex, keyEl) {
+    if(keyEl) {
+        keyEl.classList.add('active');
+        playNoteSound(noteIndex); 
+        createPlayFloatingNote(keyEl); 
+        setTimeout(() => keyEl.classList.remove('active'), 150);
+    }
+}
+
+function createPlayFloatingNote(keyEl) {
+    const area = document.getElementById('play-staff-area');
+    const noteSymbols = ['♪', '♫', '♬'];
+    const symbol = noteSymbols[Math.floor(Math.random() * noteSymbols.length)];
+    const note = document.createElement('div');
+    note.className = 'play-floating-note';
+    note.innerText = symbol;
+    const rect = keyEl.getBoundingClientRect();
+    const areaRect = area.getBoundingClientRect();
+    const leftPos = rect.left - areaRect.left + (rect.width / 2);
+    note.style.left = leftPos + 'px';
+    note.style.bottom = '0px';
+    area.appendChild(note);
+    setTimeout(() => note.remove(), 1500);
+}
+
+function togglePlayCharSpeech() {
+    const bubble = document.getElementById('play-char-speech-bubble');
+    bubble.classList.toggle('show');
+    if (bubble.classList.contains('show')) {
+        setTimeout(() => bubble.classList.remove('show'), 4000);
+    }
+}
+
+let currentPlayModeSetting = 'sheet'; // 'sheet' or 'rhythm'
+
+function openPlayModeModal() {
+    document.getElementById('playModeModalOverlay').classList.add('show');
+}
+
+function closePlayModeModal() {
+    document.getElementById('playModeModalOverlay').classList.remove('show');
+}
+
+function selectPlayMode(mode) {
+    currentPlayModeSetting = mode;
+    closePlayModeModal();
+    showIntimacyToast(mode === 'sheet' ? '已切换为古典曲谱模式' : '已切换为节奏大师模式');
+}
+

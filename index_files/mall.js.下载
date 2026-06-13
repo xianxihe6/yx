@@ -1,0 +1,1831 @@
+// ==========================================
+// Shopping APP (Mall) 专属逻辑 (mall.js)
+// ==========================================
+
+// 默认模拟数据 (当没有生成自定义数据时使用)
+const DEFAULT_MALL_SHOPS = [
+    { id: 's1', name: '优衣库官方旗舰店', desc: 'LifeWear 服适人生', logo: '[U]', tag: '品牌直营' },
+    { id: 's2', name: '瑞幸咖啡 (科技园店)', desc: '专业咖啡 新鲜烘焙', logo: '[L]', tag: '外卖 30分钟达' },
+    { id: 's3', name: 'Apple 产品自营店', desc: '官方正品 极速发货', logo: '[A]', tag: '自营' }
+];
+
+const DEFAULT_MALL_PRODUCTS = [
+    { id: 'p1', shopId: 's1', type: 'shopping', title: '极简纯棉短袖 T恤 男女同款 基础打底', price: 99.00, img: '[服饰图]', tag: '包邮', desc: '采用100%新疆长绒棉，透气吸汗，极简设计，百搭不挑人。' },
+    { id: 'p2', shopId: 's2', type: 'delivery', title: '招牌冰吸生椰拿铁 大杯/正常冰', price: 19.90, img: '[咖啡图]', tag: '外卖 30分钟达', desc: '精选阿拉比卡咖啡豆，搭配清甜生椰乳，冰爽解腻，夏日必点。' },
+    { id: 'p3', shopId: 's3', type: 'shopping', title: '头戴式降噪蓝牙耳机 哑光黑 续航升级', price: 899.00, img: '[数码图]', tag: '自营', desc: '主动降噪技术，沉浸式音质体验，40小时超长续航，佩戴舒适。' }
+];
+
+let currentMallProduct = null; 
+let pendingMallPaymentAmount = 0; 
+let currentMallPaymentMethod = 'wallet'; 
+let tempMallWbSelection = []; // 临时保存选中的世界书
+
+// 获取当前账号的专属商城数据
+function getMallData() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    const customDataStr = ChatDB.getItem(`mall_custom_data_${accountId}`);
+    if (customDataStr) {
+        return JSON.parse(customDataStr);
+    }
+    return { shops: DEFAULT_MALL_SHOPS, products: DEFAULT_MALL_PRODUCTS };
+}
+
+// 打开商城 APP
+function openMallApp() {
+    document.getElementById('mallAppPanel').style.display = 'flex';
+    const currentMallLogin = ChatDB.getItem('current_mall_login');
+    if (currentMallLogin) {
+        document.getElementById('mallLoginPage').classList.add('hidden');
+        renderMallProfile(currentMallLogin);
+        initMallData();
+    } else {
+        document.getElementById('mallLoginPage').classList.remove('hidden');
+        renderMallAccountList();
+    }
+}
+
+function closeMallApp() {
+    document.getElementById('mallAppPanel').style.display = 'none';
+}
+
+function mallLogout() {
+    ChatDB.removeItem('current_mall_login');
+    closeMallSubPage('mallSubPageSettings');
+    switchMallTab('home'); 
+    document.getElementById('mallLoginPage').classList.remove('hidden');
+    renderMallAccountList();
+}
+
+function renderMallAccountList() {
+    const listEl = document.getElementById('mallAccountList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    if (accounts.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; font-size:13px; padding:20px;">暂无账号，请先在 Chat 中注册</div>';
+        return;
+    }
+    accounts.forEach(acc => {
+        const card = document.createElement('div');
+        card.className = 'mall-account-card';
+        card.onclick = () => doMallQuickLogin(acc.id);
+        const initial = (acc.netName || 'U').charAt(0).toUpperCase();
+        card.innerHTML = `
+            <div class="mall-account-avatar" style="background-image: url('${acc.avatarUrl || ''}');">${acc.avatarUrl ? '' : initial}</div>
+            <div class="mall-account-info">
+                <div class="mall-account-name">${acc.netName || '未命名'}</div>
+                <div class="mall-account-id">Account: ${acc.account || '未设置'}</div>
+            </div>
+            <svg viewBox="0 0 24 24" width="20" height="20" stroke="#ccc" stroke-width="2" fill="none"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        `;
+        listEl.appendChild(card);
+    });
+}
+
+function doMallQuickLogin(accountId) {
+    ChatDB.setItem('current_mall_login', accountId);
+    document.getElementById('mallLoginPage').classList.add('hidden');
+    renderMallProfile(accountId);
+    initMallData();
+}
+
+function initMallData() {
+    renderMallHome();
+    renderMallShops();
+    renderMallCart();
+    updateMallWbSelectText();
+    updateMallOrderBadges(); // 初始化红点
+}
+
+// ==========================================
+// 首页与店铺页逻辑
+// ==========================================
+function renderMallHome() {
+    const grid = document.getElementById('mallHomeGrid');
+    grid.innerHTML = '';
+    const mallData = getMallData();
+    
+    mallData.products.forEach(p => {
+        const tagClass = p.type === 'delivery' ? 'mall-tag-delivery' : 'mall-tag-shopping';
+        const card = document.createElement('div');
+        card.className = 'mall-product-card';
+        card.onclick = () => openMallDetail(p);
+        card.innerHTML = `
+            <div class="mall-product-img">
+                <div class="${tagClass}">${p.tag}</div>
+                <span style="font-size: 14px; font-weight: bold; color: #888;">${p.img}</span>
+            </div>
+            <div class="mall-product-info">
+                <div class="mall-product-title">${p.title}</div>
+                <div class="mall-product-bottom">
+                    <div class="mall-product-price">${parseFloat(p.price).toFixed(2)}</div>
+                    <div class="mall-product-add" onclick="event.stopPropagation(); quickAddToCart('${p.id}')"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></div>
+                </div>
+            </div>
+        `;
+        grid.appendChild(card);
+    });
+}
+
+function renderMallShops() {
+    const list = document.getElementById('mallShopList');
+    list.innerHTML = '';
+    const mallData = getMallData();
+    
+    mallData.shops.forEach(shop => {
+        const card = document.createElement('div');
+        card.className = 'mall-shop-card';
+        card.onclick = () => openMallShopDetail(shop);
+        card.innerHTML = `
+            <div class="mall-shop-logo">${shop.logo}</div>
+            <div class="mall-shop-info">
+                <div class="mall-shop-name">${shop.name}</div>
+                <div class="mall-shop-desc">
+                    <span class="mall-shop-tag">${shop.tag}</span>
+                    ${shop.desc}
+                </div>
+            </div>
+        `;
+        list.appendChild(card);
+    });
+}
+
+function openMallShopDetail(shop) {
+    document.getElementById('mallShopDetailLogo').innerText = shop.logo;
+    document.getElementById('mallShopDetailName').innerText = shop.name;
+    
+    const grid = document.getElementById('mallShopDetailGrid');
+    grid.innerHTML = '';
+    
+    const mallData = getMallData();
+    const shopProducts = mallData.products.filter(p => p.shopId === shop.id);
+    
+    if (shopProducts.length === 0) {
+        grid.innerHTML = '<div style="grid-column: 1/-1; text-align:center; color:#888; padding:40px 0;">该店铺暂无商品</div>';
+    } else {
+        shopProducts.forEach(p => {
+            const tagClass = p.type === 'delivery' ? 'mall-tag-delivery' : 'mall-tag-shopping';
+            const card = document.createElement('div');
+            card.className = 'mall-product-card';
+            card.onclick = () => openMallDetail(p);
+            card.innerHTML = `
+                <div class="mall-product-img">
+                    <div class="${tagClass}">${p.tag}</div>
+                    <span style="font-size: 14px; font-weight: bold; color: #888;">${p.img}</span>
+                </div>
+                <div class="mall-product-info">
+                    <div class="mall-product-title">${p.title}</div>
+                    <div class="mall-product-bottom">
+                        <div class="mall-product-price">${parseFloat(p.price).toFixed(2)}</div>
+                        <div class="mall-product-add" onclick="event.stopPropagation(); quickAddToCart('${p.id}')"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></div>
+                    </div>
+                </div>
+            `;
+            grid.appendChild(card);
+        });
+    }
+    
+    document.getElementById('mallSubPageShopDetail').classList.add('show');
+}
+
+// ==========================================
+// 详情页与购物车逻辑 (支持单选)
+// ==========================================
+function openMallDetail(product) {
+    currentMallProduct = product;
+    document.getElementById('mallDetailImg').innerHTML = `<span style="font-size: 18px; font-weight: bold; color: #888;">${product.img}</span>`;
+    document.getElementById('mallDetailPrice').innerText = parseFloat(product.price).toFixed(2);
+    document.getElementById('mallDetailTitle').innerText = product.title;
+    document.getElementById('mallDetailDesc').innerText = product.desc;
+    document.getElementById('mallSubPageDetail').classList.add('show');
+}
+
+function quickAddToCart(productId) {
+    const mallData = getMallData();
+    const product = mallData.products.find(p => p.id === productId);
+    if (product) {
+        currentMallProduct = product;
+        mallAddToCart();
+    }
+}
+
+function mallAddToCart() {
+    if (!currentMallProduct) return;
+    const accountId = ChatDB.getItem('current_mall_login');
+    let cart = JSON.parse(ChatDB.getItem(`mall_cart_${accountId}`) || '[]');
+    
+    const existing = cart.find(item => item.id === currentMallProduct.id);
+    if (existing) {
+        existing.qty += 1;
+    } else {
+        // 新加入购物车的商品默认选中
+        cart.push({ ...currentMallProduct, qty: 1, selected: true });
+    }
+    
+    ChatDB.setItem(`mall_cart_${accountId}`, JSON.stringify(cart));
+    alert('已加入购物车！');
+    renderMallCart();
+}
+
+function mallBuyNow() {
+    if (!currentMallProduct) return;
+    pendingMallPaymentAmount = parseFloat(currentMallProduct.price);
+    openMallCheckoutPage();
+}
+
+function renderMallCart() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let cart = JSON.parse(ChatDB.getItem(`mall_cart_${accountId}`) || '[]');
+    const listEl = document.getElementById('mallCartList');
+    const totalEl = document.getElementById('mallCartTotal');
+    
+    listEl.innerHTML = '';
+    let total = 0;
+    let allSelected = true;
+    
+    if (cart.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; padding:40px 0; font-size:13px;">购物车空空如也</div>';
+        totalEl.innerText = '¥0.00';
+        document.querySelector('.mall-checkout-left .mall-checkbox').classList.remove('active');
+        return;
+    }
+    
+    cart.forEach((item, index) => {
+        if (item.selected) {
+            total += parseFloat(item.price) * item.qty;
+        } else {
+            allSelected = false;
+        }
+        
+        const card = document.createElement('div');
+        card.className = 'mall-cart-item';
+        card.innerHTML = `
+            <div class="mall-checkbox ${item.selected ? 'active' : ''}" onclick="toggleMallCartItem(${index})"></div>
+            <div class="mall-cart-img" style="font-size:12px; font-weight:bold;">${item.img}</div>
+            <div class="mall-cart-info">
+                <div class="mall-cart-title">${item.title}</div>
+                <div class="mall-cart-sku">默认规格</div>
+                <div class="mall-cart-price-row">
+                    <div class="mall-cart-price">${parseFloat(item.price).toFixed(2)}</div>
+                    <div class="mall-cart-qty">
+                        <span onclick="updateCartQty(${index}, -1)">-</span>
+                        <span>${item.qty}</span>
+                        <span onclick="updateCartQty(${index}, 1)">+</span>
+                    </div>
+                </div>
+            </div>
+        `;
+        listEl.appendChild(card);
+    });
+    
+    totalEl.innerText = `¥${total.toFixed(2)}`;
+    
+    // 更新全选按钮状态
+    const selectAllBtn = document.querySelector('.mall-checkout-left .mall-checkbox');
+    if (allSelected) selectAllBtn.classList.add('active');
+    else selectAllBtn.classList.remove('active');
+    
+    // 绑定全选事件
+    selectAllBtn.onclick = toggleMallCartAll;
+}
+
+function toggleMallCartItem(index) {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let cart = JSON.parse(ChatDB.getItem(`mall_cart_${accountId}`) || '[]');
+    if (cart[index]) {
+        cart[index].selected = !cart[index].selected;
+        ChatDB.setItem(`mall_cart_${accountId}`, JSON.stringify(cart));
+        renderMallCart();
+    }
+}
+
+function toggleMallCartAll() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let cart = JSON.parse(ChatDB.getItem(`mall_cart_${accountId}`) || '[]');
+    const allSelected = cart.every(item => item.selected);
+    cart.forEach(item => item.selected = !allSelected);
+    ChatDB.setItem(`mall_cart_${accountId}`, JSON.stringify(cart));
+    renderMallCart();
+}
+
+function updateCartQty(index, delta) {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let cart = JSON.parse(ChatDB.getItem(`mall_cart_${accountId}`) || '[]');
+    if (cart[index]) {
+        cart[index].qty += delta;
+        if (cart[index].qty <= 0) cart.splice(index, 1);
+        ChatDB.setItem(`mall_cart_${accountId}`, JSON.stringify(cart));
+        renderMallCart();
+    }
+}
+
+function mallCheckout() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let cart = JSON.parse(ChatDB.getItem(`mall_cart_${accountId}`) || '[]');
+    
+    // 只结算选中的商品
+    let selectedItems = cart.filter(item => item.selected);
+    if (selectedItems.length === 0) return alert('请先勾选要结算的商品！');
+    
+    let total = selectedItems.reduce((sum, item) => sum + parseFloat(item.price) * item.qty, 0);
+    pendingMallPaymentAmount = total;
+    currentMallProduct = null; 
+    openMallCheckoutPage();
+}
+
+// ==========================================
+// 结算页与支付逻辑 (重构版)
+// ==========================================
+let currentSelectedAddress = null;
+let pendingGiftPayData = null; // 用于暂存赠送数据
+let currentSelectedTime = '立即配送'; // 新增：记录配送时间
+
+// 打开全屏结算页面
+function openMallCheckoutPage() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    
+    // 1. 初始化地址
+    let addresses = JSON.parse(ChatDB.getItem(`mall_address_${accountId}`) || '[]');
+    if (!currentSelectedAddress && addresses.length > 0) {
+        currentSelectedAddress = addresses[0];
+    }
+    const addrTextEl = document.getElementById('mallCheckoutAddressText');
+    if (currentSelectedAddress) {
+        addrTextEl.innerHTML = `<div style="font-size:15px; font-weight:bold; color:#111; margin-bottom:4px;">${currentSelectedAddress.name} ${currentSelectedAddress.phone}</div><div style="font-size:13px; color:#666;">${currentSelectedAddress.detail}</div>`;
+    } else {
+        addrTextEl.innerHTML = `<div style="font-size:15px; font-weight:bold; color:#111;">请选择收货地址</div>`;
+    }
+
+    // 初始化配送时间
+    currentSelectedTime = '立即配送';
+    const timeTextEl = document.getElementById('mallCheckoutTimeText');
+    if (timeTextEl) timeTextEl.innerText = currentSelectedTime;
+
+    // 2. 渲染商品明细
+    const listEl = document.getElementById('mallCheckoutItemList');
+    listEl.innerHTML = '';
+    if (currentMallProduct) {
+        listEl.innerHTML = `
+            <div style="display:flex; gap:10px; margin-bottom:10px;">
+                <div style="width:60px; height:60px; background:#f4f4f4; border-radius:8px; display:flex; justify-content:center; align-items:center; font-size:12px; color:#888; font-weight:bold;">${currentMallProduct.img}</div>
+                <div style="flex:1; display:flex; flex-direction:column; justify-content:space-between;">
+                    <div style="font-size:13px; color:#333; font-weight:bold; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;">${currentMallProduct.title}</div>
+                    <div style="display:flex; justify-content:space-between; font-size:14px; color:#111; font-weight:bold;"><span>¥${parseFloat(currentMallProduct.price).toFixed(2)}</span><span style="color:#888; font-size:12px; font-weight:normal;">x1</span></div>
+                </div>
+            </div>
+        `;
+    } else {
+        let cart = JSON.parse(ChatDB.getItem(`mall_cart_${accountId}`) || '[]');
+        let selectedItems = cart.filter(item => item.selected);
+        selectedItems.forEach(item => {
+            listEl.innerHTML += `
+                <div style="display:flex; gap:10px; margin-bottom:10px;">
+                    <div style="width:60px; height:60px; background:#f4f4f4; border-radius:8px; display:flex; justify-content:center; align-items:center; font-size:12px; color:#888; font-weight:bold;">${item.img}</div>
+                    <div style="flex:1; display:flex; flex-direction:column; justify-content:space-between;">
+                        <div style="font-size:13px; color:#333; font-weight:bold; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;">${item.title}</div>
+                        <div style="display:flex; justify-content:space-between; font-size:14px; color:#111; font-weight:bold;"><span>¥${parseFloat(item.price).toFixed(2)}</span><span style="color:#888; font-size:12px; font-weight:normal;">x${item.qty}</span></div>
+                    </div>
+                </div>
+            `;
+        });
+    }
+
+    // 3. 渲染总价并显示页面
+    document.getElementById('mallCheckoutTotal').innerText = `¥${pendingMallPaymentAmount.toFixed(2)}`;
+    document.getElementById('mallSubPageCheckout').classList.add('show');
+}
+
+// 新增：打开配送时间选择弹窗
+function openMallTimeSelectModal() {
+    const listEl = document.getElementById('mallTimeSelectList');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    
+    const times = ['立即配送', '今天 18:00-19:00', '今天 19:00-20:00', '明天 11:00-12:00', '明天 12:00-13:00'];
+    
+    times.forEach(time => {
+        const item = document.createElement('div');
+        item.style.cssText = 'padding: 15px; background: #f9f9f9; border-radius: 12px; border: 1px solid #eee; cursor: pointer; text-align: center; font-size: 14px; color: #333; font-weight: bold;';
+        item.onclick = () => {
+            currentSelectedTime = time;
+            document.getElementById('mallCheckoutTimeText').innerText = time;
+            document.getElementById('mallTimeSelectModalOverlay').classList.remove('show');
+        };
+        item.innerText = time;
+        listEl.appendChild(item);
+    });
+    
+    document.getElementById('mallTimeSelectModalOverlay').classList.add('show');
+}
+
+// 打开支付密码弹窗 (仅负责输入密码)
+function openMallPaymentModal(isGift = false) {
+    if (!currentSelectedAddress && !isGift) return alert('请先选择收货地址！');
+
+    const accountId = ChatDB.getItem('current_mall_login');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === accountId);
+    
+    document.getElementById('mallPaymentAmountText').innerText = `¥${pendingMallPaymentAmount.toFixed(2)}`;
+    document.getElementById('mallPayPwdInput').value = '';
+    updateMallPwdDots(0);
+    
+    if (account && account.freePay) {
+        document.getElementById('mallPayPwdArea').style.display = 'none';
+        document.getElementById('mallFreePayBtn').style.display = 'block';
+        document.getElementById('mallPayTitle').innerText = isGift ? '免密支付 (赠送)' : '已开启免密支付';
+    } else {
+        document.getElementById('mallPayPwdArea').style.display = 'flex';
+        document.getElementById('mallFreePayBtn').style.display = 'none';
+        document.getElementById('mallPayTitle').innerText = isGift ? '请输入支付密码 (赠送)' : '请输入支付密码';
+    }
+
+    let hasFamilyCard = false;
+    let familyCardLimit = 0;
+    let charsList = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    let accountsList = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    let npcsList = JSON.parse(ChatDB.getItem('chat_npcs') || '[]');
+    let allEntities = [...charsList, ...accountsList, ...npcsList];
+    
+    for (let entity of allEntities) {
+        let cardStr = ChatDB.getItem(`family_card_received_${accountId}_${entity.id}`);
+        if (cardStr) {
+            let card = JSON.parse(cardStr);
+            if (card && card.limit >= pendingMallPaymentAmount) {
+                hasFamilyCard = true;
+                familyCardLimit = card.limit;
+                break;
+            }
+        }
+    }
+
+    const methodTextEl = document.getElementById('mallPaymentMethodText');
+    if (hasFamilyCard) {
+        currentMallPaymentMethod = 'family_card';
+        methodTextEl.innerHTML = `亲属卡 (剩余 ¥${familyCardLimit.toFixed(2)})`;
+    } else {
+        currentMallPaymentMethod = 'wallet';
+        methodTextEl.innerHTML = `钱包余额支付`;
+    }
+
+    document.getElementById('mallPaymentModalOverlay').classList.add('show');
+    if (!account || !account.freePay) {
+        setTimeout(() => document.getElementById('mallPayPwdInput').focus(), 100);
+    }
+}
+
+function openMallAddressSelectModal() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let addresses = JSON.parse(ChatDB.getItem(`mall_address_${accountId}`) || '[]');
+    const listEl = document.getElementById('mallAddressSelectList');
+    listEl.innerHTML = '';
+    
+    if (addresses.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; padding:20px 0; font-size:13px;">暂无收货地址，请先在地址管理中添加</div>';
+    } else {
+        addresses.forEach((addr, index) => {
+            const item = document.createElement('div');
+            item.style.cssText = 'padding: 15px; background: #f9f9f9; border-radius: 12px; border: 1px solid #eee; cursor: pointer;';
+            item.onclick = () => {
+                currentSelectedAddress = addr;
+                // 核心修改：更新结算页的地址显示
+                document.getElementById('mallCheckoutAddressText').innerHTML = `<div style="font-size:15px; font-weight:bold; color:#111; margin-bottom:4px;">${addr.name} ${addr.phone}</div><div style="font-size:13px; color:#666;">${addr.detail}</div>`;
+                document.getElementById('mallAddressSelectModalOverlay').classList.remove('show');
+            };
+            item.innerHTML = `
+                <div style="font-size: 14px; font-weight: bold; color: #111; margin-bottom: 4px;">${addr.name} <span style="font-size: 12px; color: #888; font-weight: normal;">${addr.phone}</span></div>
+                <div style="font-size: 12px; color: #555;">${addr.detail}</div>
+            `;
+            listEl.appendChild(item);
+        });
+    }
+    document.getElementById('mallAddressSelectModalOverlay').classList.add('show');
+}
+
+function closeMallPaymentModal() {
+    document.getElementById('mallPaymentModalOverlay').classList.remove('show');
+    pendingGiftPayData = null; // 关闭时清空暂存数据
+}
+
+function toggleMallPaymentMethod() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let hasFamilyCard = false;
+    let familyCardLimit = 0;
+    let charsList = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    let accountsList = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    let npcsList = JSON.parse(ChatDB.getItem('chat_npcs') || '[]');
+    let allEntities = [...charsList, ...accountsList, ...npcsList];
+    
+    for (let entity of allEntities) {
+        let cardStr = ChatDB.getItem(`family_card_received_${accountId}_${entity.id}`);
+        if (cardStr) {
+            let card = JSON.parse(cardStr);
+            if (card && card.limit >= pendingMallPaymentAmount) {
+                hasFamilyCard = true;
+                familyCardLimit = card.limit;
+                break;
+            }
+        }
+    }
+
+    const methodTextEl = document.getElementById('mallPaymentMethodText');
+    if (currentMallPaymentMethod === 'wallet') {
+        if (hasFamilyCard) {
+            currentMallPaymentMethod = 'family_card';
+            methodTextEl.innerHTML = `亲属卡 (剩余 ¥${familyCardLimit.toFixed(2)})`;
+        } else {
+            alert('没有可用额度足够的亲属卡！');
+        }
+    } else {
+        currentMallPaymentMethod = 'wallet';
+        methodTextEl.innerHTML = `钱包余额支付`;
+    }
+}
+
+function handleMallPwdInput() {
+    const val = document.getElementById('mallPayPwdInput').value;
+    updateMallPwdDots(val.length);
+    if (val.length === 6) {
+        setTimeout(() => executeMallPayment(val, false), 200);
+    }
+}
+
+function updateMallPwdDots(length) {
+    const dots = document.querySelectorAll('.mall-payment-pwd-dot');
+    dots.forEach((dot, idx) => {
+        if (idx < length) dot.classList.add('filled');
+        else dot.classList.remove('filled');
+    });
+}
+
+function executeMallPayment(inputPwd, isFreePay = false) {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === accountId);
+    
+    if (!account) return alert('账号异常！');
+    
+    if (!isFreePay) {
+        if (!account.payPassword) return alert('您尚未在 Chat 中设置支付密码！');
+        if (account.payPassword !== inputPwd) {
+            document.getElementById('mallPayPwdInput').value = '';
+            updateMallPwdDots(0);
+            return alert('支付密码错误！');
+        }
+    }
+    
+    // 如果是赠送流程，校验密码后跳转到赠送逻辑
+    if (pendingGiftPayData && pendingGiftPayData.type === 'gift') {
+        executeMallGiftPay();
+        return;
+    }
+    
+    if (!currentSelectedAddress) return alert('请选择收货地址！');
+    
+    if (currentMallPaymentMethod === 'wallet') {
+        let balance = parseFloat(ChatDB.getItem(`wallet_balance_${accountId}`) || '0');
+        if (balance < pendingMallPaymentAmount) {
+            document.getElementById('mallPayPwdInput').value = '';
+            updateMallPwdDots(0);
+            return alert('钱包余额不足，请前往 Chat 充值！');
+        }
+        balance -= pendingMallPaymentAmount;
+        ChatDB.setItem(`wallet_balance_${accountId}`, balance.toFixed(2));
+        
+        let walletHistory = JSON.parse(ChatDB.getItem(`wallet_history_${accountId}`) || '[]');
+        walletHistory.push({
+            id: Date.now().toString(), type: 'out', title: '商城/外卖消费',
+            amount: pendingMallPaymentAmount.toFixed(2), timestamp: Date.now()
+        });
+        ChatDB.setItem(`wallet_history_${accountId}`, JSON.stringify(walletHistory));
+    } else if (currentMallPaymentMethod === 'family_card') {
+        let charsList = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+        let accountsList = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+        let npcsList = JSON.parse(ChatDB.getItem('chat_npcs') || '[]');
+        let allEntities = [...charsList, ...accountsList, ...npcsList];
+        
+        for (let entity of allEntities) {
+            let key = `family_card_received_${accountId}_${entity.id}`;
+            let cardStr = ChatDB.getItem(key);
+            if (cardStr) {
+                let card = JSON.parse(cardStr);
+                if (card && card.limit >= pendingMallPaymentAmount) {
+                    card.limit -= pendingMallPaymentAmount;
+                    ChatDB.setItem(key, JSON.stringify(card));
+                    break;
+                }
+            }
+        }
+    }
+    
+    let orders = JSON.parse(ChatDB.getItem(`mall_orders_${accountId}`) || '[]');
+    const orderStatus = currentMallProduct && currentMallProduct.type === 'delivery' ? '配送中' : '待发货';
+    
+    if (currentMallProduct) {
+        orders.unshift({ ...currentMallProduct, qty: 1, status: orderStatus, orderId: Date.now().toString(), time: currentSelectedTime });
+    } else {
+        let cart = JSON.parse(ChatDB.getItem(`mall_cart_${accountId}`) || '[]');
+        let selectedItems = cart.filter(item => item.selected);
+        selectedItems.forEach(item => {
+            const status = item.type === 'delivery' ? '配送中' : '待发货';
+            orders.unshift({ ...item, status: status, orderId: Date.now().toString() + Math.random().toString().substr(2,4), time: currentSelectedTime });
+        });
+        let remainingCart = cart.filter(item => !item.selected);
+        ChatDB.setItem(`mall_cart_${accountId}`, JSON.stringify(remainingCart)); 
+        renderMallCart();
+    }
+    
+    ChatDB.setItem(`mall_orders_${accountId}`, JSON.stringify(orders));
+    
+    closeMallPaymentModal();
+    closeMallSubPage('mallSubPageCheckout'); // 支付成功后关闭结算页
+    if (currentMallProduct) closeMallSubPage('mallSubPageDetail');
+    
+    updateMallOrderBadges(); 
+    
+    alert('支付成功！');
+    switchMallTab('profile'); 
+}
+
+// ==========================================
+// 子页面与导航逻辑
+// ==========================================
+function openMallSubPage(type, param) {
+    if (type === 'orders') {
+        document.getElementById('mallSubPageOrders').classList.add('show');
+        switchMallOrderTab(param || 'all', document.querySelector(`.mall-order-tab[onclick*="${param || 'all'}"]`));
+    } else if (type === 'address') {
+        document.getElementById('mallSubPageAddress').classList.add('show');
+        renderMallAddress();
+    } else if (type === 'cs') {
+        document.getElementById('mallSubPageCS').classList.add('show');
+    } else if (type === 'settings') {
+        document.getElementById('mallSubPageSettings').classList.add('show');
+    }
+}
+
+function closeMallSubPage(pageId) {
+    document.getElementById(pageId).classList.remove('show');
+}
+
+// 订单列表渲染 (支持删除与详情跳转)
+function switchMallOrderTab(statusFilter, el) {
+    document.querySelectorAll('.mall-order-tab').forEach(tab => tab.classList.remove('active'));
+    if (el) el.classList.add('active');
+    
+    const accountId = ChatDB.getItem('current_mall_login');
+    let orders = JSON.parse(ChatDB.getItem(`mall_orders_${accountId}`) || '[]');
+    const listEl = document.getElementById('mallOrderList');
+    listEl.innerHTML = '';
+    
+    let filtered = orders;
+    if (statusFilter === 'pendingPay') filtered = orders.filter(o => o.status === '待付款');
+    if (statusFilter === 'pendingShip') filtered = orders.filter(o => o.status === '待发货');
+    if (statusFilter === 'delivering') filtered = orders.filter(o => o.status === '配送中');
+    if (statusFilter === 'review') filtered = orders.filter(o => o.status === '待评价');
+    
+    if (filtered.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; padding:40px 0; font-size:13px;">暂无相关订单</div>';
+        return;
+    }
+    
+    filtered.forEach(order => {
+        const card = document.createElement('div');
+        card.className = 'mall-order-card';
+        card.onclick = () => openMallOrderDetail(order.orderId); // 点击进入详情
+        
+        let btnHtml = '';
+        if (order.status === '待发货') {
+            btnHtml = `<div class="mall-order-btn" onclick="simulateMallShipping('${order.orderId}', event)">提醒发货</div>`;
+        } else if (order.status === '配送中') {
+            btnHtml = `<div class="mall-order-btn" onclick="showMallLogistics('${order.orderId}', event)">查看物流</div><div class="mall-order-btn primary" onclick="changeMallOrderStatus('${order.orderId}', '待评价', event)">确认收货</div>`;
+        } else if (order.status === '待评价') {
+            btnHtml = `<div class="mall-order-btn primary" onclick="reviewMallOrder('${order.orderId}', event)">去评价</div>`;
+        } else {
+            btnHtml = `<div class="mall-order-btn" onclick="showMallLogistics('${order.orderId}', event)">查看物流</div>`;
+        }
+        
+        card.innerHTML = `
+            <div class="mall-order-header">
+                <span>订单号: ${order.orderId}</span>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span class="mall-order-delete-btn" onclick="deleteMallOrder('${order.orderId}', event)">删除</span>
+                    <span class="mall-order-status">${order.status}</span>
+                </div>
+            </div>
+            <div class="mall-order-item-info">
+                <div class="mall-order-item-img" style="font-size:14px; font-weight:bold;">${order.img}</div>
+                <div class="mall-order-item-detail">
+                    <div class="mall-order-item-title">${order.title}</div>
+                    <div class="mall-order-item-price">¥${parseFloat(order.price).toFixed(2)} <span style="font-size:11px; color:#888; font-weight:normal;">x${order.qty}</span></div>
+                </div>
+            </div>
+            <div class="mall-order-footer">${btnHtml}</div>
+        `;
+        listEl.appendChild(card);
+    });
+}
+
+// 真实模拟发货流程
+function simulateMallShipping(orderId, e) {
+    e.stopPropagation();
+    alert('已提醒商家发货！商家正在打包中...');
+    setTimeout(() => {
+        changeMallOrderStatus(orderId, '配送中', null, true);
+    }, 1500); // 1.5秒后自动变成配送中
+}
+
+// 发送商城专属短信通知
+function sendMallSmsNotification(accountId, content) {
+    let smsHistory = JSON.parse(ChatDB.getItem(`sms_history_${accountId}_顺丰速运`) || '[]');
+    smsHistory.push({
+        role: 'char',
+        type: 'text',
+        content: content,
+        senderName: '顺丰速运',
+        timestamp: Date.now()
+    });
+    ChatDB.setItem(`sms_history_${accountId}_顺丰速运`, JSON.stringify(smsHistory));
+
+    let smsSessions = JSON.parse(ChatDB.getItem(`sms_sessions_${accountId}`) || '[]');
+    smsSessions = smsSessions.filter(id => id !== '顺丰速运');
+    smsSessions.unshift('顺丰速运');
+    ChatDB.setItem(`sms_sessions_${accountId}`, JSON.stringify(smsSessions));
+
+    if (typeof showCustomNotification === 'function') {
+        showCustomNotification('sms', '顺丰速运', '顺丰速运', content, null, '#333', '顺');
+    }
+    if (typeof renderSmsList === 'function') renderSmsList();
+}
+
+// 改变订单状态
+function changeMallOrderStatus(orderId, newStatus, e, isAuto = false) {
+    if (e) e.stopPropagation();
+    // 如果是自动送达，跳过确认框
+    if (newStatus === '待评价' && !isAuto && !confirm('确认已收到商品？')) return;
+    
+    const accountId = ChatDB.getItem('current_mall_login');
+    let orders = JSON.parse(ChatDB.getItem(`mall_orders_${accountId}`) || '[]');
+    const order = orders.find(o => o.orderId === orderId);
+    if (order) {
+        order.status = newStatus;
+        ChatDB.setItem(`mall_orders_${accountId}`, JSON.stringify(orders));
+        const activeTab = document.querySelector('.mall-order-tab.active');
+        let filter = 'all';
+        if (activeTab && activeTab.innerText === '待付款') filter = 'pendingPay';
+        if (activeTab && activeTab.innerText === '待发货') filter = 'pendingShip';
+        if (activeTab && activeTab.innerText === '配送中') filter = 'delivering';
+        if (activeTab && activeTab.innerText === '评价') filter = 'review';
+        if (activeTab) switchMallOrderTab(filter, activeTab);
+        updateMallOrderBadges();
+        
+        if (isAuto && newStatus === '配送中') {
+            alert('订单已发货，正在配送中！');
+            sendMallSmsNotification(accountId, `【顺丰速运】您的包裹（包含[${order.title}]等）已发货，正在为您派送中，请保持电话畅通。`);
+            
+            // 模拟 5 秒后自动送达
+            setTimeout(() => {
+                changeMallOrderStatus(orderId, '待评价', null, true);
+            }, 5000);
+        }
+        
+        if (isAuto && newStatus === '待评价') {
+            sendMallSmsNotification(accountId, `【顺丰速运】您的包裹（包含[${order.title}]等）已顺利送达，请及时前往取件。期待您的五星好评！`);
+        }
+        
+        if (!isAuto && newStatus === '待评价') alert('收货成功，快去评价吧！');
+    }
+}
+
+// 查看真实物流弹窗
+function showMallLogistics(orderId, e) {
+    e.stopPropagation();
+    const listEl = document.getElementById('mallLogisticsList');
+    listEl.innerHTML = `
+        <div style="position: relative;">
+            <div style="position: absolute; left: -21px; top: 2px; width: 10px; height: 10px; background: #ff5000; border-radius: 50%; border: 2px solid #fff;"></div>
+            <div style="font-size: 13px; color: #111; font-weight: bold; margin-bottom: 4px;">[城市转运中心] 正在派件中，派件员电话：138****8888</div>
+            <div style="font-size: 11px; color: #888;">刚刚</div>
+        </div>
+        <div style="position: relative;">
+            <div style="position: absolute; left: -20px; top: 2px; width: 8px; height: 8px; background: #ccc; border-radius: 50%;"></div>
+            <div style="font-size: 13px; color: #555; margin-bottom: 4px;">快件已到达 [城市转运中心]</div>
+            <div style="font-size: 11px; color: #888;">2小时前</div>
+        </div>
+        <div style="position: relative;">
+            <div style="position: absolute; left: -20px; top: 2px; width: 8px; height: 8px; background: #ccc; border-radius: 50%;"></div>
+            <div style="font-size: 13px; color: #555; margin-bottom: 4px;">商家已发货，包裹正在等待揽收</div>
+            <div style="font-size: 11px; color: #888;">昨天 18:30</div>
+        </div>
+    `;
+    document.getElementById('mallLogisticsModalOverlay').classList.add('show');
+}
+
+// 评价订单
+function reviewMallOrder(orderId, e) {
+    e.stopPropagation();
+    const review = prompt('请输入评价内容：', '商品很不错，非常喜欢！');
+    if (review !== null) {
+        changeMallOrderStatus(orderId, '已完成', e);
+        alert('评价成功！');
+    }
+}
+
+// ==========================================
+// 赠送与代付逻辑 (生成小票卡片)
+// ==========================================
+function openMallGiftPayModal(type) {
+    const chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const selectEl = document.getElementById('mallGiftPayCharSelect');
+    selectEl.innerHTML = '';
+    if (chars.length === 0) {
+        selectEl.innerHTML = '<option value="">暂无好友</option>';
+    } else {
+        chars.forEach(c => {
+            selectEl.innerHTML += `<option value="${c.id}">${c.name}</option>`;
+        });
+    }
+    document.getElementById('mallGiftPayType').value = type;
+    document.getElementById('mallGiftPayTitle').innerText = type === 'gift' ? '赠送给好友' : '请好友代付';
+    document.getElementById('mallGiftPayNote').value = '';
+    document.getElementById('mallGiftPayModalOverlay').classList.add('show');
+}
+
+function confirmMallGiftPay() {
+    const type = document.getElementById('mallGiftPayType').value;
+    const charId = document.getElementById('mallGiftPayCharSelect').value;
+    const note = document.getElementById('mallGiftPayNote').value.trim();
+    
+    if (!charId) return alert('请选择好友！');
+    
+    pendingGiftPayData = { type, charId, note };
+    document.getElementById('mallGiftPayModalOverlay').classList.remove('show');
+    
+    if (type === 'gift') {
+        // 赠送需要支付，弹出支付密码框
+        openMallPaymentModal(true);
+    } else {
+        // 代付不需要支付，直接发送请求
+        executeMallGiftPay();
+    }
+}
+
+function executeMallGiftPay() {
+    if (!pendingGiftPayData) return;
+    const { type, charId, note } = pendingGiftPayData;
+    
+    const accountId = ChatDB.getItem('current_mall_login');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === accountId);
+    if (!account) return alert('账号异常！');
+
+    // 提取完整的商品列表
+    let productList = [];
+    if (currentMallProduct) {
+        productList.push({ title: currentMallProduct.title, price: currentMallProduct.price, qty: 1 });
+    } else {
+        let cart = JSON.parse(ChatDB.getItem(`mall_cart_${accountId}`) || '[]');
+        let selectedItems = cart.filter(item => item.selected);
+        productList = selectedItems.map(item => ({ title: item.title, price: item.price, qty: item.qty }));
+    }
+    
+    if (type === 'gift') {
+        // 赠送：扣除自己的钱
+        if (currentMallPaymentMethod === 'wallet') {
+            let balance = parseFloat(ChatDB.getItem(`wallet_balance_${accountId}`) || '0');
+            if (balance < pendingMallPaymentAmount) return alert('钱包余额不足！');
+            balance -= pendingMallPaymentAmount;
+            ChatDB.setItem(`wallet_balance_${accountId}`, balance.toFixed(2));
+        } else if (currentMallPaymentMethod === 'family_card') {
+            let paid = false;
+            let charsList = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+            let accountsList = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+            let npcsList = JSON.parse(ChatDB.getItem('chat_npcs') || '[]');
+            let allEntities = [...charsList, ...accountsList, ...npcsList];
+            
+            for (let entity of allEntities) {
+                let key = `family_card_received_${accountId}_${entity.id}`;
+                let cardStr = ChatDB.getItem(key);
+                if (cardStr) {
+                    let card = JSON.parse(cardStr);
+                    if (card && card.limit >= pendingMallPaymentAmount) {
+                        card.limit -= pendingMallPaymentAmount;
+                        ChatDB.setItem(key, JSON.stringify(card));
+                        paid = true;
+                        break;
+                    }
+                }
+            }
+            if (!paid) return alert('亲属卡额度不足！');
+        }
+        
+        // 生成订单
+        let orders = JSON.parse(ChatDB.getItem(`mall_orders_${accountId}`) || '[]');
+        if (currentMallProduct) {
+            orders.unshift({ ...currentMallProduct, qty: 1, status: '待发货', orderId: Date.now().toString(), time: currentSelectedTime });
+        } else {
+            let cart = JSON.parse(ChatDB.getItem(`mall_cart_${accountId}`) || '[]');
+            let selectedItems = cart.filter(item => item.selected);
+            selectedItems.forEach(item => {
+                orders.unshift({ ...item, status: '待发货', orderId: Date.now().toString() + Math.random().toString().substr(2,4), time: currentSelectedTime });
+            });
+            let remainingCart = cart.filter(item => !item.selected);
+            ChatDB.setItem(`mall_cart_${accountId}`, JSON.stringify(remainingCart)); 
+            renderMallCart();
+        }
+        ChatDB.setItem(`mall_orders_${accountId}`, JSON.stringify(orders));
+        alert('赠送成功！已扣款并发送小票给好友。');
+    } else {
+        alert('代付请求已发送给好友！');
+    }
+
+    // 构建小票数据并生成 HTML 气泡
+    const msgId = 'msg_' + Date.now();
+    const receiptData = encodeURIComponent(JSON.stringify({
+        msgId: msgId,
+        type: type === 'gift' ? '礼物赠送' : '代付请求',
+        products: productList,
+        price: pendingMallPaymentAmount.toFixed(2),
+        note: note || '无',
+        address: currentSelectedAddress ? `${currentSelectedAddress.name} ${currentSelectedAddress.phone}` : '默认收货地址',
+        time: currentSelectedTime,
+        status: 'pending'
+    }));
+    
+    const cardClass = type === 'gift' ? 'gift-card' : 'request-card';
+    const headerText = type === 'gift' ? '礼物赠送' : '代付请求';
+    const previewTitle = productList.length > 0 ? productList[0].title : '商品';
+    
+    const msgContent = `
+        <div class="mall-receipt-card ${cardClass}" onclick="showMallReceipt('${receiptData}', '${msgId}')" id="receipt_card_${msgId}">
+            <div class="mall-receipt-header">${headerText}</div>
+            <div class="mall-receipt-body">
+                <div class="mall-receipt-title">${previewTitle}${productList.length > 1 ? ' 等多件商品' : ''}</div>
+                <div class="mall-receipt-row"><span>总价:</span><span style="color:#ff5000;font-weight:bold;">¥${pendingMallPaymentAmount.toFixed(2)}</span></div>
+                <div class="mall-receipt-row"><span>备注:</span><span>${note || '无'}</span></div>
+            </div>
+            <div class="mall-receipt-footer" id="receipt_footer_${msgId}">点击查看小票详情</div>
+        </div>
+    `;
+
+    // 保存消息到聊天记录 (双向同步)
+    let newMsg = {
+        id: msgId,
+        role: 'user',
+        content: msgContent,
+        timestamp: Date.now(),
+        type: 'html',
+        subType: type === 'gift' ? 'mall_gift' : 'mall_pay_request',
+        mallData: {
+            products: productList,
+            price: pendingMallPaymentAmount.toFixed(2),
+            note: note || '无',
+            address: currentSelectedAddress ? `${currentSelectedAddress.name} ${currentSelectedAddress.phone}` : '默认收货地址',
+            time: currentSelectedTime,
+            status: 'pending'
+        }
+    };
+    
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${accountId}_${charId}`) || '[]');
+    history.push(newMsg);
+    ChatDB.setItem(`chat_history_${accountId}_${charId}`, JSON.stringify(history));
+
+    let sessions = JSON.parse(ChatDB.getItem(`chat_sessions_${accountId}`) || '[]');
+    sessions = sessions.filter(id => id !== charId);
+    sessions.unshift(charId);
+    ChatDB.setItem(`chat_sessions_${accountId}`, JSON.stringify(sessions));
+
+    // 双向同步给对方
+    let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${charId}_${accountId}`) || '[]');
+    let targetMsg = { ...newMsg, role: 'char' };
+    targetHistory.push(targetMsg);
+    ChatDB.setItem(`chat_history_${charId}_${accountId}`, JSON.stringify(targetHistory));
+
+    let targetSessions = JSON.parse(ChatDB.getItem(`chat_sessions_${charId}`) || '[]');
+    targetSessions = targetSessions.filter(id => id !== accountId);
+    targetSessions.unshift(accountId);
+    ChatDB.setItem(`chat_sessions_${charId}`, JSON.stringify(targetSessions));
+
+    let unreadCount = parseInt(ChatDB.getItem(`unread_${charId}_${accountId}`) || '0');
+    ChatDB.setItem(`unread_${charId}_${accountId}`, (unreadCount + 1).toString());
+
+    pendingGiftPayData = null;
+    closeMallPaymentModal();
+    closeMallSubPage('mallSubPageCheckout'); // 成功后关闭结算页
+    if (currentMallProduct) closeMallSubPage('mallSubPageDetail');
+    updateMallOrderBadges();
+    switchMallTab('profile');
+}
+
+// 显示小票详情弹窗
+window.showMallReceipt = function(dataStr, msgId) {
+    try {
+        const data = JSON.parse(decodeURIComponent(dataStr));
+        const contentEl = document.getElementById('mallReceiptContent');
+        
+        // 完整渲染所有商品明细
+        let productsHtml = data.products.map(p => `
+            <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                <span style="flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-right:10px;">${p.title}</span>
+                <span style="color:#888;">x${p.qty}</span>
+                <span style="width:60px; text-align:right;">¥${parseFloat(p.price).toFixed(2)}</span>
+            </div>
+        `).join('');
+
+        contentEl.innerHTML = `
+            <div style="display:flex; justify-content:space-between; margin-bottom:10px;"><span>类型:</span><strong>${data.type}</strong></div>
+            <div style="border-top:1px dashed #ccc; padding-top:10px; margin-bottom:10px;">
+                <div style="font-weight:bold; margin-bottom:8px;">商品明细:</div>
+                ${productsHtml}
+            </div>
+            <div style="display:flex; justify-content:space-between; border-top:1px dashed #ccc; padding-top:10px;"><span>地址:</span><strong>${data.address}</strong></div>
+            <div style="display:flex; justify-content:space-between; margin-top:5px;"><span>时间:</span><strong>${data.time || '立即配送'}</strong></div>
+            <div style="display:flex; justify-content:space-between; margin-top:5px;"><span>备注:</span><strong>${data.note}</strong></div>
+        `;
+        document.getElementById('mallReceiptTotal').innerText = data.price;
+        
+        // 检查是否是对方发来的代付请求
+        const accountId = ChatDB.getItem('current_mall_login');
+        const charId = typeof currentChatRoomCharId !== 'undefined' ? currentChatRoomCharId : null;
+        if (charId && data.type === '代付请求') {
+            let history = JSON.parse(ChatDB.getItem(`chat_history_${accountId}_${charId}`) || '[]');
+            const msg = history.find(m => m.id === msgId);
+            if (msg && msg.role === 'char' && msg.mallData && msg.mallData.status === 'pending') {
+                // 对方发来的代付请求，且未处理
+                contentEl.innerHTML += `
+                    <div style="display:flex; gap:10px; margin-top:20px;">
+                        <div onclick="handleMallPayRequest('${msgId}', 'reject')" style="flex:1; background:#f4f4f4; color:#333; text-align:center; padding:10px; border-radius:12px; font-weight:bold; cursor:pointer;">拒绝</div>
+                        <div onclick="handleMallPayRequest('${msgId}', 'pay')" style="flex:1; background:#ff5000; color:#fff; text-align:center; padding:10px; border-radius:12px; font-weight:bold; cursor:pointer;">帮TA付款</div>
+                    </div>
+                `;
+            } else if (msg && msg.mallData && msg.mallData.status !== 'pending') {
+                contentEl.innerHTML += `<div style="text-align:center; color:#888; margin-top:15px; font-weight:bold;">该请求已处理 (${msg.mallData.status === 'paid' ? '已付款' : '已拒绝'})</div>`;
+            }
+        }
+
+        document.getElementById('mallReceiptModalOverlay').classList.add('show');
+    } catch(e) {
+        console.error(e);
+    }
+};
+
+// 处理代付请求
+window.handleMallPayRequest = function(msgId, action) {
+    const accountId = ChatDB.getItem('current_mall_login');
+    const charId = typeof currentChatRoomCharId !== 'undefined' ? currentChatRoomCharId : null;
+    if (!charId) return;
+
+    let history = JSON.parse(ChatDB.getItem(`chat_history_${accountId}_${charId}`) || '[]');
+    const msgIndex = history.findIndex(m => m.id === msgId);
+    if (msgIndex === -1) return;
+
+    const msg = history[msgIndex];
+    
+    if (action === 'pay') {
+        let balance = parseFloat(ChatDB.getItem(`wallet_balance_${accountId}`) || '0');
+        let price = parseFloat(msg.mallData.price);
+        if (balance < price) return alert('钱包余额不足！');
+        
+        if (confirm(`确认帮TA代付 ¥${price.toFixed(2)} 吗？`)) {
+            balance -= price;
+            ChatDB.setItem(`wallet_balance_${accountId}`, balance.toFixed(2));
+            msg.mallData.status = 'paid';
+            alert('代付成功！');
+        } else {
+            return;
+        }
+    } else {
+        msg.mallData.status = 'rejected';
+        alert('已拒绝代付。');
+    }
+
+    // 更新消息状态
+    history[msgIndex] = msg;
+    ChatDB.setItem(`chat_history_${accountId}_${charId}`, JSON.stringify(history));
+    
+    // 双向同步
+    let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${charId}_${accountId}`) || '[]');
+    let targetMsgIndex = targetHistory.findIndex(m => m.id === msgId);
+    if (targetMsgIndex !== -1) {
+        targetHistory[targetMsgIndex].mallData.status = msg.mallData.status;
+        ChatDB.setItem(`chat_history_${charId}_${accountId}`, JSON.stringify(targetHistory));
+    }
+
+    document.getElementById('mallReceiptModalOverlay').classList.remove('show');
+    if (typeof renderChatHistory === 'function') renderChatHistory(charId);
+};
+
+// 删除订单
+function deleteMallOrder(orderId, e) {
+    e.stopPropagation(); // 阻止触发详情页
+    if (confirm('确定要删除该订单吗？')) {
+        const accountId = ChatDB.getItem('current_mall_login');
+        let orders = JSON.parse(ChatDB.getItem(`mall_orders_${accountId}`) || '[]');
+        orders = orders.filter(o => o.orderId !== orderId);
+        ChatDB.setItem(`mall_orders_${accountId}`, JSON.stringify(orders));
+        
+        // 重新渲染当前 Tab
+        const activeTab = document.querySelector('.mall-order-tab.active');
+        let filter = 'all';
+        if (activeTab.innerText === '待付款') filter = 'pendingPay';
+        if (activeTab.innerText === '待发货') filter = 'pendingShip';
+        if (activeTab.innerText === '配送中') filter = 'delivering';
+        
+        switchMallOrderTab(filter, activeTab);
+        updateMallOrderBadges(); // 更新红点
+    }
+}
+
+// 订单详情页
+function openMallOrderDetail(orderId) {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let orders = JSON.parse(ChatDB.getItem(`mall_orders_${accountId}`) || '[]');
+    const order = orders.find(o => o.orderId === orderId);
+    if (!order) return;
+
+    const contentEl = document.getElementById('mallOrderDetailContent');
+    const total = (parseFloat(order.price) * order.qty).toFixed(2);
+    
+    contentEl.innerHTML = `
+        <div class="mall-order-detail-card" style="background: linear-gradient(135deg, #111, #333); color: #fff;">
+            <div style="font-size: 20px; font-weight: bold; margin-bottom: 5px;">${order.status}</div>
+            <div style="font-size: 12px; color: #aaa;">感谢您在商城的购物，欢迎再次光临。</div>
+        </div>
+        
+        <div class="mall-order-detail-card">
+            <div class="mall-od-header">商品信息</div>
+            <div class="mall-od-product">
+                <div class="mall-od-img">${order.img}</div>
+                <div class="mall-od-info">
+                    <div class="mall-od-title">${order.title}</div>
+                    <div style="font-size: 12px; color: #888;">默认规格</div>
+                    <div class="mall-od-price">¥${parseFloat(order.price).toFixed(2)} <span style="font-size:12px; color:#888; font-weight:normal; float:right;">x${order.qty}</span></div>
+                </div>
+            </div>
+            <div class="mall-od-row">
+                <span>商品总价</span>
+                <span>¥${total}</span>
+            </div>
+            <div class="mall-od-row">
+                <span>运费</span>
+                <span>¥0.00</span>
+            </div>
+            <div class="mall-od-row" style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #f5f5f5; font-size: 15px; color: #111; font-weight: bold;">
+                <span>实付款</span>
+                <span style="color: #ff5000;">¥${total}</span>
+            </div>
+        </div>
+
+        <div class="mall-order-detail-card">
+            <div class="mall-od-header">订单信息</div>
+            <div class="mall-od-row"><span>订单编号</span><span>${order.orderId}</span></div>
+            <div class="mall-od-row"><span>创建时间</span><span>${new Date(parseInt(order.orderId)).toLocaleString()}</span></div>
+            <div class="mall-od-row"><span>支付方式</span><span>在线支付</span></div>
+        </div>
+    `;
+
+    document.getElementById('mallSubPageOrderDetail').classList.add('show');
+}
+
+// 更新 Profile 页面红点
+function updateMallOrderBadges() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let orders = JSON.parse(ChatDB.getItem(`mall_orders_${accountId}`) || '[]');
+    
+    const shipCount = orders.filter(o => o.status === '待发货').length;
+    const deliverCount = orders.filter(o => o.status === '配送中').length;
+    
+    const shipBtn = document.getElementById('mallOrderBtnShip');
+    const deliverBtn = document.getElementById('mallOrderBtnDeliver');
+    
+    if (shipBtn) {
+        shipBtn.querySelectorAll('.mall-order-badge').forEach(e => e.remove());
+        if (shipCount > 0) shipBtn.insertAdjacentHTML('beforeend', `<div class="mall-order-badge"></div>`);
+    }
+    
+    if (deliverBtn) {
+        deliverBtn.querySelectorAll('.mall-order-badge').forEach(e => e.remove());
+        if (deliverCount > 0) deliverBtn.insertAdjacentHTML('beforeend', `<div class="mall-order-badge"></div>`);
+    }
+}
+
+// ==========================================
+// 地址管理与地图定位逻辑
+// ==========================================
+function renderMallAddress() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    let addresses = JSON.parse(ChatDB.getItem(`mall_address_${accountId}`) || '[]');
+    const listEl = document.getElementById('mallAddressList');
+    listEl.innerHTML = '';
+
+    if (addresses.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; padding:40px 0; font-size:13px;">暂无收货地址，请添加</div>';
+        return;
+    }
+
+    addresses.forEach((addr, index) => {
+        const card = document.createElement('div');
+        card.className = 'mall-address-card';
+        card.innerHTML = `
+            <div class="mall-address-info">
+                <div class="mall-address-name">${addr.name} <span>${addr.phone}</span></div>
+                <div class="mall-address-detail">${addr.detail}</div>
+            </div>
+            <div class="mall-address-edit" onclick="deleteMallAddress(${index})">
+                <svg viewBox="0 0 24 24" width="20" height="20" stroke="#ff3b30" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            </div>
+        `;
+        listEl.appendChild(card);
+    });
+}
+
+let mallMapInstance = null;
+
+function initMallRealMap() {
+    if (!mallMapInstance) {
+        mallMapInstance = new maplibregl.Map({
+            container: 'mallRealMapContainer',
+            style: {
+                'version': 8,
+                'sources': {
+                    'raster-tiles': {
+                        'type': 'raster',
+                        'tiles': ['https://a.tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                        'tileSize': 256,
+                        'attribution': '© OpenStreetMap'
+                    }
+                },
+                'layers': [{
+                    'id': 'simple-tiles',
+                    'type': 'raster',
+                    'source': 'raster-tiles',
+                    'minzoom': 0,
+                    'maxzoom': 22
+                }]
+            },
+            center: [116.4074, 39.9042],
+            zoom: 14,
+            pitch: 0,
+            bearing: 0
+        });
+        mallMapInstance.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+    }
+    setTimeout(() => {
+        mallMapInstance.resize();
+        getMallRealLocation();
+    }, 300);
+}
+
+function openMallAddressAddPage() {
+    document.getElementById('mallAddrName').value = '';
+    document.getElementById('mallAddrPhone').value = '';
+    document.getElementById('mallAddrDetail').value = '';
+    document.getElementById('mallLocationSearchInput').value = '';
+    document.getElementById('mallSubPageAddressAdd').classList.add('show');
+    initMallRealMap();
+}
+
+function saveMallAddress() {
+    const name = document.getElementById('mallAddrName').value.trim();
+    const phone = document.getElementById('mallAddrPhone').value.trim();
+    const detail = document.getElementById('mallAddrDetail').value.trim();
+
+    if (!name || !phone || !detail) return alert('请填写完整的地址信息！');
+    if (!/^1\d{10}$/.test(phone)) return alert('请输入正确的11位手机号！');
+
+    const accountId = ChatDB.getItem('current_mall_login');
+    let addresses = JSON.parse(ChatDB.getItem(`mall_address_${accountId}`) || '[]');
+    
+    addresses.push({ name, phone, detail });
+    ChatDB.setItem(`mall_address_${accountId}`, JSON.stringify(addresses));
+    
+    closeMallSubPage('mallSubPageAddressAdd');
+    renderMallAddress();
+}
+
+function deleteMallAddress(index) {
+    if (confirm('确定要删除该地址吗？')) {
+        const accountId = ChatDB.getItem('current_mall_login');
+        let addresses = JSON.parse(ChatDB.getItem(`mall_address_${accountId}`) || '[]');
+        addresses.splice(index, 1);
+        ChatDB.setItem(`mall_address_${accountId}`, JSON.stringify(addresses));
+        renderMallAddress();
+    }
+}
+
+async function getMallRealLocation() {
+    const updateLocationUI = (lat, lng, source) => {
+        if (mallMapInstance) {
+            mallMapInstance.flyTo({ center: [lng, lat], zoom: 15, speed: 1.5 });
+        }
+        document.getElementById('mallLocationSearchInput').value = `我的当前位置`;
+        document.getElementById('mallAddrDetail').value = `我的当前位置`;
+    };
+
+    if ("geolocation" in navigator) {
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                updateLocationUI(position.coords.latitude, position.coords.longitude, "GPS");
+            },
+            async (error) => {
+                console.warn("GPS定位失败，尝试网络IP定位兜底...", error);
+                try {
+                    const res = await fetch('https://freeipapi.com/api/json');
+                    const data = await res.json();
+                    if (data.latitude && data.longitude) {
+                        updateLocationUI(data.latitude, data.longitude, "网络定位");
+                    } else {
+                        throw new Error("IP定位无坐标");
+                    }
+                } catch (e) {
+                    alert("获取定位彻底失败，请手动滑动地图选择位置。");
+                }
+            },
+            { timeout: 4000, enableHighAccuracy: true }
+        );
+    } else {
+        try {
+            const res = await fetch('https://freeipapi.com/api/json');
+            const data = await res.json();
+            updateLocationUI(data.latitude, data.longitude, "网络定位");
+        } catch (e) {
+            alert("设备不支持且网络定位失败，请手动滑动地图。");
+        }
+    }
+}
+
+async function searchMallLocation() {
+    const query = document.getElementById('mallLocationSearchInput').value.trim();
+    if (!query) return alert('请输入要搜索的位置！');
+    
+    try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`);
+        const data = await res.json();
+        
+        if (data && data.length > 0) {
+            const lat = parseFloat(data[0].lat);
+            const lon = parseFloat(data[0].lon);
+            if (mallMapInstance) {
+                mallMapInstance.flyTo({ center: [lon, lat], zoom: 15, speed: 1.5 });
+            }
+            const displayName = data[0].display_name.split(',')[0];
+            document.getElementById('mallLocationSearchInput').value = displayName;
+            document.getElementById('mallAddrDetail').value = displayName;
+        } else {
+            alert('未找到该位置，请尝试更换关键词。');
+        }
+    } catch (e) {
+        alert('搜索失败，请检查网络连接。');
+    }
+}
+
+function renderMallProfile(accountId) {
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const acc = accounts.find(a => a.id === accountId);
+    if (acc) {
+        const avatarEl = document.getElementById('mallProfileAvatar');
+        if (avatarEl) {
+            avatarEl.style.backgroundImage = `url('${acc.avatarUrl || ''}')`;
+            avatarEl.innerText = acc.avatarUrl ? '' : (acc.netName || 'U').charAt(0).toUpperCase();
+        }
+        const nameEl = document.getElementById('mallProfileName');
+        if (nameEl) nameEl.innerText = acc.netName || '未命名';
+    }
+}
+
+function switchMallTab(tabId, event) {
+    document.querySelectorAll('.mall-page').forEach(page => page.classList.remove('active'));
+    document.querySelectorAll('.mall-nav-item').forEach(nav => nav.classList.remove('active'));
+
+    document.getElementById('mall-page-' + tabId).classList.add('active');
+    if (event) event.currentTarget.classList.add('active');
+
+    const titleMap = { 'home': 'Shopping', 'shops': 'Shops', 'cart': 'Cart', 'profile': 'Profile' };
+    document.getElementById('mallHeaderTitle').innerText = titleMap[tabId];
+    
+    if (tabId === 'profile') {
+        updateMallOrderBadges(); // 切换到我的页面时刷新红点
+    }
+}
+
+// ==========================================
+// API 动态生成商城数据与世界书逻辑 (新版折叠弹窗)
+// ==========================================
+
+function updateMallWbSelectText() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    const selectedWbs = JSON.parse(ChatDB.getItem(`mall_wb_selection_${accountId}`) || '[]');
+    const textEl = document.getElementById('mallWbSelectText');
+    if (textEl) {
+        if (selectedWbs.length > 0) {
+            textEl.innerHTML = `已选 ${selectedWbs.length} 个 <svg viewBox="0 0 24 24" width="16" height="16" stroke="#ccc" stroke-width="2" fill="none"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
+            textEl.style.color = '#111';
+        } else {
+            textEl.innerHTML = `未选择 <svg viewBox="0 0 24 24" width="16" height="16" stroke="#ccc" stroke-width="2" fill="none"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
+            textEl.style.color = '#888';
+        }
+    }
+}
+
+// 打开世界书选择弹窗 (完全复刻 Char 编辑页的折叠多选逻辑)
+function openMallWbSelectModal() {
+    const listEl = document.getElementById('mallWbSelectList');
+    listEl.innerHTML = '';
+    
+    let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { groups: [], entries: [] };
+    // 核心修复：如果 groups 为空数组，强制补全默认分组，防止不渲染
+    if (!wbData.groups || wbData.groups.length === 0) wbData.groups = ['默认分组'];
+    if (!wbData.entries) wbData.entries = [];
+    
+    const accountId = ChatDB.getItem('current_mall_login');
+    tempMallWbSelection = JSON.parse(ChatDB.getItem(`mall_wb_selection_${accountId}`) || '[]');
+    
+    if (wbData.entries.length === 0) {
+        listEl.innerHTML = '<div style="padding: 20px; text-align: center; color: #aaa; font-size: 12px;">暂无世界书数据</div>';
+    } else {
+        wbData.groups.forEach(group => {
+            // 核心修复：如果词条没有 group 属性，默认归类到 '默认分组'，防止被过滤掉导致不显示
+            const groupEntries = wbData.entries.filter(e => (e.group || '默认分组') === group);
+            if (groupEntries.length === 0) return;
+            
+            const groupContainer = document.createElement('div');
+            groupContainer.style.borderBottom = '1px solid #f5f5f5';
+            
+            const groupHeader = document.createElement('div');
+            groupHeader.style.display = 'flex';
+            groupHeader.style.alignItems = 'center';
+            groupHeader.style.justifyContent = 'space-between';
+            groupHeader.style.padding = '15px 5px';
+            groupHeader.style.cursor = 'pointer';
+            
+            const leftDiv = document.createElement('div');
+            leftDiv.style.display = 'flex';
+            leftDiv.style.alignItems = 'center';
+            leftDiv.style.gap = '12px';
+            
+            const groupCb = document.createElement('input');
+            groupCb.type = 'checkbox';
+            groupCb.setAttribute('data-mall-group-target', group);
+            groupCb.style.width = '18px';
+            groupCb.style.height = '18px';
+            groupCb.style.cursor = 'pointer';
+            groupCb.style.accentColor = '#333';
+            
+            const allSelected = groupEntries.every(e => tempMallWbSelection.includes(e.id));
+            groupCb.checked = allSelected;
+            
+            groupCb.onclick = (e) => e.stopPropagation();
+            
+            groupCb.onchange = (e) => {
+                const isChecked = e.target.checked;
+                document.querySelectorAll(`.mall-wb-entry-checkbox[data-mall-group-name="${group}"]`).forEach(cb => {
+                    cb.checked = isChecked;
+                    if (isChecked && !tempMallWbSelection.includes(cb.value)) {
+                        tempMallWbSelection.push(cb.value);
+                    } else if (!isChecked) {
+                        tempMallWbSelection = tempMallWbSelection.filter(id => id !== cb.value);
+                    }
+                });
+            };
+            
+            const titleSpan = document.createElement('span');
+            titleSpan.innerText = group;
+            titleSpan.style.fontSize = '15px';
+            titleSpan.style.color = '#333';
+            titleSpan.style.fontWeight = '500';
+            
+            leftDiv.appendChild(groupCb);
+            leftDiv.appendChild(titleSpan);
+            
+            const arrowSvg = document.createElement('div');
+            arrowSvg.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="#aaa" style="transition: transform 0.2s;"><path d="M7 10l5 5 5-5z"/></svg>`;
+            const arrowIcon = arrowSvg.firstChild;
+            
+            groupHeader.appendChild(leftDiv);
+            groupHeader.appendChild(arrowSvg);
+            
+            const entriesContainer = document.createElement('div');
+            entriesContainer.style.display = 'none';
+            entriesContainer.style.paddingBottom = '10px';
+            
+            groupHeader.onclick = () => {
+                const isHidden = entriesContainer.style.display === 'none';
+                entriesContainer.style.display = isHidden ? 'block' : 'none';
+                arrowIcon.style.transform = isHidden ? 'rotate(180deg)' : 'rotate(0deg)';
+            };
+            
+            groupEntries.forEach(entry => {
+                const entryDiv = document.createElement('div');
+                entryDiv.style.display = 'flex';
+                entryDiv.style.alignItems = 'center';
+                entryDiv.style.gap = '12px';
+                entryDiv.style.padding = '12px 5px 12px 35px';
+                
+                const entryCb = document.createElement('input');
+                entryCb.type = 'checkbox';
+                entryCb.className = `mall-wb-entry-checkbox`;
+                entryCb.setAttribute('data-mall-group-name', group);
+                entryCb.value = entry.id;
+                entryCb.checked = tempMallWbSelection.includes(entry.id);
+                
+                entryCb.onchange = (e) => {
+                    if (e.target.checked) {
+                        if (!tempMallWbSelection.includes(entry.id)) tempMallWbSelection.push(entry.id);
+                    } else {
+                        tempMallWbSelection = tempMallWbSelection.filter(id => id !== entry.id);
+                    }
+                    const allCbs = Array.from(document.querySelectorAll(`.mall-wb-entry-checkbox[data-mall-group-name="${group}"]`));
+                    const allChecked = allCbs.every(cb => cb.checked);
+                    document.querySelector(`input[data-mall-group-target="${group}"]`).checked = allChecked;
+                };
+                
+                const entryTitle = document.createElement('span');
+                entryTitle.innerText = entry.title || '未命名';
+                entryTitle.style.fontSize = '14px';
+                entryTitle.style.color = '#666';
+                
+                entryDiv.appendChild(entryCb);
+                entryDiv.appendChild(entryTitle);
+                entriesContainer.appendChild(entryDiv);
+            });
+            
+            groupContainer.appendChild(groupHeader);
+            groupContainer.appendChild(entriesContainer);
+            listEl.appendChild(groupContainer);
+        });
+    }
+    
+    document.getElementById('mallWbSelectModalOverlay').classList.add('show');
+}
+
+function closeMallWbSelectModal() {
+    document.getElementById('mallWbSelectModalOverlay').classList.remove('show');
+}
+
+function confirmMallWbSelect() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    ChatDB.setItem(`mall_wb_selection_${accountId}`, JSON.stringify(tempMallWbSelection));
+    updateMallWbSelectText();
+    closeMallWbSelectModal();
+}
+
+// 点击空白处关闭弹窗
+document.addEventListener('click', (e) => {
+    const overlay = document.getElementById('mallWbSelectModalOverlay');
+    const modal = overlay ? overlay.querySelector('.preset-modal') : null;
+    if (overlay && overlay.classList.contains('show') && modal && !modal.contains(e.target)) {
+        // 确保不是点击了打开按钮本身
+        const openBtn = document.querySelector('.mall-settings-item[onclick="openMallWbSelectModal()"]');
+        if (openBtn && !openBtn.contains(e.target)) {
+            closeMallWbSelectModal();
+        }
+    }
+});
+
+// 右上角刷新按钮 -> 打开角色选择弹窗
+function refreshMallData() {
+    const listEl = document.getElementById('mallCharSelectList');
+    listEl.innerHTML = '';
+    
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    if (chars.length === 0) {
+        listEl.innerHTML = '<div style="text-align:center; color:#888; font-size:13px; padding:20px;">暂无角色，请先在 Chat 中创建</div>';
+    } else {
+        chars.forEach(char => {
+            const card = document.createElement('div');
+            card.className = 'mall-char-card';
+            card.onclick = () => {
+                closeMallCharSelectModal();
+                generateMallDataAPI(char.id);
+            };
+            card.innerHTML = `
+                <div class="mall-char-avatar" style="background-image: url('${char.avatarUrl || ''}');"></div>
+                <div class="mall-char-name">${char.name || '未命名'}</div>
+            `;
+            listEl.appendChild(card);
+        });
+    }
+    
+    document.getElementById('mallCharSelectModal').classList.add('show');
+}
+
+function closeMallCharSelectModal() {
+    document.getElementById('mallCharSelectModal').classList.remove('show');
+}
+
+// 调用大模型 API 生成专属商城数据
+async function generateMallDataAPI(charId) {
+    const accountId = ChatDB.getItem('current_mall_login');
+    if (!accountId) return alert('请先登录商城！');
+
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return alert('请先在 Chat 设置中配置 API！');
+
+    let chars = JSON.parse(ChatDB.getItem('chat_chars') || '[]');
+    const char = chars.find(c => c.id === charId);
+    if (!char) return;
+
+    // 获取当前登录用户的面具
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === accountId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+    const userDesc = persona ? persona.persona : '普通用户';
+    const userName = account ? (account.netName || 'User') : 'User';
+    const userRealName = persona ? (persona.realName || userName) : userName;
+
+    // 获取选中的商城世界书
+    let activeWbs = [];
+    const selectedWbIds = JSON.parse(ChatDB.getItem(`mall_wb_selection_${accountId}`) || '[]');
+    if (selectedWbIds.length > 0) {
+        let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+        let entries = wbData.entries.filter(e => selectedWbIds.includes(e.id));
+        entries.forEach(entry => {
+            activeWbs.push(entry.content);
+        });
+    }
+
+    // 构建 Prompt
+    let prompt = `你现在正在扮演角色：${char.name}。\n`;
+    prompt += `【你的设定】：${char.description || '无'}\n`;
+    prompt += `【用户身份】：用户的网名是：【${userName}】，真实名字是：【${userRealName}】。请严格区分网名和真名。TA在你的生活中的角色/人设是：${userDesc}。\n`;
+    
+    if (activeWbs.length > 0) {
+        prompt += `【世界书背景】：\n${activeWbs.join('\n')}\n`;
+    }
+
+    prompt += `\n请基于你的人设、当前生活状态以及世界书背景，生成你手机里“Shopping (商城/外卖)”APP的相关数据。
+商品和店铺内容应该符合你的消费习惯、兴趣爱好、经济水平，或者可能包含准备买给 ${userName} 的礼物。
+
+【重要要求】：
+1. 必须混合包含实物商品（网购）和外卖餐饮。
+2. 绝对不要使用任何 Emoji 表情符号！所有的图标(logo/img)请使用简短的文字描述，例如：[咖啡图]、[U家]、[数码图]。
+3. 生成 3-4 个店铺 (shops) 和 6-8 个商品 (products)。商品必须关联到你生成的店铺的 id。
+
+必须返回合法的 JSON 对象，结构如下：
+{
+  "shops": [
+    { "id": "s1", "name": "店铺名称", "desc": "店铺简介", "logo": "[文字图标]", "tag": "品牌直营/外卖30分钟达" }
+  ],
+  "products": [
+    { 
+      "id": "p1", 
+      "shopId": "s1", 
+      "type": "shopping 或 delivery", 
+      "title": "商品名称", 
+      "price": 99.00, 
+      "img": "[文字图标]", 
+      "tag": "包邮/外卖45分钟达", 
+      "desc": "商品详细描述" 
+    }
+  ]
+}`;
+
+    const btn = document.getElementById('mallRefreshBtn');
+    btn.classList.add('spinning');
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature: 0.8 })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            const parsed = JSON.parse(replyRaw);
+            
+            if (parsed.shops && parsed.products) {
+                // 保存自定义数据
+                ChatDB.setItem(`mall_custom_data_${accountId}`, JSON.stringify(parsed));
+                // 重新渲染
+                initMallData();
+                alert(`商城数据生成成功！\n基于角色：${char.name}`);
+            } else {
+                throw new Error('JSON 结构不完整');
+            }
+        } else {
+            throw new Error('API 请求失败');
+        }
+    } catch (e) {
+        alert('生成失败，请检查 API 配置或重试。\n' + e.message);
+    } finally {
+        btn.classList.remove('spinning');
+    }
+}
+
+// ==========================================
+// 手动添加商品/店铺逻辑 (全屏页面版)
+// ==========================================
+let currentMallAddType = 'product';
+
+function openMallAddPage() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    if (!accountId) return alert('请先登录商城！');
+    
+    // 渲染店铺下拉列表
+    const mallData = getMallData();
+    const shopSelect = document.getElementById('mallAddProductShopId');
+    shopSelect.innerHTML = '';
+    if (mallData.shops.length === 0) {
+        shopSelect.innerHTML = '<option value="">暂无店铺，请先添加店铺</option>';
+    } else {
+        mallData.shops.forEach(shop => {
+            shopSelect.innerHTML += `<option value="${shop.id}">${shop.name}</option>`;
+        });
+    }
+    
+    document.getElementById('mallSubPageAdd').classList.add('show');
+    switchMallAddTab('product'); // 默认打开商品页
+}
+
+function closeMallAddPage() {
+    document.getElementById('mallSubPageAdd').classList.remove('show');
+}
+
+function switchMallAddTab(type) {
+    currentMallAddType = type;
+    
+    // 切换 Tab 样式
+    document.getElementById('mallAddTabProduct').classList.remove('active');
+    document.getElementById('mallAddTabShop').classList.remove('active');
+    
+    // 切换表单显示
+    document.getElementById('mallAddProductForm').classList.remove('active');
+    document.getElementById('mallAddShopForm').classList.remove('active');
+    
+    if (type === 'product') {
+        document.getElementById('mallAddTabProduct').classList.add('active');
+        document.getElementById('mallAddProductForm').classList.add('active');
+    } else {
+        document.getElementById('mallAddTabShop').classList.add('active');
+        document.getElementById('mallAddShopForm').classList.add('active');
+    }
+}
+
+function confirmMallAdd() {
+    const accountId = ChatDB.getItem('current_mall_login');
+    if (!accountId) return alert('请先登录商城！');
+    
+    let mallData = getMallData();
+    
+    if (currentMallAddType === 'product') {
+        const title = document.getElementById('mallAddProductTitle').value.trim();
+        const price = parseFloat(document.getElementById('mallAddProductPrice').value);
+        const img = document.getElementById('mallAddProductImg').value.trim() || '[图]';
+        const tag = document.getElementById('mallAddProductTag').value.trim();
+        const desc = document.getElementById('mallAddProductDesc').value.trim();
+        const shopId = document.getElementById('mallAddProductShopId').value;
+        const pType = document.getElementById('mallAddProductType').value;
+        
+        if (!title || isNaN(price) || !shopId) return alert('请填写完整的商品信息，并确保已选择店铺！');
+        
+        const newProduct = {
+            id: 'p_' + Date.now(),
+            shopId: shopId,
+            type: pType,
+            title: title,
+            price: price,
+            img: img,
+            tag: tag,
+            desc: desc
+        };
+        mallData.products.unshift(newProduct);
+        
+    } else {
+        const name = document.getElementById('mallAddShopName').value.trim();
+        const logo = document.getElementById('mallAddShopLogo').value.trim() || '[店]';
+        const tag = document.getElementById('mallAddShopTag').value.trim();
+        const desc = document.getElementById('mallAddShopDesc').value.trim();
+        
+        if (!name) return alert('请填写店铺名称！');
+        
+        const newShop = {
+            id: 's_' + Date.now(),
+            name: name,
+            desc: desc,
+            logo: logo,
+            tag: tag
+        };
+        mallData.shops.unshift(newShop);
+    }
+    
+    ChatDB.setItem(`mall_custom_data_${accountId}`, JSON.stringify(mallData));
+    initMallData();
+    closeMallAddPage();
+    alert('添加成功！');
+    
+    // 清空表单
+    document.getElementById('mallAddProductTitle').value = '';
+    document.getElementById('mallAddProductPrice').value = '';
+    document.getElementById('mallAddProductImg').value = '';
+    document.getElementById('mallAddProductTag').value = '';
+    document.getElementById('mallAddProductDesc').value = '';
+    document.getElementById('mallAddShopName').value = '';
+    document.getElementById('mallAddShopLogo').value = '';
+    document.getElementById('mallAddShopTag').value = '';
+    document.getElementById('mallAddShopDesc').value = '';
+}

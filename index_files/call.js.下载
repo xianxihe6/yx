@@ -1,0 +1,1747 @@
+// ==========================================
+// Call APP 专属逻辑 (call.js)
+// ==========================================
+
+function openCallAppPanel() {
+    document.getElementById('callAppPanel').style.display = 'flex';
+    renderCallRecents();
+    renderCallContacts();
+    renderCallServicePage();
+    
+    // 如果有正在进行的通话，并且小窗显示着，恢复全屏
+    if (currentCallTargetId && document.getElementById('callMiniWindow').classList.contains('show')) {
+        toggleCallMiniWindow(false);
+    }
+}
+
+function closeCallAppPanel() {
+    document.getElementById('callAppPanel').style.display = 'none';
+    // 退出页面时，如果有通话，自动切换到全局悬浮小窗
+    if (currentCallTargetId) {
+        toggleCallMiniWindow(true);
+    }
+}
+
+// Tab 切换逻辑
+function switchCallTab(tabName) {
+    document.querySelectorAll('.call-tab-page').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.call-nav-item').forEach(el => el.classList.remove('active'));
+    
+    document.getElementById('call-page-' + tabName).classList.add('active');
+    document.getElementById('call-nav-' + tabName).classList.add('active');
+
+    // 动态更新顶栏标题
+    const titleEl = document.getElementById('callHeaderTitle');
+    if(tabName === 'recents') titleEl.innerText = 'Recents';
+    if(tabName === 'contacts') titleEl.innerText = 'Contacts';
+    if(tabName === 'service') {
+        titleEl.innerText = 'Service';
+        renderCallServicePage();
+    }
+}
+
+// 格式化时间
+function formatCallTime(timestamp) {
+    const date = new Date(timestamp);
+    const now = new Date();
+    if (date.toDateString() === now.toDateString()) {
+        return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    } else {
+        return `${date.getMonth() + 1}月${date.getDate()}日`;
+    }
+}
+
+// 格式化时长
+function formatDuration(seconds) {
+    if (seconds === 0) return '未接通';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    if (m > 0) return `${m}分${s}秒`;
+    return `${s}秒`;
+}
+
+// 渲染最近通话 (从真实数据库读取)
+function renderCallRecents() {
+    const listEl = document.getElementById('callRecentsList');
+    listEl.innerHTML = '';
+    
+    if (typeof isCallRecentsEditing !== 'undefined' && isCallRecentsEditing) {
+        listEl.classList.add('is-call-editing');
+    } else {
+        listEl.classList.remove('is-call-editing');
+    }
+    
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 13px; margin-top: 40px;">请先登录 Chat 账号</div>';
+        return;
+    }
+
+    let allEntities = getAllEntities();
+    let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+    let history = JSON.parse(ChatDB.getItem(`call_history_${currentLoginId}`) || '[]');
+
+    if (history.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 13px; margin-top: 40px;">暂无通话记录</div>';
+        return;
+    }
+
+    // 倒序渲染
+    history.slice().reverse().forEach(record => {
+        const targetEntity = allEntities.find(e => e.id === record.targetId);
+        const displayName = targetEntity ? (remarks[targetEntity.id] || targetEntity.netName || targetEntity.name) : '未知号码';
+        const phone = targetEntity ? (targetEntity.account || '未知') : record.targetId; // 如果找不到实体，可能存的就是号码
+        const avatarUrl = targetEntity ? targetEntity.avatarUrl : '';
+        
+        const timeStr = formatCallTime(record.timestamp);
+        const isMissed = record.type === 'missed';
+        let typeStr = '呼出通话';
+        if (record.type === 'in') typeStr = '呼入通话';
+        if (record.type === 'missed') typeStr = '未接来电';
+
+        const item = document.createElement('div');
+        item.className = 'call-list-card';
+        
+        // 点击卡片主体逻辑
+        item.onclick = () => {
+            if (typeof isCallRecentsEditing !== 'undefined' && isCallRecentsEditing) {
+                toggleCallRecordSelection(record.id);
+            } else {
+                openCallDetail(record, displayName, phone, avatarUrl);
+            }
+        };
+        
+        let avatarHtml = avatarUrl 
+            ? `<div class="call-avatar" style="background-image: url('${avatarUrl}')"></div>`
+            : `<div class="call-avatar">${displayName.charAt(0)}</div>`;
+
+        const isChecked = (typeof selectedCallRecords !== 'undefined' && selectedCallRecords.has(record.id));
+        let checkboxHtml = `<div class="call-record-checkbox ${isChecked ? 'checked' : ''}" id="call-checkbox-${record.id}"></div>`;
+
+        item.innerHTML = `
+            ${checkboxHtml}
+            ${avatarHtml}
+            <div class="call-info">
+                <div class="call-name" style="color: ${isMissed ? '#ff3b30' : '#111'};">${displayName}</div>
+                <div class="call-sub-text">
+                    ${isMissed ? '<svg viewBox="0 0 24 24" width="12" height="12" fill="#ff3b30"><path d="M19 5h-5V3h7v7h-2V5zM5 19h5v2H3v-7h2v5z"/></svg>' : '<svg viewBox="0 0 24 24" width="12" height="12" fill="#888"><path d="M5 19h5v2H3v-7h2v5zM19 5h-5V3h7v7h-2V5z"/></svg>'}
+                    ${typeStr} · ${timeStr}
+                </div>
+            </div>
+            <div class="call-detail-icon" onclick="event.stopPropagation(); openCallDetail(JSON.parse(decodeURIComponent('${encodeURIComponent(JSON.stringify(record))}')), '${displayName}', '${phone}', '${avatarUrl || ''}')">
+                <svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            </div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+// 渲染通讯录
+function renderCallContacts() {
+    const listEl = document.getElementById('callContactsList');
+    listEl.innerHTML = '';
+    
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return;
+
+    let allEntities = getAllEntities();
+    let contacts = JSON.parse(ChatDB.getItem(`contacts_${currentLoginId}`) || '[]');
+    let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+
+    // 核心修复：增加 e.id !== currentLoginId 过滤掉自己
+    let friends = contacts.map(id => allEntities.find(e => e.id === id)).filter(e => e && !e.isGroup && e.id !== currentLoginId);
+
+    if (friends.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 13px; margin-top: 40px;">暂无联系人</div>';
+        return;
+    }
+
+    friends.forEach(friend => {
+        const displayName = remarks[friend.id] || friend.netName || friend.name;
+        const phone = friend.account || '未知号码';
+
+        const item = document.createElement('div');
+        item.className = 'call-list-card';
+        // 点击联系人，进入联系人主页
+        item.onclick = () => openCallContactDetail(friend.id);
+        
+        let avatarHtml = friend.avatarUrl 
+            ? `<div class="call-avatar" style="background-image: url('${friend.avatarUrl}')"></div>`
+            : `<div class="call-avatar">${displayName.charAt(0)}</div>`;
+
+        item.innerHTML = `
+            ${avatarHtml}
+            <div class="call-info">
+                <div class="call-name">${displayName}</div>
+                <div class="call-sub-text">${phone}</div>
+            </div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+// 拨号盘 Modal 逻辑
+function openCallKeypad() {
+    document.getElementById('callKeypadOverlay').classList.add('show');
+}
+function closeCallKeypad() {
+    document.getElementById('callKeypadOverlay').classList.remove('show');
+}
+
+// 拨号盘输入逻辑
+let callCurrentNumber = '';
+function callUpdateDisplay() {
+    document.getElementById('callDialNumber').innerText = callCurrentNumber;
+    if (callCurrentNumber.length > 0) {
+        document.getElementById('callBtnDelete').style.display = 'block';
+    } else {
+        document.getElementById('callBtnDelete').style.display = 'none';
+    }
+}
+function callInputNumber(num) {
+    if (callCurrentNumber.length < 15) {
+        callCurrentNumber += num;
+        callUpdateDisplay();
+    }
+}
+function callDeleteNumber() {
+    if (callCurrentNumber.length > 0) {
+        callCurrentNumber = callCurrentNumber.slice(0, -1);
+        callUpdateDisplay();
+    }
+}
+
+// 呼叫逻辑
+let callAppTimer;
+let callAppSeconds = 0;
+let currentCallTargetId = null; // 记录当前正在通话的实体ID
+let currentCallTranscript = []; // 记录当前通话的文字内容
+let callConnectedAt = null; // 记录接通时间戳
+
+function saveActiveCallState() {
+    if (!currentCallTargetId) {
+        ChatDB.removeItem('active_call_state');
+        return;
+    }
+    const state = {
+        targetId: currentCallTargetId,
+        status: callAppSeconds > 0 ? 'connected' : 'calling',
+        connectedAt: callConnectedAt,
+        transcript: currentCallTranscript
+    };
+    ChatDB.setItem('active_call_state', JSON.stringify(state));
+}
+
+// --- 通话记录多选与删除逻辑 ---
+let isCallRecentsEditing = false;
+let selectedCallRecords = new Set();
+
+function toggleCallRecentsEditMode() {
+    isCallRecentsEditing = !isCallRecentsEditing;
+    selectedCallRecords.clear();
+    
+    const editBtn = document.getElementById('callRecentsEditBtn');
+    const actionBar = document.getElementById('callMultiActionBar');
+    
+    if (isCallRecentsEditing) {
+        editBtn.innerText = '取消';
+        editBtn.style.color = '#888';
+        actionBar.classList.add('show');
+    } else {
+        editBtn.innerText = '编辑';
+        editBtn.style.color = '#007aff';
+        actionBar.classList.remove('show');
+    }
+    renderCallRecents();
+}
+
+function toggleCallRecordSelection(id) {
+    if (selectedCallRecords.has(id)) {
+        selectedCallRecords.delete(id);
+    } else {
+        selectedCallRecords.add(id);
+    }
+    const checkbox = document.getElementById(`call-checkbox-${id}`);
+    if (checkbox) {
+        if (selectedCallRecords.has(id)) {
+            checkbox.classList.add('checked');
+        } else {
+            checkbox.classList.remove('checked');
+        }
+    }
+}
+
+function selectAllCallRecords() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let history = JSON.parse(ChatDB.getItem(`call_history_${currentLoginId}`) || '[]');
+    
+    if (selectedCallRecords.size === history.length) {
+        // 取消全选
+        selectedCallRecords.clear();
+        document.getElementById('callSelectAllText').innerText = '全选';
+    } else {
+        // 全选
+        history.forEach(r => selectedCallRecords.add(r.id));
+        document.getElementById('callSelectAllText').innerText = '取消全选';
+    }
+    renderCallRecents();
+}
+
+function deleteSelectedCallRecords() {
+    if (selectedCallRecords.size === 0) {
+        return alert('请先选择要删除的通话记录');
+    }
+    if (confirm(`确定要删除选中的 ${selectedCallRecords.size} 条记录吗？此操作不可恢复。`)) {
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        let history = JSON.parse(ChatDB.getItem(`call_history_${currentLoginId}`) || '[]');
+        
+        // 过滤掉被选中的记录
+        history = history.filter(r => !selectedCallRecords.has(r.id));
+        ChatDB.setItem(`call_history_${currentLoginId}`, JSON.stringify(history));
+        
+        // 退出编辑模式并重新渲染
+        toggleCallRecentsEditMode();
+    }
+}
+
+function callExecuteDial() {
+    if (callCurrentNumber.length > 0) {
+        let allEntities = getAllEntities();
+        const targetEntity = allEntities.find(e => e.account === callCurrentNumber);
+        
+        if (targetEntity) {
+            callStartCall(targetEntity.id);
+        } else {
+            callStartCall(callCurrentNumber, true);
+        }
+        closeCallKeypad();
+    }
+}
+function callStartCall(targetIdOrNumber, isUnknown = false) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return alert('请先登录！');
+
+    let balance = parseFloat(ChatDB.getItem(`call_balance_${currentLoginId}`) || '0');
+    if (balance <= 0) {
+        if (typeof send10086Reminder === 'function') send10086Reminder(currentLoginId);
+        return alert('你的话费余额不足，无法打电话！请前往营业厅充值。');
+    }
+
+    let name = targetIdOrNumber;
+    let avatarUrl = '';
+    currentCallTargetId = targetIdOrNumber;
+    currentCallTranscript = []; 
+    document.getElementById('callTranscriptArea').innerHTML = ''; 
+    updateCallStatusUI(false); // 重置状态
+
+    if (!isUnknown) {
+        let allEntities = getAllEntities();
+        const targetEntity = allEntities.find(e => e.id === targetIdOrNumber);
+        if (targetEntity) {
+            let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+            name = remarks[targetEntity.id] || targetEntity.netName || targetEntity.name;
+            avatarUrl = targetEntity.avatarUrl;
+        }
+    }
+
+    document.getElementById('callCallingTargetName').innerText = name;
+    document.getElementById('callCallingStatusText').innerText = '正在呼叫...';
+    document.getElementById('callMiniTime').innerText = '正在呼叫...';
+    
+    const avatarEl = document.getElementById('callCallingTargetAvatar');
+    const miniAvatarEl = document.getElementById('callMiniAvatar');
+    if (avatarUrl) {
+        avatarEl.style.backgroundImage = `url('${avatarUrl}')`;
+        avatarEl.innerText = '';
+        miniAvatarEl.style.backgroundImage = `url('${avatarUrl}')`;
+    } else {
+        avatarEl.style.backgroundImage = 'none';
+        avatarEl.innerText = name.charAt(0);
+        miniAvatarEl.style.backgroundImage = 'none';
+    }
+
+    document.getElementById('callCallingScreen').classList.add('show');
+
+    // 模拟接通
+    setTimeout(() => {
+        if (document.getElementById('callCallingScreen').classList.contains('show') || document.getElementById('callMiniWindow').classList.contains('show')) {
+            callAppSeconds = 0;
+            callConnectedAt = Date.now(); // 记录绝对时间戳
+            document.getElementById('callCallingStatusText').innerText = '00:00';
+            document.getElementById('callMiniTime').innerText = '00:00';
+            callAppTimer = setInterval(() => {
+                callAppSeconds = Math.floor((Date.now() - callConnectedAt) / 1000); // 基于时间戳计算
+                const m = String(Math.floor(callAppSeconds / 60)).padStart(2, '0');
+                const s = String(callAppSeconds % 60).padStart(2, '0');
+                const timeStr = `${m}:${s}`;
+                document.getElementById('callCallingStatusText').innerText = timeStr;
+                document.getElementById('callMiniTime').innerText = timeStr;
+            }, 1000);
+        }
+    }, 2000);
+}
+
+// --- 小窗模式切换 ---
+function toggleCallMiniWindow(toMini) {
+    const fullScreen = document.getElementById('callCallingScreen');
+    const miniWindow = document.getElementById('callMiniWindow');
+    
+    if (toMini) {
+        fullScreen.classList.remove('show');
+        miniWindow.classList.add('show');
+        // 将小窗移动到最外层容器，保证在所有页面可见
+        document.getElementById('iphone-container').appendChild(miniWindow);
+    } else {
+        miniWindow.classList.remove('show');
+        fullScreen.classList.add('show');
+        // 恢复全屏时滚动到底部
+        const area = document.getElementById('callTranscriptArea');
+        area.scrollTop = area.scrollHeight;
+    }
+}
+
+// --- 状态 UI 切换 (涟漪与波浪) ---
+function updateCallStatusUI(isGenerating) {
+    const ripple = document.getElementById('callAvatarRipple');
+    const nameEl = document.getElementById('callCallingTargetName');
+    const statusWrap = document.getElementById('callCallingStatusWrap');
+
+    if (isGenerating) {
+        ripple.style.display = 'block';
+        nameEl.style.display = 'none';
+        statusWrap.style.display = 'flex';
+    } else {
+        ripple.style.display = 'none';
+        nameEl.style.display = 'block';
+        statusWrap.style.display = 'none';
+    }
+}
+
+// --- 模拟语音通话的文字交互逻辑 ---
+function sendCallMessage() {
+    const inputEl = document.getElementById('callChatInput');
+    const text = inputEl.value.trim();
+    if (!text) return;
+
+    // 增加 timestamp，方便后续与聊天室记录合并排序
+    currentCallTranscript.push({ role: 'user', content: text, timestamp: Date.now() });
+    saveActiveCallState();
+    inputEl.value = '';
+    renderCallTranscript();
+    
+    // 核心修改：取消自动回复，用户需要手动点击 AI 按钮
+}
+
+function renderCallTranscript() {
+    const area = document.getElementById('callTranscriptArea');
+    area.innerHTML = '';
+    currentCallTranscript.forEach(msg => {
+        const div = document.createElement('div');
+        div.className = `call-transcript-msg ${msg.role === 'user' ? 'me' : 'other'}`;
+        
+        let parts = msg.content.split(/(\*[^*]+\*|\([^)]+\))/g);
+        let html = '';
+        
+        parts.forEach(part => {
+            if (!part.trim()) return;
+            if (part.startsWith('*') || part.startsWith('(')) {
+                // 核心修改：去除首尾的 * 或 ( )，只保留纯文字作为旁白动作
+                let cleanAction = part.replace(/^[\*\(\)]+|[\*\(\)]+$/g, '').trim();
+                if(cleanAction) {
+                    html += `<div class="call-msg-action">${cleanAction}</div>`;
+                }
+            } else {
+                html += `
+                    <div class="call-msg-dialogue">
+                        <svg class="call-quote-svg" viewBox="0 0 24 24"><path d="M14.017 21v-7.391c0-5.704 3.731-9.57 8.983-10.609l.995 2.151c-2.432.917-3.995 3.638-3.995 5.849h4v10h-9.983zm-14.017 0v-7.391c0-5.704 3.748-9.57 9-10.609l.996 2.151c-2.433.917-3.996 3.638-3.996 5.849h3.983v10h-9.983z"/></svg>
+                        <span>${part.trim()}</span>
+                        <svg class="call-quote-svg right" viewBox="0 0 24 24"><path d="M14.017 21v-7.391c0-5.704 3.731-9.57 8.983-10.609l.995 2.151c-2.432.917-3.995 3.638-3.995 5.849h4v10h-9.983zm-14.017 0v-7.391c0-5.704 3.748-9.57 9-10.609l.996 2.151c-2.433.917-3.996 3.638-3.996 5.849h3.983v10h-9.983z"/></svg>
+                    </div>
+                `;
+            }
+        });
+        
+        div.innerHTML = html;
+        area.appendChild(div);
+    });
+    area.scrollTop = area.scrollHeight;
+}
+
+async function generateCallApiReply() {
+    if (!currentCallTargetId) return;
+    
+    updateCallStatusUI(true); 
+    
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        updateCallStatusUI(false);
+        return alert('请先配置 API！');
+    }
+
+    let chars = getAllEntities();
+    const char = chars.find(c => c.id === currentCallTargetId);
+    if (!char || char.isAccount) {
+        updateCallStatusUI(false);
+        return alert('对方是真实用户或未知号码，无法使用 AI 回复。');
+    }
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    
+    // 获取用户账号和人设信息
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+
+    const userRealName = persona ? (persona.realName || '未命名') : 'User';
+    const userNetName = account ? (account.netName || '未命名') : 'User';
+    const userPersona = persona ? (persona.persona || '无') : '无';
+    
+    // 获取上下文限制，如果没有设置则默认取 40 条
+    const contextLimit = parseInt(ChatDB.getItem(`chat_context_limit_${currentCallTargetId}`)) || 40;
+
+    // 明确分离微信历史和当前通话记录
+    let chatHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${currentCallTargetId}`) || '[]');
+    let recentChat = chatHistory.slice(-contextLimit); // 增加读取量，受设置控制
+
+    let memory = JSON.parse(ChatDB.getItem(`char_memory_${currentLoginId}_${currentCallTargetId}`) || '{}');
+    let memoryPrompt = '';
+    
+    // 1. 【常驻记忆】：核心记忆 (Core)
+    let coreMemories = memory.core || [];
+    if (coreMemories.length > 0) {
+        coreMemories.sort((a, b) => (a.weight || 5) - (b.weight || 5));
+        memoryPrompt += `[核心记忆 (Core Memory - 绝对不可遗忘)]\n`;
+        coreMemories.forEach(mem => {
+            memoryPrompt += `- ${mem.content}\n`;
+        });
+        memoryPrompt += `\n`;
+    }
+
+    // 2. 【近期剧情】：读取自定义条数的最新总结
+    let recentCount = (memory.settings && memory.settings.recentSummaryCount !== undefined) ? memory.settings.recentSummaryCount : 3;
+    let allSummaries = memory.summary || [];
+    let recentSummaries = recentCount > 0 ? allSummaries.slice(-recentCount) : []; 
+    let olderSummaries = recentCount > 0 ? allSummaries.slice(0, -recentCount) : allSummaries;
+
+    if (recentSummaries.length > 0) {
+        memoryPrompt += `[近期剧情总结 (Story Context)]\n`;
+        recentSummaries.forEach(mem => {
+            memoryPrompt += `${mem.content}\n`;
+        });
+        memoryPrompt += `\n`;
+    }
+
+    // 3. 【动态检索】：向量语义检索旧总结
+    let retrievedMemories = [];
+    let recentContextText = recentChat.slice(-5).map(m => m.content.replace(/<[^>]+>/g, '')).join(' ');
+    if (currentCallTranscript.length > 0) {
+        recentContextText += ' ' + currentCallTranscript.slice(-3).map(m => m.content).join(' ');
+    }
+    let contextKeywords = typeof extractKeywordsForMemory === 'function' ? extractKeywordsForMemory(recentContextText) : [];
+
+    function calculateSemanticScore(memoryText, memoryTags, contextWords) {
+        if (typeof extractKeywordsForMemory !== 'function') return 0;
+        let memWords = extractKeywordsForMemory(memoryText);
+        if (memoryTags && memoryTags.length > 0) memWords = memWords.concat(memoryTags);
+        if (memWords.length === 0 || contextWords.length === 0) return 0;
+        let intersection = memWords.filter(w => contextWords.includes(w)).length;
+        let union = new Set([...memWords, ...contextWords]).size;
+        return intersection / union;
+    }
+
+    if (olderSummaries.length > 0 && contextKeywords.length > 0) {
+        olderSummaries.forEach(item => {
+            let score = calculateSemanticScore(item.content, item.tags, contextKeywords);
+            let weight = item.weight || 5;
+            let finalScore = score * (weight / 5); 
+            if (finalScore > 0.05) {
+                retrievedMemories.push({
+                    content: item.content,
+                    tags: item.tags || [],
+                    weight: weight,
+                    score: finalScore
+                });
+            }
+        });
+    }
+
+    if (retrievedMemories.length > 0) {
+        retrievedMemories.sort((a, b) => b.score - a.score);
+        let topMemories = retrievedMemories.slice(0, 3);
+        topMemories.sort((a, b) => a.weight - b.weight);
+        
+        memoryPrompt += `[脑海中闪过的旧回忆 (Flashback)]\n`;
+        memoryPrompt += `当聊到相关话题时，你突然回想起了以前的这些事：\n`;
+        topMemories.forEach(mem => {
+            let tagStr = mem.tags.length > 0 ? ` [标签: ${mem.tags.join(',')}]` : '';
+            memoryPrompt += `- (权重:${mem.weight})${tagStr} ${mem.content}\n`;
+        });
+        memoryPrompt += `(请自然地体现出你记得这些事，不要生硬地复述)\n\n`;
+    }
+
+    // 4. 【作者备注】
+    if (memory.note && memory.note.length > 0) {
+        memoryPrompt += `[System Note: ${memory.note.map(m => m.content).join(' ')}]\n\n`;
+    }
+
+    let activeWbs = [];
+    if (char.wbEntries && char.wbEntries.length > 0) {
+        let wbData = JSON.parse(ChatDB.getItem('worldbook_data')) || { entries: [] };
+        let entries = wbData.entries.filter(e => char.wbEntries.includes(e.id));
+        entries.forEach(entry => {
+            activeWbs.push(entry.content);
+        });
+    }
+    let wbPrompt = activeWbs.length > 0 ? `[世界书背景]\n${activeWbs.join('\n')}\n\n` : '';
+
+    // --- 方案1：构建标准化的 System Prompt ---
+    let systemPrompt = `你是${char.name}，你正在和用户“${userRealName}”进行语音通话。请牢记：你就是${char.name}，请完全沉浸在你的角色设定中。\n`;
+    systemPrompt += `【你的设定】：${char.description || '无'}\n`;
+    systemPrompt += `【用户情报】：用户的真名是“${userRealName}”，网名是“${userNetName}”。用户的设定是：${userPersona}。\n\n`;
+    
+    systemPrompt += memoryPrompt + wbPrompt;
+
+    systemPrompt += `【语音通话专属指示 (CRITICAL)】：\n`;
+    systemPrompt += `You are a real human being. You have finite energy, you get tired, your mind wanders, and your emotions fluctuate. Your logic is flawed; you possess no robotic perfection.\n`;
+    systemPrompt += `Grounded & Natural Tone (Anti-Cringe):\n`;
+    systemPrompt += `1. 语气要像真实的语音通话一样自然、口语化，可以带点语气词（嗯、啊、哦），绝对不要像机器或客服！\n`;
+    systemPrompt += `2. 绝对不要重复刚才已经说过的话！绝对不要重新打招呼！对话要自然，绝对不可以生硬！\n`;
+    systemPrompt += `3. Speak in a natural flow, with pauses, filler words, and realistic breathing sounds.\n`;
+    systemPrompt += `4. 【格式要求】：你可以使用 *动作描写* 或 (动作描写) 来表达你的神态和动作，这部分会被系统识别并特殊显示。除此之外的话语将被视为你说出口的语音。\n`;
+    systemPrompt += `5. 【禁止废话】：直接输出你的回复，绝对不要在开头输出“好的”、“我明白了”等 AI 助手的确认语！\n\n`;
+
+    if (recentChat.length > 0) {
+        systemPrompt += `--- 之前的微信聊天记录参考 (仅供了解背景，不要在通话中生硬复述) ---\n`;
+        recentChat.forEach(m => {
+            systemPrompt += `${m.role === 'user' ? userRealName : char.name}: ${m.content}\n`;
+        });
+        systemPrompt += `----------------------------\n\n`;
+    }
+
+    // --- 方案1：构建标准的 Messages 数组 ---
+    let messages = [{ role: 'system', content: systemPrompt }];
+
+    if (currentCallTranscript.length === 0) {
+        // 通话刚接通，给一个初始的用户提示，引导 AI 先开口
+        messages.push({ role: 'user', content: '(电话已接通，请你先开口说话)' });
+    } else {
+        // 将通话记录映射为标准的 user 和 assistant 角色
+        currentCallTranscript.forEach(m => {
+            let apiRole = m.role === 'user' ? 'user' : 'assistant';
+            messages.push({ role: apiRole, content: m.content });
+        });
+    }
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: messages, // 使用重构后的 messages 数组
+                temperature: 0.7
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let reply = data.choices[0].message.content.trim();
+            
+            // 1. 先按动作和语言拆分
+            let rawParts = reply.split(/(\*[^*]+\*|\([^)]+\))/g);
+            let chunks = [];
+            
+            rawParts.forEach(part => {
+                if (!part.trim()) return;
+                if (part.startsWith('*') || part.startsWith('(')) {
+                    chunks.push(part); // 动作作为一个整体保留
+                } else {
+                    // 语言部分按句号、问号、叹号、省略号拆分，保留标点符号
+                    let sentences = part.match(/[^。！？\.\!\?]+[。！？\.\!\?]*|.+/g);
+                    if (sentences) {
+                        sentences.forEach(s => {
+                            if (s.trim()) chunks.push(s);
+                        });
+                    }
+                }
+            });
+
+            // 2. 初始插入一条空消息
+            let msgObj = { role: 'char', content: '', timestamp: Date.now() };
+            currentCallTranscript.push(msgObj);
+            saveActiveCallState();
+            renderCallTranscript();
+
+            // 3. 异步逐个追加片段，模拟真实说话节奏
+            for (let i = 0; i < chunks.length; i++) {
+                let chunk = chunks[i];
+                msgObj.content += chunk;
+                saveActiveCallState();
+                renderCallTranscript();
+                
+                // 计算延迟时间：动作快一点，说话根据字数算时间
+                let delay = 1000; 
+                if (chunk.startsWith('*') || chunk.startsWith('(')) {
+                    delay = 800; // 动作描写停留 0.8 秒
+                } else {
+                    // 假设一秒读 5 个字，最少停留 1 秒，最多 4 秒
+                    delay = Math.max(1000, Math.min(4000, chunk.length * 200));
+                }
+                
+                // 如果不是最后一段，就等待一段时间再显示下一段
+                if (i < chunks.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+    } catch (e) {
+        console.error(e);
+    } finally {
+        updateCallStatusUI(false); 
+    }
+}
+
+// --- 呼叫与接听核心逻辑重构 ---
+let callWaitTimer; // 呼叫等待定时器
+
+// User 呼叫 Char
+function callStartCall(targetIdOrNumber, isUnknown = false) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return alert('请先登录！');
+
+    let balance = parseFloat(ChatDB.getItem(`call_balance_${currentLoginId}`) || '0');
+    if (balance <= 0) {
+        if (typeof send10086Reminder === 'function') send10086Reminder(currentLoginId);
+        return alert('你的话费余额不足，无法打电话！请前往营业厅充值。');
+    }
+
+    let name = targetIdOrNumber;
+    let avatarUrl = '';
+    currentCallTargetId = targetIdOrNumber;
+    currentCallTranscript = []; 
+    callConnectedAt = null;
+    saveActiveCallState();
+    document.getElementById('callTranscriptArea').innerHTML = ''; 
+    updateCallStatusUI(false); 
+
+    if (!isUnknown) {
+        let allEntities = getAllEntities();
+        const targetEntity = allEntities.find(e => e.id === targetIdOrNumber);
+        if (targetEntity) {
+            let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+            name = remarks[targetEntity.id] || targetEntity.netName || targetEntity.name;
+            avatarUrl = targetEntity.avatarUrl;
+        }
+    }
+
+    document.getElementById('callCallingTargetName').innerText = name;
+    document.getElementById('callCallingStatusText').innerText = '正在呼叫...';
+    document.getElementById('callMiniTime').innerText = '正在呼叫...';
+    
+    const avatarEl = document.getElementById('callCallingTargetAvatar');
+    const miniAvatarEl = document.getElementById('callMiniAvatar');
+    if (avatarUrl) {
+        avatarEl.style.backgroundImage = `url('${avatarUrl}')`;
+        avatarEl.innerText = '';
+        miniAvatarEl.style.backgroundImage = `url('${avatarUrl}')`;
+    } else {
+        avatarEl.style.backgroundImage = 'none';
+        avatarEl.innerText = name.charAt(0);
+        miniAvatarEl.style.backgroundImage = 'none';
+    }
+
+    // 核心修改：显示呼叫中状态，隐藏输入框
+    document.getElementById('callDialingControls').style.display = 'flex';
+    document.getElementById('callActiveControls').style.display = 'none';
+    document.getElementById('callCallingScreen').classList.add('show');
+
+    clearTimeout(callWaitTimer);
+
+    // 判断对方是否为 Char，如果是则调用 API 决定是否接听
+    let allEntities = getAllEntities();
+    const targetEntity = allEntities.find(e => e.id === targetIdOrNumber);
+
+    if (targetEntity && !targetEntity.isAccount && !isUnknown) {
+        checkCallAcceptanceAPI(targetEntity);
+    } else {
+        // 如果是未知号码或真实用户，默认 3 秒后接通
+        callWaitTimer = setTimeout(() => {
+            acceptCallConnection();
+        }, 3000);
+    }
+}
+
+// Char 主动呼叫 User (来电界面)
+function showIncomingCall(charId) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return;
+
+    let balance = parseFloat(ChatDB.getItem(`call_balance_${currentLoginId}`) || '0');
+    if (balance <= 0) {
+        // 记录未接
+        let history = JSON.parse(ChatDB.getItem(`call_history_${currentLoginId}`) || '[]');
+        history.push({
+            id: Date.now().toString(),
+            targetId: charId,
+            type: 'missed',
+            timestamp: Date.now(),
+            duration: 0,
+            content: '未接听 (已停机)'
+        });
+        ChatDB.setItem(`call_history_${currentLoginId}`, JSON.stringify(history));
+        if (typeof renderCallRecents === 'function') renderCallRecents();
+
+        // 告诉 Char
+        let chatHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${charId}`) || '[]');
+        chatHistory.push({
+            role: 'user',
+            type: 'hidden_system',
+            content: `[系统提示：你拨打的电话已停机。User因为手机欠费停机，无法接听你的语音通话。]`,
+            timestamp: Date.now()
+        });
+        ChatDB.setItem(`chat_history_${currentLoginId}_${charId}`, JSON.stringify(chatHistory));
+        
+        let targetHistory = JSON.parse(ChatDB.getItem(`chat_history_${charId}_${currentLoginId}`) || '[]');
+        targetHistory.push({
+            role: 'char',
+            type: 'hidden_system',
+            content: `[系统提示：你拨打的电话已停机。对方因为手机欠费停机，无法接听你的语音通话。]`,
+            timestamp: Date.now()
+        });
+        ChatDB.setItem(`chat_history_${charId}_${currentLoginId}`, JSON.stringify(targetHistory));
+
+        if (typeof showToast === 'function') showToast('手机已停机，拦截来电', 'error', 2000);
+        return;
+    }
+
+    let allEntities = getAllEntities();
+    const char = allEntities.find(e => e.id === charId);
+    if (!char) return;
+
+    let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+    const name = remarks[char.id] || char.netName || char.name;
+
+    document.getElementById('callIncomingName').innerText = name;
+    const avatarEl = document.getElementById('callIncomingAvatar');
+    if (char.avatarUrl) {
+        avatarEl.style.backgroundImage = `url('${char.avatarUrl}')`;
+    } else {
+        avatarEl.style.backgroundImage = 'none';
+    }
+
+    currentCallTargetId = charId;
+    
+    // 核心修改：将接听页面移动到最外层容器，保证全局可见
+    const incomingScreen = document.getElementById('callIncomingScreen');
+    document.getElementById('iphone-container').appendChild(incomingScreen);
+    incomingScreen.style.zIndex = '9999';
+    incomingScreen.classList.add('show');
+    
+    // 播放来电铃声 (如果有配置)
+    const soundUrl = ChatDB.getItem('sys_notif_sound');
+    if (soundUrl) {
+        window.incomingCallAudio = new Audio(soundUrl);
+        window.incomingCallAudio.loop = true;
+        window.incomingCallAudio.play().catch(e => console.log("自动播放铃声被拦截:", e));
+    }
+}
+
+function acceptIncomingCall() {
+    if (window.incomingCallAudio) {
+        window.incomingCallAudio.pause();
+        window.incomingCallAudio = null;
+    }
+    document.getElementById('callIncomingScreen').classList.remove('show');
+    
+    // 确保 Call APP 面板被打开，否则全屏通话界面可能不可见
+    document.getElementById('callAppPanel').style.display = 'flex';
+    
+    // 直接进入接通状态
+    const charId = currentCallTargetId;
+    callStartCall(charId);
+    
+    // 强制跳过等待，立即接通
+    clearTimeout(callWaitTimer);
+    document.getElementById('callDialingControls').style.display = 'none';
+    document.getElementById('callActiveControls').style.display = 'flex';
+    callAppSeconds = 0;
+    callConnectedAt = Date.now();
+    saveActiveCallState();
+    document.getElementById('callCallingStatusText').innerText = '00:00';
+    document.getElementById('callMiniTime').innerText = '00:00';
+    callAppTimer = setInterval(() => {
+        callAppSeconds++;
+        const m = String(Math.floor(callAppSeconds / 60)).padStart(2, '0');
+        const s = String(callAppSeconds % 60).padStart(2, '0');
+        const timeStr = `${m}:${s}`;
+        document.getElementById('callCallingStatusText').innerText = timeStr;
+        document.getElementById('callMiniTime').innerText = timeStr;
+    }, 1000);
+}
+
+function rejectIncomingCall() {
+    if (window.incomingCallAudio) {
+        window.incomingCallAudio.pause();
+        window.incomingCallAudio = null;
+    }
+    document.getElementById('callIncomingScreen').classList.remove('show');
+    
+    // 记录一条未接来电 (对方打来的)
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (currentLoginId && currentCallTargetId) {
+        let history = JSON.parse(ChatDB.getItem(`call_history_${currentLoginId}`) || '[]');
+        history.push({
+            id: Date.now().toString(),
+            targetId: currentCallTargetId,
+            type: 'in', // 呼入
+            timestamp: Date.now(),
+            duration: 0, // 0秒代表未接
+            content: '未接听'
+        });
+        ChatDB.setItem(`call_history_${currentLoginId}`, JSON.stringify(history));
+        renderCallRecents();
+    }
+    currentCallTargetId = null;
+}
+
+function callEndCall(isRejected = false) {
+    clearTimeout(callWaitTimer);
+    clearInterval(callAppTimer);
+    
+    // 如果是被拒绝，不覆盖“对方已拒绝”的文本
+    if (isRejected !== true) {
+        document.getElementById('callCallingStatusText').innerText = '通话结束';
+        document.getElementById('callMiniTime').innerText = '结束';
+    }
+    
+    setTimeout(() => {
+        document.getElementById('callCallingScreen').classList.remove('show');
+        document.getElementById('callMiniWindow').classList.remove('show');
+        
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        if (currentLoginId && currentCallTargetId) {
+            let contentStr = isRejected === true ? '对方已拒绝接听。' : '无通话内容记录。';
+            if (currentCallTranscript.length > 0) {
+                contentStr = currentCallTranscript.map(m => `${m.role === 'user' ? '我' : '对方'}: ${m.content}`).join('\n');
+                // 自动总结通话记录并存入记忆库
+                autoSummarizeCallToMemory(currentLoginId, currentCallTargetId, contentStr);
+            }
+
+            let history = JSON.parse(ChatDB.getItem(`call_history_${currentLoginId}`) || '[]');
+            history.push({
+                id: Date.now().toString(),
+                targetId: currentCallTargetId,
+                type: (callAppSeconds > 0 || isRejected === true) ? 'out' : 'missed',
+                timestamp: Date.now() - (callAppSeconds * 1000),
+                duration: callAppSeconds,
+                content: contentStr
+            });
+            ChatDB.setItem(`call_history_${currentLoginId}`, JSON.stringify(history));
+            
+            if (callAppSeconds > 0) {
+                let balance = parseFloat(ChatDB.getItem(`call_balance_${currentLoginId}`) || '0');
+                balance = Math.max(0, balance - (callAppSeconds * 0.01));
+                ChatDB.setItem(`call_balance_${currentLoginId}`, balance.toFixed(2));
+                if (document.getElementById('call-page-service').classList.contains('active')) {
+                    renderCallServicePage();
+                }
+            }
+
+            renderCallRecents();
+            if (document.getElementById('callContactPage').classList.contains('show')) {
+                renderCallContactHistory(currentCallTargetId);
+            }
+        }
+
+        callCurrentNumber = '';
+        callUpdateDisplay();
+        currentCallTargetId = null;
+        currentCallTranscript = []; 
+        callConnectedAt = null;
+        saveActiveCallState();
+        updateCallStatusUI(false);
+    }, 1000);
+}
+
+// --- 联系人主页逻辑 (Contact Detail) ---
+let currentContactDetailId = null;
+
+function openCallContactDetail(charId) {
+    currentContactDetailId = charId;
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    
+    let allEntities = getAllEntities();
+    const char = allEntities.find(e => e.id === charId);
+    if (!char) return;
+
+    let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+    const displayName = remarks[char.id] || char.netName || char.name;
+
+    document.getElementById('callContactName').innerText = displayName;
+    document.getElementById('callContactNumber').innerText = char.account || '未知号码';
+    
+    const avatarEl = document.getElementById('callContactAvatar');
+    if (char.avatarUrl) {
+        avatarEl.style.backgroundImage = `url('${char.avatarUrl}')`;
+        avatarEl.innerText = '';
+    } else {
+        avatarEl.style.backgroundImage = 'none';
+        avatarEl.innerText = displayName.charAt(0);
+    }
+
+    renderCallContactHistory(charId);
+    document.getElementById('callContactPage').classList.add('show');
+}
+
+function closeCallContactDetail() {
+    document.getElementById('callContactPage').classList.remove('show');
+}
+
+function callStartCallFromContact() {
+    if (currentContactDetailId) {
+        callStartCall(currentContactDetailId);
+    }
+}
+
+function jumpToSmsFromCall() {
+    if (!currentContactDetailId) return;
+    const charId = currentContactDetailId;
+    let allEntities = typeof getAllEntities === 'function' ? getAllEntities() : [];
+    const char = allEntities.find(e => e.id === charId);
+    if (!char) return;
+    
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+    const displayName = remarks[char.id] || char.netName || char.name;
+    
+    closeCallContactDetail();
+    closeCallAppPanel();
+    
+    if (typeof openSmsApp === 'function') {
+        openSmsApp();
+        openSmsChat(char.id, displayName, char.avatarUrl, '#111', displayName.charAt(0));
+    }
+}
+
+// --- 10086 余额不足提醒 ---
+function send10086Reminder(accountId) {
+    let history = JSON.parse(ChatDB.getItem(`sms_history_${accountId}_10086`) || '[]');
+    
+    if (history.length > 0) {
+        const lastMsg = history[history.length - 1];
+        if (Date.now() - lastMsg.timestamp < 60000) return; // 1分钟内不重复提醒
+    }
+
+    const reminderMsg = {
+        role: 'char',
+        type: 'text',
+        content: '【余额不足提醒】尊敬的客户，您的话费余额已不足，为避免影响您的正常通信，请及时充值。',
+        senderName: '10086',
+        timestamp: Date.now()
+    };
+
+    history.push(reminderMsg);
+    ChatDB.setItem(`sms_history_${accountId}_10086`, JSON.stringify(history));
+
+    let smsSessions = JSON.parse(ChatDB.getItem(`sms_sessions_${accountId}`) || '[]');
+    smsSessions = smsSessions.filter(id => id !== '10086');
+    smsSessions.unshift('10086');
+    ChatDB.setItem(`sms_sessions_${accountId}`, JSON.stringify(smsSessions));
+
+    if (typeof renderSmsList === 'function') renderSmsList();
+    if (typeof currentSmsTargetId !== 'undefined' && currentSmsTargetId === '10086') {
+        if (typeof renderSmsHistory === 'function') renderSmsHistory();
+    }
+}
+// 独立出的接通逻辑
+function acceptCallConnection() {
+    if (document.getElementById('callCallingScreen').classList.contains('show') || document.getElementById('callMiniWindow').classList.contains('show')) {
+        document.getElementById('callDialingControls').style.display = 'none';
+        document.getElementById('callActiveControls').style.display = 'flex';
+        
+        callAppSeconds = 0;
+        callConnectedAt = Date.now();
+        saveActiveCallState();
+        document.getElementById('callCallingStatusText').innerText = '00:00';
+        document.getElementById('callMiniTime').innerText = '00:00';
+        callAppTimer = setInterval(() => {
+            callAppSeconds = Math.floor((Date.now() - callConnectedAt) / 1000); // 基于时间戳计算
+            const m = String(Math.floor(callAppSeconds / 60)).padStart(2, '0');
+            const s = String(callAppSeconds % 60).padStart(2, '0');
+            const timeStr = `${m}:${s}`;
+            document.getElementById('callCallingStatusText').innerText = timeStr;
+            document.getElementById('callMiniTime').innerText = timeStr;
+        }, 1000);
+    }
+}
+
+// AI 判定是否接听电话
+async function checkCallAcceptanceAPI(char) {
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        callWaitTimer = setTimeout(acceptCallConnection, 2000); // 没配API默认接通
+        return;
+    }
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    let personas = JSON.parse(ChatDB.getItem('chat_personas') || '[]');
+    const persona = personas.find(p => p.id === (account ? account.personaId : null));
+
+    const userRealName = persona ? (persona.realName || '未命名') : 'User';
+    const userNetName = account ? (account.netName || '未命名') : 'User';
+    const userPersona = persona ? (persona.persona || '无') : '无';
+
+    let chatHistory = JSON.parse(ChatDB.getItem(`chat_history_${currentLoginId}_${char.id}`) || '[]');
+    let recentChat = chatHistory.slice(-10).map(m => `${m.role === 'user' ? 'User' : 'You'}: ${m.content}`).join('\n');
+
+    let prompt = `你正在扮演角色：${char.name}。你的设定：${char.description || '无'}。\n`;
+    prompt += `【用户情报】：用户的真名是“${userRealName}”，网名是“${userNetName}”。用户的设定是：${userPersona}。\n`;
+    prompt += `【最近聊天记录】：\n${recentChat || '无'}\n\n`;
+    prompt += `现在，用户（${userRealName}）正在给你拨打语音电话。\n`;
+    prompt += `请根据你的人设、当前的时间、以及你们最近的聊天记录，决定是否接听这个电话。\n`;
+    prompt += `必须且只能返回一个 JSON 对象，格式如下：\n`;
+    prompt += `{"action": "accept"} 或者 {"action": "reject"}\n`;
+    prompt += `如果你正在生气、睡觉、或者人设是高冷不爱接电话，可以选择 reject 挂断。否则通常选择 accept 接听。`;
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.5
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            let replyRaw = data.choices[0].message.content.trim();
+            replyRaw = replyRaw.replace(/^```json/i, '').replace(/^```/i, '').replace(/```$/i, '').trim();
+            
+            let parsed = { action: 'accept' };
+            try { parsed = JSON.parse(replyRaw); } catch(e) {}
+
+            if (parsed.action === 'reject') {
+                document.getElementById('callCallingStatusText').innerText = '对方已拒绝';
+                document.getElementById('callMiniTime').innerText = '已拒绝';
+                setTimeout(() => {
+                    callEndCall(true); // 传入 true 代表被对方挂断
+                }, 1500);
+            } else {
+                acceptCallConnection();
+            }
+        } else {
+            acceptCallConnection();
+        }
+    } catch (e) {
+        console.error(e);
+        acceptCallConnection();
+    }
+}
+
+let isCallContactHistoryEditing = false;
+let selectedCallContactRecords = new Set();
+
+function toggleCallContactHistoryEditMode() {
+    isCallContactHistoryEditing = !isCallContactHistoryEditing;
+    selectedCallContactRecords.clear();
+    
+    const editBtn = document.getElementById('callContactHistoryEditBtn');
+    const actionBar = document.getElementById('callContactMultiActionBar');
+    
+    if (isCallContactHistoryEditing) {
+        editBtn.innerText = '取消';
+        editBtn.style.color = '#888';
+        actionBar.classList.add('show');
+    } else {
+        editBtn.innerText = '编辑';
+        editBtn.style.color = '#007aff';
+        actionBar.classList.remove('show');
+    }
+    if (currentContactDetailId) {
+        renderCallContactHistory(currentContactDetailId);
+    }
+}
+
+function toggleCallContactRecordSelection(id) {
+    if (selectedCallContactRecords.has(id)) {
+        selectedCallContactRecords.delete(id);
+    } else {
+        selectedCallContactRecords.add(id);
+    }
+    const checkbox = document.getElementById(`call-contact-checkbox-${id}`);
+    if (checkbox) {
+        if (selectedCallContactRecords.has(id)) {
+            checkbox.classList.add('checked');
+        } else {
+            checkbox.classList.remove('checked');
+        }
+    }
+}
+
+function selectAllCallContactRecords() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let history = JSON.parse(ChatDB.getItem(`call_history_${currentLoginId}`) || '[]');
+    let contactHistory = history.filter(r => r.targetId === currentContactDetailId);
+    
+    if (selectedCallContactRecords.size === contactHistory.length) {
+        selectedCallContactRecords.clear();
+        document.getElementById('callContactSelectAllText').innerText = '全选';
+    } else {
+        contactHistory.forEach(r => selectedCallContactRecords.add(r.id));
+        document.getElementById('callContactSelectAllText').innerText = '取消全选';
+    }
+    renderCallContactHistory(currentContactDetailId);
+}
+
+function deleteSelectedCallContactRecords() {
+    if (selectedCallContactRecords.size === 0) {
+        return alert('请先选择要删除的通话记录');
+    }
+    if (confirm(`确定要删除选中的 ${selectedCallContactRecords.size} 条记录吗？此操作不可恢复。`)) {
+        const currentLoginId = ChatDB.getItem('current_login_account');
+        let history = JSON.parse(ChatDB.getItem(`call_history_${currentLoginId}`) || '[]');
+        
+        history = history.filter(r => !selectedCallContactRecords.has(r.id));
+        ChatDB.setItem(`call_history_${currentLoginId}`, JSON.stringify(history));
+        
+        toggleCallContactHistoryEditMode();
+        renderCallRecents();
+    }
+}
+
+function renderCallContactHistory(charId) {
+    const listEl = document.getElementById('callContactHistoryList');
+    listEl.innerHTML = '';
+    
+    if (isCallContactHistoryEditing) {
+        listEl.classList.add('is-call-editing');
+    } else {
+        listEl.classList.remove('is-call-editing');
+    }
+    
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let history = JSON.parse(ChatDB.getItem(`call_history_${currentLoginId}`) || '[]');
+    
+    let contactHistory = history.filter(r => r.targetId === charId);
+
+    if (contactHistory.length === 0) {
+        listEl.innerHTML = '<div style="text-align: center; color: #aaa; font-size: 13px; padding: 10px 0;">暂无通话记录</div>';
+        return;
+    }
+
+    let allEntities = getAllEntities();
+    let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+    const targetEntity = allEntities.find(e => e.id === charId);
+    const displayName = targetEntity ? (remarks[targetEntity.id] || targetEntity.netName || targetEntity.name) : '未知号码';
+    const phone = targetEntity ? (targetEntity.account || '未知') : charId;
+    const avatarUrl = targetEntity ? targetEntity.avatarUrl : '';
+
+    contactHistory.slice().reverse().forEach(record => {
+        const timeStr = formatCallTime(record.timestamp);
+        const isMissed = record.type === 'missed';
+        let typeStr = '呼出通话';
+        if (record.type === 'in') typeStr = '呼入通话';
+        if (record.type === 'missed') typeStr = '未接来电';
+
+        const item = document.createElement('div');
+        item.className = 'call-contact-history-item';
+        
+        item.onclick = () => {
+            if (isCallContactHistoryEditing) {
+                toggleCallContactRecordSelection(record.id);
+            } else {
+                openCallDetail(record, displayName, phone, avatarUrl);
+            }
+        };
+        
+        const isChecked = selectedCallContactRecords.has(record.id);
+        let checkboxHtml = isCallContactHistoryEditing ? `<div class="call-record-checkbox ${isChecked ? 'checked' : ''}" id="call-contact-checkbox-${record.id}" style="display:flex; margin-right:10px;"></div>` : '';
+
+        item.innerHTML = `
+            ${checkboxHtml}
+            <div style="flex:1; display:flex; justify-content:space-between; align-items:center;">
+                <div class="call-contact-history-time">${timeStr}</div>
+                <div class="call-contact-history-desc ${isMissed ? 'missed' : ''}">${typeStr}</div>
+            </div>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+// --- 通话记录详情页逻辑 (Call Detail) ---
+function openCallDetail(record, name, number, avatarUrl) {
+    document.getElementById('callDetailName').innerText = name;
+    
+    const avatarEl = document.getElementById('callDetailAvatar');
+    if (avatarUrl) {
+        avatarEl.style.backgroundImage = `url('${avatarUrl}')`;
+        avatarEl.innerText = '';
+    } else {
+        avatarEl.style.backgroundImage = 'none';
+        avatarEl.innerText = name.charAt(0);
+    }
+
+    const date = new Date(record.timestamp);
+    const fullTimeStr = `${date.getFullYear()}年${date.getMonth()+1}月${date.getDate()}日 ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+    document.getElementById('callDetailTime').innerText = fullTimeStr;
+
+    let typeStr = '呼出通话';
+    if (record.type === 'in') typeStr = '呼入通话';
+    if (record.type === 'missed') typeStr = '未接来电';
+    
+    const typeEl = document.getElementById('callDetailType');
+    typeEl.innerText = typeStr;
+    if (record.type === 'missed') typeEl.classList.add('missed');
+    else typeEl.classList.remove('missed');
+
+    document.getElementById('callDetailDuration').innerText = formatDuration(record.duration);
+    
+    // 渲染通话内容
+    document.getElementById('callDetailContentText').innerText = record.content || '无通话内容记录。';
+
+    // 绑定复制按钮
+    const copyBtn = document.getElementById('callDetailCopyBtn');
+    if (copyBtn) {
+        copyBtn.onclick = () => {
+            if (record.content && record.content !== '无通话内容记录。') {
+                copyTextToClipboard(record.content);
+            } else {
+                alert('暂无内容可复制');
+            }
+        };
+    }
+
+    // 绑定总结按钮
+    const summaryBtn = document.getElementById('callDetailSummaryBtn');
+    if (summaryBtn) {
+        summaryBtn.onclick = () => {
+            handleCallDetailSummary(record);
+        };
+    }
+
+    document.getElementById('callDetailPage').classList.add('show');
+}
+
+function closeCallDetail() {
+    document.getElementById('callDetailPage').classList.remove('show');
+}
+
+// --- 营业厅逻辑 ---
+function renderCallServicePage() {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return;
+
+    let allEntities = getAllEntities();
+    const acc = allEntities.find(a => a.id === currentLoginId);
+    if (!acc) return;
+
+    document.getElementById('callServiceName').innerText = acc.netName || acc.name;
+    document.getElementById('callServicePhone').innerText = acc.account || '未绑定手机号';
+    
+    let balance = parseFloat(ChatDB.getItem(`call_balance_${currentLoginId}`) || '0');
+    document.getElementById('callServiceBalance').innerText = balance.toFixed(2);
+
+    const avatarEl = document.getElementById('callServiceAvatar');
+    if (acc.avatarUrl) {
+        avatarEl.style.backgroundImage = `url('${acc.avatarUrl}')`;
+        avatarEl.innerText = '';
+    } else {
+        avatarEl.style.backgroundImage = 'none';
+        avatarEl.innerText = (acc.netName || acc.name).charAt(0);
+    }
+}
+
+function callRecharge(amount) {
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return alert('请先登录！');
+    
+    if (typeof pendingTransferAmount !== 'undefined') {
+        pendingTransferAmount = amount;
+    }
+    
+    if (typeof openPaymentPanel === 'function') {
+        openPaymentPanel(amount, '话费充值', () => {
+            let balance = parseFloat(ChatDB.getItem(`call_balance_${currentLoginId}`) || '0');
+            balance += amount;
+            ChatDB.setItem(`call_balance_${currentLoginId}`, balance.toFixed(2));
+            
+            renderCallServicePage();
+            alert(`成功充值 ${amount} 元！`);
+        });
+    } else {
+        let balance = parseFloat(ChatDB.getItem(`call_balance_${currentLoginId}`) || '0');
+        balance += amount;
+        ChatDB.setItem(`call_balance_${currentLoginId}`, balance.toFixed(2));
+        
+        renderCallServicePage();
+        alert(`成功充值 ${amount} 元！`);
+    }
+}
+
+function callCustomRecharge() {
+    const amountStr = prompt('请输入充值金额：');
+    const amount = parseFloat(amountStr);
+    if (!isNaN(amount) && amount > 0) {
+        callRecharge(amount);
+    } else if (amountStr !== null) {
+        alert('请输入有效的金额！');
+    }
+}
+
+// --- 切换账号弹窗逻辑 ---
+function openCallAccountModal() {
+    const listEl = document.getElementById('callAccountList');
+    listEl.innerHTML = '';
+
+    let allEntities = getAllEntities();
+    const currentLoginId = ChatDB.getItem('current_login_account');
+
+    let validAccounts = allEntities.filter(e => e.isAccount);
+
+    validAccounts.forEach(acc => {
+        const isActive = acc.id === currentLoginId;
+        const item = document.createElement('div');
+        item.className = `call-account-item ${isActive ? 'active' : ''}`;
+        
+        let avatarHtml = acc.avatarUrl 
+            ? `<div class="call-account-item-avatar" style="background-image: url('${acc.avatarUrl}')"></div>`
+            : `<div class="call-account-item-avatar" style="display:flex; justify-content:center; align-items:center; color:#fff; font-weight:bold;">${(acc.netName || acc.name).charAt(0)}</div>`;
+
+        item.innerHTML = `
+            ${avatarHtml}
+            <div class="call-account-item-info">
+                <div class="call-account-item-name">${acc.netName || acc.name}</div>
+                <div class="call-account-item-phone">${acc.account}</div>
+            </div>
+            ${isActive ? '<svg viewBox="0 0 24 24" width="20" height="20" stroke="#111" stroke-width="2" fill="none"><polyline points="20 6 9 17 4 12"></polyline></svg>' : ''}
+        `;
+
+        item.onclick = () => {
+            // 核心修复：全局切换账号并持久化
+            ChatDB.setItem('current_login_account', acc.id);
+            renderCallServicePage();
+            renderCallRecents();
+            renderCallContacts();
+            closeCallAccountModal();
+            
+            // 同步刷新微信那边的数据，防止割裂
+            if (typeof renderMePage === 'function') renderMePage();
+            if (typeof renderChatList === 'function') renderChatList();
+            if (typeof renderContactList === 'function') renderContactList();
+        };
+
+        listEl.appendChild(item);
+    });
+
+    document.getElementById('callAccountModalOverlay').classList.add('show');
+}
+
+function closeCallAccountModal() {
+    document.getElementById('callAccountModalOverlay').classList.remove('show');
+}
+
+// --- 悬浮小窗拖拽逻辑 ---
+document.addEventListener('DOMContentLoaded', () => {
+    const miniWindow = document.getElementById('callMiniWindow');
+    if (!miniWindow) return;
+
+    let isDragging = false;
+    let startX, startY, initialX, initialY;
+    let hasMoved = false;
+
+    const startDrag = (e) => {
+        isDragging = true;
+        hasMoved = false;
+        startX = e.type.includes('mouse') ? e.clientX : e.touches[0].clientX;
+        startY = e.type.includes('mouse') ? e.clientY : e.touches[0].clientY;
+        
+        const rect = miniWindow.getBoundingClientRect();
+        initialX = rect.left;
+        initialY = rect.top;
+        
+        miniWindow.style.transition = 'none'; // 拖拽时取消动画
+    };
+
+    const doDrag = (e) => {
+        if (!isDragging) return;
+        const currentX = e.type.includes('mouse') ? e.clientX : e.touches[0].clientX;
+        const currentY = e.type.includes('mouse') ? e.clientY : e.touches[0].clientY;
+        
+        const dx = currentX - startX;
+        const dy = currentY - startY;
+        
+        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+            hasMoved = true;
+            e.preventDefault(); // 防止屏幕滚动
+        }
+
+        miniWindow.style.left = `${initialX + dx}px`;
+        miniWindow.style.top = `${initialY + dy}px`;
+        miniWindow.style.right = 'auto'; // 清除 right 定位
+    };
+
+    const endDrag = (e) => {
+        if (!isDragging) return;
+        isDragging = false;
+        miniWindow.style.transition = 'transform 0.2s'; // 恢复动画
+        
+        // 如果没有移动，说明是点击事件，触发恢复全屏
+        if (!hasMoved) {
+            // 恢复全屏时，确保 Call APP 面板也被打开
+            document.getElementById('callAppPanel').style.display = 'flex';
+            toggleCallMiniWindow(false);
+        }
+    };
+
+    miniWindow.addEventListener('touchstart', startDrag, { passive: false });
+    document.addEventListener('touchmove', doDrag, { passive: false });
+    document.addEventListener('touchend', endDrag);
+
+    miniWindow.addEventListener('mousedown', startDrag);
+    document.addEventListener('mousemove', doDrag);
+    document.addEventListener('mouseup', endDrag);
+});
+// --- 页面加载时恢复通话状态 ---
+window.addEventListener('ChatDBReady', () => {
+    const stateStr = ChatDB.getItem('active_call_state');
+    if (stateStr) {
+        try {
+            const state = JSON.parse(stateStr);
+            if (state && state.targetId) {
+                currentCallTargetId = state.targetId;
+                currentCallTranscript = state.transcript || [];
+                callConnectedAt = state.connectedAt;
+                
+                let allEntities = getAllEntities();
+                const targetEntity = allEntities.find(e => e.id === currentCallTargetId);
+                let name = currentCallTargetId;
+                let avatarUrl = '';
+                if (targetEntity) {
+                    const currentLoginId = ChatDB.getItem('current_login_account');
+                    let remarks = JSON.parse(ChatDB.getItem(`char_remarks_${currentLoginId}`) || '{}');
+                    name = remarks[targetEntity.id] || targetEntity.netName || targetEntity.name;
+                    avatarUrl = targetEntity.avatarUrl;
+                }
+
+                document.getElementById('callCallingTargetName').innerText = name;
+                const avatarEl = document.getElementById('callCallingTargetAvatar');
+                const miniAvatarEl = document.getElementById('callMiniAvatar');
+                if (avatarUrl) {
+                    avatarEl.style.backgroundImage = `url('${avatarUrl}')`;
+                    avatarEl.innerText = '';
+                    miniAvatarEl.style.backgroundImage = `url('${avatarUrl}')`;
+                } else {
+                    avatarEl.style.backgroundImage = 'none';
+                    avatarEl.innerText = name.charAt(0);
+                    miniAvatarEl.style.backgroundImage = 'none';
+                }
+
+                if (state.status === 'connected' && callConnectedAt) {
+                    callAppSeconds = Math.floor((Date.now() - callConnectedAt) / 1000);
+                    document.getElementById('callDialingControls').style.display = 'none';
+                    document.getElementById('callActiveControls').style.display = 'flex';
+                    
+                    clearInterval(callAppTimer);
+                    callAppTimer = setInterval(() => {
+                        callAppSeconds = Math.floor((Date.now() - callConnectedAt) / 1000); // 基于时间戳计算
+                        const m = String(Math.floor(callAppSeconds / 60)).padStart(2, '0');
+                        const s = String(callAppSeconds % 60).padStart(2, '0');
+                        const timeStr = `${m}:${s}`;
+                        document.getElementById('callCallingStatusText').innerText = timeStr;
+                        document.getElementById('callMiniTime').innerText = timeStr;
+                    }, 1000);
+                } else {
+                    document.getElementById('callCallingStatusText').innerText = '正在呼叫...';
+                    document.getElementById('callMiniTime').innerText = '正在呼叫...';
+                    document.getElementById('callDialingControls').style.display = 'flex';
+                    document.getElementById('callActiveControls').style.display = 'none';
+                }
+
+                renderCallTranscript();
+                
+                // 恢复为悬浮小窗模式
+                document.getElementById('callCallingScreen').classList.remove('show');
+                const miniWindow = document.getElementById('callMiniWindow');
+                miniWindow.classList.add('show');
+                document.getElementById('iphone-container').appendChild(miniWindow);
+            }
+        } catch(e) {
+            console.error('恢复通话状态失败', e);
+        }
+    }
+});
+
+// --- 自动总结通话记录并存入记忆库 ---
+async function autoSummarizeCallToMemory(userId, charId, transcript) {
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) return;
+
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === userId);
+    const personaId = account ? account.personaId : userId;
+
+    const prompt = `请根据以下语音通话记录，用第三人称简短总结一下通话内容和发生的重要事件。只输出总结文本，不要任何多余的解释。\n\n【通话记录】：\n${transcript}`;
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.5
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            const summaryText = data.choices[0].message.content.trim();
+            
+            let memory = JSON.parse(ChatDB.getItem(`char_memory_${personaId}_${charId}`) || 'null');
+            if (!memory) {
+                memory = { summary: [], core: [], note: [], settings: {} };
+            }
+            
+            // 获取当前时间作为时间轴
+            const now = new Date();
+            const timeStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+            
+            const finalSummary = `[${timeStr} 语音通话总结]\n${summaryText}`;
+            
+            if (!memory.summary) memory.summary = [];
+            // 核心修复：统一使用 push 追加到末尾，保证时间线顺序正确
+            memory.summary.push({ id: Date.now().toString(), content: finalSummary, weight: 5 });
+            
+            ChatDB.setItem(`char_memory_${personaId}_${charId}`, JSON.stringify(memory));
+        }
+    } catch (e) {
+        console.error('自动总结通话记录失败:', e);
+    }
+}
+
+// --- 手动总结/查看通话记录记忆 ---
+function closeCallSummaryModal() {
+    document.getElementById('callSummaryModalOverlay').classList.remove('show');
+}
+
+async function handleCallDetailSummary(record) {
+    if (!record.content || record.content === '无通话内容记录。' || record.content === '未接听' || record.content === '对方已拒绝接听。') {
+        if (typeof showToast === 'function') showToast('没有有效的通话内容', 'error', 2000);
+        return;
+    }
+
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    if (!currentLoginId) return;
+
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    const personaId = account ? account.personaId : currentLoginId;
+    const charId = record.targetId;
+
+    // 1. 检查记忆库中是否已经存在该时间点的总结
+    let memory = JSON.parse(ChatDB.getItem(`char_memory_${personaId}_${charId}`) || 'null');
+    const date = new Date(record.timestamp);
+    const timeStr = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')} ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+    
+    let existingSummary = null;
+    if (memory && memory.summary) {
+        existingSummary = memory.summary.find(m => m.content.includes(`[${timeStr} 语音通话总结]`));
+    }
+
+    const modalOverlay = document.getElementById('callSummaryModalOverlay');
+    const titleEl = document.getElementById('callSummaryModalTitle');
+    const contentEl = document.getElementById('callSummaryModalContent');
+    const actionsEl = document.getElementById('callSummaryModalActions');
+
+    if (existingSummary) {
+        // 已经存在，直接展示 ins 风弹窗
+        titleEl.innerText = '通话记忆';
+        contentEl.innerText = existingSummary.content;
+        actionsEl.innerHTML = `<button class="ins-btn accept" style="width: 100%;" onclick="closeCallSummaryModal()">关闭</button>`;
+        modalOverlay.classList.add('show');
+    } else {
+        // 不存在，询问是否生成
+        titleEl.innerText = '暂无总结';
+        contentEl.innerText = '当前通话尚未生成记忆总结，是否立即生成？';
+        actionsEl.innerHTML = `
+            <button class="ins-btn reject" onclick="closeCallSummaryModal()">取消</button>
+            <button class="ins-btn accept" onclick="executeCallDetailSummary('${encodeURIComponent(JSON.stringify(record))}')">确认总结</button>
+        `;
+        modalOverlay.classList.add('show');
+    }
+}
+
+async function executeCallDetailSummary(encodedRecord) {
+    const record = JSON.parse(decodeURIComponent(encodedRecord));
+    const currentLoginId = ChatDB.getItem('current_login_account');
+    let accounts = JSON.parse(ChatDB.getItem('chat_accounts') || '[]');
+    const account = accounts.find(a => a.id === currentLoginId);
+    const personaId = account ? account.personaId : currentLoginId;
+    const charId = record.targetId;
+
+    const apiConfig = JSON.parse(ChatDB.getItem('current_api_config') || '{}');
+    if (!apiConfig.url || !apiConfig.key || !apiConfig.model) {
+        if (typeof showToast === 'function') showToast('请先配置 API', 'error', 2000);
+        return;
+    }
+
+    // 关闭询问弹窗，显示 iOS 风格系统提示
+    closeCallSummaryModal();
+    if (typeof showToast === 'function') showToast('正在总结...', 'loading');
+
+    const prompt = `请根据以下语音通话记录，用第三人称简短总结一下通话内容和发生的重要事件。只输出总结文本，不要任何多余的解释。\n\n【通话记录】：\n${record.content}`;
+
+    try {
+        const response = await fetch(`${apiConfig.url.replace(/\/$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.key}` },
+            body: JSON.stringify({
+                model: apiConfig.model,
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.5
+            })
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            const summaryText = data.choices[0].message.content.trim();
+            
+            let memory = JSON.parse(ChatDB.getItem(`char_memory_${personaId}_${charId}`) || 'null');
+            if (!memory) {
+                memory = { summary: [], core: [], note: [], settings: {} };
+            }
+            
+            const date = new Date(record.timestamp);
+            const timeStr = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')} ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+            
+            const finalSummary = `[${timeStr} 语音通话总结]\n${summaryText}`;
+            
+            if (!memory.summary) memory.summary = [];
+            memory.summary.push({ id: Date.now().toString(), content: finalSummary, weight: 5 });
+            
+            ChatDB.setItem(`char_memory_${personaId}_${charId}`, JSON.stringify(memory));
+            
+            if (typeof hideToast === 'function') hideToast();
+            
+            // 重新打开弹窗显示结果
+            const modalOverlay = document.getElementById('callSummaryModalOverlay');
+            document.getElementById('callSummaryModalTitle').innerText = '总结成功';
+            document.getElementById('callSummaryModalContent').innerText = finalSummary;
+            document.getElementById('callSummaryModalActions').innerHTML = `<button class="ins-btn accept" style="width: 100%;" onclick="closeCallSummaryModal()">关闭</button>`;
+            modalOverlay.classList.add('show');
+
+        } else {
+            if (typeof hideToast === 'function') hideToast();
+            if (typeof showToast === 'function') showToast('总结失败', 'error', 2000);
+        }
+    } catch (e) {
+        console.error('手动总结通话记录失败:', e);
+        if (typeof hideToast === 'function') hideToast();
+        if (typeof showToast === 'function') showToast('网络异常', 'error', 2000);
+    }
+}
